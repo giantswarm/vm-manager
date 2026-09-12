@@ -2,9 +2,10 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
+	"github.com/giantswarm/vm-manager/internal/apierr"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -21,8 +22,11 @@ const (
 	DefaultNetwork = "default"
 	// DefaultConsoleLines is how many lines get_vm_console returns.
 	DefaultConsoleLines = 100
-	// MetricsNote tells callers what get_vm_metrics carries in this release.
-	MetricsNote = "report is the guest's last systemd-report upload (null until the guest sent one); host-side CPU, memory and I/O metrics land in a later release"
+	// MetricsNote is set on get_vm_metrics while the guest has not uploaded
+	// a report, MetricsUnparsedNote when the last upload is not a
+	// systemd-report.
+	MetricsNote         = "no systemd-report upload from the guest yet; host metrics only"
+	MetricsUnparsedNote = "the guest's last upload is not a systemd-report and was not exported; see raw_report_url"
 )
 
 // The request bodies below are shared by both surfaces: the MCP tools bind
@@ -114,12 +118,15 @@ type ConsoleResponse struct {
 	Console string `json:"console"`
 }
 
-// MetricsResponse is the body of get_vm_metrics / GET /vms/{id}/metrics.
+// MetricsResponse is the body of get_vm_metrics / GET /vms/{id}/metrics:
+// the host's view of the VM and a summary of the guest's last report.
 type MetricsResponse struct {
 	ID string `json:"id"`
-	// Report is the guest's last systemd-report upload, null when none.
-	Report json.RawMessage `json:"report"`
-	Note   string          `json:"note"`
+	metrics.VMMetrics
+	// RawReportURL serves the guest's last upload in full (REST only, it is
+	// too large for a tool result); Note explains a missing guest section.
+	RawReportURL string `json:"raw_report_url,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 // ForwardResponse is the body of forward_port / POST /vms/{id}/forward.
@@ -167,16 +174,36 @@ func (s Services) metrics(id string) (MetricsResponse, error) {
 	if err != nil {
 		return MetricsResponse{}, err
 	}
-	res := MetricsResponse{ID: id, Note: MetricsNote}
+	m, ok := s.Metrics.VM(id)
+	if !ok {
+		return MetricsResponse{}, fmt.Errorf("%w: vm %q", apierr.ErrNotFound, id)
+	}
+	res := MetricsResponse{ID: id, VMMetrics: m}
 	switch {
-	case len(report) == 0:
-	case json.Valid(report):
-		res.Report = report
+	case len(report) > 0:
+		res.RawReportURL = reportPath(id)
+		if m.Guest == nil {
+			res.Note = MetricsUnparsedNote
+		}
 	default:
-		// The sink stores what the guest sent; keep a non-JSON upload readable.
-		res.Report, _ = json.Marshal(string(report))
+		res.Note = MetricsNote
 	}
 	return res, nil
+}
+
+// reportPath is the REST route of the raw report.
+func reportPath(id string) string { return Prefix + "/vms/" + id + "/report" }
+
+// report returns the guest's last upload; apierr.ErrNotFound when none.
+func (s Services) report(id string) ([]byte, error) {
+	report, err := s.VM.Report(id)
+	if err != nil {
+		return nil, err
+	}
+	if len(report) == 0 {
+		return nil, fmt.Errorf("%w: vm %q has no systemd-report upload yet", apierr.ErrNotFound, id)
+	}
+	return report, nil
 }
 
 func (s Services) forward(ctx context.Context, id string, port int) (ForwardResponse, error) {

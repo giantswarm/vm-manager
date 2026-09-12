@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -34,14 +35,16 @@ func TestServeWiring(t *testing.T) {
 	require.NoError(t, ln.Close())
 
 	o := &serveOptions{
-		listen:         addr,
-		mcpPath:        "/mcp",
-		stateDir:       stateDir,
-		networkSubnet:  "192.168.221.0/24",
-		defaultNetwork: "default",
-		installTimeout: vm.DefaultInstallTimeout,
-		bootTimeout:    vm.DefaultBootTimeout,
-		stopTimeout:    2 * time.Second,
+		listen:                  addr,
+		mcpPath:                 "/mcp",
+		stateDir:                stateDir,
+		networkSubnet:           "192.168.221.0/24",
+		defaultNetwork:          "default",
+		installTimeout:          vm.DefaultInstallTimeout,
+		bootTimeout:             vm.DefaultBootTimeout,
+		stopTimeout:             2 * time.Second,
+		metricsEnabled:          true,
+		metricsGuestSeriesLimit: metrics.DefaultMaxGuestSeries,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -71,6 +74,14 @@ func TestServeWiring(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.JSONEq(t, "[]", string(body), "an empty image dir is a warning, not an error")
 	assert.DirExists(t, filepath.Join(stateDir, imagesSubdir), "the default image dir is created")
+
+	resp, err = http.Get("http://" + addr + "/metrics")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `vm_manager_network_leases{network="default"} 0`, "the host collector scrapes the VM service")
+	assert.Contains(t, string(body), `vm_manager_vms{state="ready"} 0`)
 
 	cancel()
 	select {
@@ -115,4 +126,11 @@ func TestServeOptionsComplete(t *testing.T) {
 	o = base()
 	o.defaultNetwork = ""
 	assert.ErrorContains(t, o.complete(), "--default-network")
+
+	o = base()
+	require.NoError(t, o.complete())
+	assert.Equal(t, metrics.DefaultMaxGuestSeries, o.metricsGuestSeriesLimit, "an unset limit is the default")
+	o = base()
+	o.metricsGuestSeriesLimit = -1
+	assert.ErrorContains(t, o.complete(), "--metrics-guest-series-limit")
 }

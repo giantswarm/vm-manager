@@ -1,0 +1,756 @@
+{
+  "mediaType": "application/vnd.io.systemd.report",
+  "timestamp": "Sat 2026-09-12 14:17:48 UTC",
+  "metrics": [
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "initrd.target",
+      "value": 1789199899473434,
+      "fields": {
+        "event": "enter"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "initrd.target",
+      "value": 1789199899482588,
+      "fields": {
+        "event": "exit"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": 1789199901264210,
+      "fields": {
+        "event": "enter"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": 0,
+      "fields": {
+        "event": "exit"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": 1789199902048625,
+      "fields": {
+        "event": "enter"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": 0,
+      "fields": {
+        "event": "exit"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "systemd-bsod.service",
+      "value": 1789199872073819,
+      "fields": {
+        "event": "enter"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.ActiveTimestamp",
+      "object": "systemd-bsod.service",
+      "value": 1789199899483701,
+      "fields": {
+        "event": "exit"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "initrd.target",
+      "value": 1789199899473434
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": 1789199901264210
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": 1789199902048614
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "systemd-bsod.service",
+      "value": 1789199872073819
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "polkit.service",
+      "value": 1789199902127853
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "systemd-firstboot.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "man-db.timer",
+      "value": 1789199902046762
+    },
+    {
+      "name": "io.systemd.Manager.InactiveExitTimestamp",
+      "object": "wg-endpoint-refresh.service",
+      "value": 1789222664780814
+    },
+    {
+      "name": "io.systemd.Manager.JobsQueued",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "atop.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "accounts-daemon.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "systemd-pcrlogin@978.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "upower.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "systemd-pcrlogin@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "user@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "user-runtime-dir@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.NRestarts",
+      "object": "udisks2.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.ReloadCount",
+      "value": 2
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "initrd.target",
+      "value": 1789199899482588
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": 1789199901264210
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": 1789199902048625
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "systemd-bsod.service",
+      "value": 1789199899485348
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "polkit.service",
+      "value": 1789199902166532
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "systemd-firstboot.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "man-db.timer",
+      "value": 1789205964696296
+    },
+    {
+      "name": "io.systemd.Manager.StateChangeTimestamp",
+      "object": "wg-endpoint-refresh.service",
+      "value": 1789222664823115
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "atop.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "accounts-daemon.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "systemd-pcrlogin@978.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "upower.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "systemd-pcrlogin@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "user@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "user-runtime-dir@1000.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.StatusErrno",
+      "object": "udisks2.service",
+      "value": 0
+    },
+    {
+      "name": "io.systemd.Manager.SystemState",
+      "value": "running"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "initrd.target",
+      "value": "inactive"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": "active"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": "active"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "systemd-bsod.service",
+      "value": "inactive"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "polkit.service",
+      "value": "active"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "systemd-firstboot.service",
+      "value": "inactive"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "man-db.timer",
+      "value": "active"
+    },
+    {
+      "name": "io.systemd.Manager.UnitActiveState",
+      "object": "wg-endpoint-refresh.service",
+      "value": "inactive"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "initrd.target",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "sys-devices-virtual-dmi-id.device",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "keyboxd@etc-pacman.d-gnupg.socket",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "systemd-bsod.service",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "polkit.service",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "systemd-firstboot.service",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "man-db.timer",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitLoadState",
+      "object": "wg-endpoint-refresh.service",
+      "value": "loaded"
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 0,
+      "fields": {
+        "load_state": "stub"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 403,
+      "fields": {
+        "load_state": "loaded"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 11,
+      "fields": {
+        "load_state": "not-found"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 0,
+      "fields": {
+        "load_state": "bad-setting"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 0,
+      "fields": {
+        "load_state": "error"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 0,
+      "fields": {
+        "load_state": "merged"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+      "value": 0,
+      "fields": {
+        "load_state": "masked"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 303,
+      "fields": {
+        "state": "active"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "reloading"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 111,
+      "fields": {
+        "state": "inactive"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "failed"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "activating"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "deactivating"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "maintenance"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByStateTotal",
+      "value": 0,
+      "fields": {
+        "state": "refreshing"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 146,
+      "fields": {
+        "type": "service"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 22,
+      "fields": {
+        "type": "mount"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 1,
+      "fields": {
+        "type": "swap"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 46,
+      "fields": {
+        "type": "socket"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 60,
+      "fields": {
+        "type": "target"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 99,
+      "fields": {
+        "type": "device"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 1,
+      "fields": {
+        "type": "automount"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsByTypeTotal",
+      "value": 8,
+      "fields": {
+        "type": "timer"
+      }
+    },
+    {
+      "name": "io.systemd.Manager.UnitsTotal",
+      "value": 414
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "docker0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "br-2f5c7b46f765",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "tun0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "wlan0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "veth47a576d",
+      "value": "degraded"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "enp195s0f0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "wifibr0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.AddressState",
+      "object": "wg0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "docker0",
+      "value": "unmanaged"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "br-2f5c7b46f765",
+      "value": "unmanaged"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "tun0",
+      "value": "unmanaged"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "wlan0",
+      "value": "configured"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "veth47a576d",
+      "value": "unmanaged"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "enp195s0f0",
+      "value": "configuring"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "wifibr0",
+      "value": "configuring"
+    },
+    {
+      "name": "io.systemd.Network.AdministrativeState",
+      "object": "wg0",
+      "value": "configured"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "docker0",
+      "value": "degraded-carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "br-2f5c7b46f765",
+      "value": "carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "tun0",
+      "value": "carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "wlan0",
+      "value": "carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "veth47a576d",
+      "value": "enslaved"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "enp195s0f0",
+      "value": "no-carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "wifibr0",
+      "value": "no-carrier"
+    },
+    {
+      "name": "io.systemd.Network.CarrierState",
+      "object": "wg0",
+      "value": "carrier"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "docker0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "br-2f5c7b46f765",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "tun0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "wlan0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "veth47a576d",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "enp195s0f0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "wifibr0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.IPv4AddressState",
+      "object": "wg0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "docker0",
+      "value": "degraded"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "br-2f5c7b46f765",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "tun0",
+      "value": "degraded"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "wlan0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "veth47a576d",
+      "value": "degraded"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "enp195s0f0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "wifibr0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.IPv6AddressState",
+      "object": "wg0",
+      "value": "off"
+    },
+    {
+      "name": "io.systemd.Network.ManagedInterfaces",
+      "value": 5
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "docker0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "br-2f5c7b46f765",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "tun0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "wlan0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "veth47a576d",
+      "value": "enslaved"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "enp195s0f0",
+      "value": "no-carrier"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "wifibr0",
+      "value": "no-carrier"
+    },
+    {
+      "name": "io.systemd.Network.OperationalState",
+      "object": "wg0",
+      "value": "routable"
+    },
+    {
+      "name": "io.systemd.Network.RequiredForOnline",
+      "object": "wlan0",
+      "value": "degraded:routable"
+    },
+    {
+      "name": "io.systemd.Network.RequiredForOnline",
+      "object": "enp195s0f0",
+      "value": "degraded:routable"
+    },
+    {
+      "name": "io.systemd.Network.RequiredForOnline",
+      "object": "wifibr0",
+      "value": "degraded-carrier:routable"
+    },
+    {
+      "name": "io.systemd.Network.RequiredForOnline",
+      "object": "wg0",
+      "value": "degraded:routable"
+    },
+    {
+      "name": "io.systemd.Network.RequiredForOnline",
+      "object": "nspawn0",
+      "value": "degraded-carrier:routable"
+    }
+  ]
+}

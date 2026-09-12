@@ -29,7 +29,8 @@ stable `code`; MCP tool errors carry the same code.
 | List every VM record, oldest first | `GET /api/v1/vms` | `list_vms` | no |
 | Fetch one VM: state, IP, attestation, last error | `GET /api/v1/vms/{id}` | `get_vm` | no |
 | Tail of the serial console (`lines`, default 100) | `GET /api/v1/vms/{id}/console?lines=` | `get_vm_console` | no |
-| The guest's last `systemd-report` upload (host metrics: later release) | `GET /api/v1/vms/{id}/metrics` | `get_vm_metrics` | no |
+| Per-VM metrics: `host` (state, attestation, QEMU `cpu_seconds` and `memory_rss_bytes`, `disk_bytes`, `install_seconds`, `boot_to_ready_seconds`, the network's byte counters) and `guest` (summary of the last `systemd-report` upload, `null` until one arrived) | `GET /api/v1/vms/{id}/metrics` | `get_vm_metrics` | no |
+| The guest's last `systemd-report` upload in full (REST only: too large for a tool result) | `GET /api/v1/vms/{id}/report` | — | no |
 | The current boot's attestation verdicts | `GET /api/v1/vms/{id}/attestation` | `get_vm_attestation` | no |
 | Create a network (`name`, `cidr`, `dns_search_domain`); IMDS always on | `POST /api/v1/networks` | `create_network` | yes |
 | Delete a network; `conflict` while a VM is attached | `DELETE /api/v1/networks/{name}` | `delete_network` | yes, destructive |
@@ -82,6 +83,26 @@ Every flag has an environment fallback named in `vm-manager serve --help`
 `VM_MANAGER_NETWORK_SUBNET`, ...). State lives under `--state-dir`
 (`$XDG_STATE_HOME/vm-manager`, else `~/.local/state/vm-manager`), images under
 `--image-dir` (default `<state-dir>/images`); `/healthz` and `/readyz` are always open.
+
+## Metrics
+
+`GET /metrics` is the Prometheus exposition (`--metrics-enabled`, default on). It is
+served outside the OAuth guard like the probes, because scrapers do not run OAuth flows
+and the exposition holds no secrets; firewall the path or disable it when that is not
+acceptable. Host side, per VM: `vm_manager_vm_state{vm,name,state}` (1/0),
+`vm_manager_vm_attestation`, `vm_manager_vm_info`, `vm_manager_vm_install_seconds`,
+`vm_manager_vm_boot_to_ready_seconds` (plus `_duration_seconds` histograms),
+`vm_manager_vm_cpu_seconds_total` and `vm_manager_vm_memory_rss_bytes` of the QEMU process,
+`vm_manager_vm_disk_bytes`; per network `vm_manager_network_bytes_total{network,direction}`
+and `vm_manager_network_leases`; `vm_manager_vms{state}` and `vm_manager_build_info`.
+Guest side, every entry of the guest's last `systemd-report upload` becomes a series:
+`io.systemd.Manager.UnitActiveState` for `sshd.service` is
+`vm_guest_io_systemd_manager_unit_active_state_info{vm,object="sshd.service",value="active"} 1`,
+`io.systemd.Manager.NRestarts` is `vm_guest_io_systemd_manager_nrestarts_total{vm,object}`, the
+entry's `fields` are labels. Each upload replaces the previous one; at most
+`--metrics-guest-series-limit` series (default 1000) are kept per VM, the rest are counted in
+`vm_guest_report_series_dropped_total{vm,reason}`; `vm_guest_report_age_seconds` says how
+stale a guest's data is. `internal/metrics` documents the mapping and the cardinality policy.
 
 vm-manager runs on the KVM host itself (a laptop, a GitHub Actions runner, a bare-metal
 node), not in a pod: `GET /api/v1/host` tells you whether the host is ready and what is

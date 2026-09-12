@@ -73,8 +73,12 @@ host requirements.
   same code. `mcp_test.go` is the contract test: an mcp-go client over
   streamable HTTP against the assembled server.
 - `internal/server` — the single HTTP listener (`/healthz`, `/readyz`,
-  `/api/v1`, `/mcp`); with `--enable-oauth` the mcp-oauth resource server
-  (Dex or Google) in front of REST and MCP.
+  `/metrics`, `/api/v1`, `/mcp`); with `--enable-oauth` the mcp-oauth
+  resource server (Dex or Google) in front of REST and MCP; the probes and
+  `/metrics` stay open.
+- `internal/metrics` — the Prometheus registry: host metrics over the VM
+  service (`metrics.Source`) and the guests' `systemd-report` uploads
+  (`StoreReport`), plus the per-VM summary of `get_vm_metrics`.
 - `internal/identity` — the authenticated caller on the request context.
 - `internal/vm` — the VM service behind every VM and network tool: the
   lifecycle state machine (`creating` -> `installing` -> `booting` ->
@@ -184,6 +188,6 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   --oauth-trusted-audiences agent-platform --allow-private-oauth-urls --sso-allow-private-ips
 ```
 
-`/healthz`, `/readyz` and the OAuth metadata stay public; `/api/v1` and `/mcp`
+`/healthz`, `/readyz`, `/metrics` and the OAuth metadata stay public; `/api/v1` and `/mcp`
 require a bearer token: an id_token for a trusted audience (what muster
 forwards) or a token from this server's own OAuth flow.

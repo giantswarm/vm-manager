@@ -2,11 +2,13 @@ package vm
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/netip"
 	"time"
 
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/imds"
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
@@ -31,6 +33,8 @@ type Instance interface {
 	Stop(ctx context.Context) error
 	// Kill ends the process immediately.
 	Kill() error
+	// PID is the process id, what the metrics read /proc/<pid> for.
+	PID() int
 }
 
 // TPMManager starts swtpm processes (tpm.Manager through TPM).
@@ -67,6 +71,7 @@ type Network interface {
 	Spec() network.Spec
 	GatewayIP() netip.Addr
 	Leases() []network.Lease
+	Stats() network.Stats
 	Attach(ctx context.Context, vmID string) (*network.Attachment, error)
 	Detach(vmID string) error
 	Dial(ctx context.Context, addr string) (net.Conn, error)
@@ -101,3 +106,21 @@ type Clock interface {
 	Now() time.Time
 	After(d time.Duration) <-chan time.Time
 }
+
+// Metrics receives what the service observes: guest report uploads (after
+// the service persisted them), the phase durations and deletions.
+// *metrics.Registry implements it; the service in turn is its Source.
+type Metrics interface {
+	imds.ReportSink
+	ObserveInstall(d time.Duration)
+	ObserveBootToReady(d time.Duration)
+	ForgetVM(id string)
+}
+
+// noMetrics is the Metrics of a service without a registry.
+type noMetrics struct{}
+
+func (noMetrics) StoreReport(context.Context, string, json.RawMessage) error { return nil }
+func (noMetrics) ObserveInstall(time.Duration)                               {}
+func (noMetrics) ObserveBootToReady(time.Duration)                           {}
+func (noMetrics) ForgetVM(string)                                            {}

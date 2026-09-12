@@ -11,6 +11,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -80,6 +81,9 @@ type Services struct {
 	Host   *host.Service
 	VM     *vm.Service
 	Images *images.Catalog
+	// Metrics summarizes a VM for get_vm_metrics; it must be the registry
+	// the VM service reports to.
+	Metrics *metrics.Registry
 }
 
 const instructions = `Provision cloud-provider-like virtual machines on this KVM host: an instance metadata service (IMDS), a vTPM with measured boot, an immutable mkosi-built OS and Kubernetes as a sysext layer, so the VMs can be handed to the CAPI based cluster-manager. Call get_host first: it reports whether the host can run VMs (ready) and, if not, which prerequisites are missing — nothing else can succeed until they are met.
@@ -153,7 +157,7 @@ func NewMCPServer(svc Services, version string) *mcpserver.MCPServer {
 		mcp.WithNumber(argLines, mcp.Description("Number of trailing lines, default 100, at most 10000")),
 	), t.getVMConsole)
 	s.AddTool(newTool(ToolGetVMMetrics,
-		"Read-only. Return the guest's last systemd-report upload (report), null until the guest sent one. Host-side CPU, memory and I/O metrics land in a later release; the tool exists so the surface is stable. Call get_vm for state and IP.",
+		"Read-only. Per-VM metrics. host: state, attestation, the QEMU process's cpu_seconds and memory_rss_bytes (absent while no process runs), disk_bytes, install_seconds, boot_to_ready_seconds and the byte counters of the VM's network. guest: a summary of the guest's last systemd-report upload (age, family and series counts, the first entries as sample), null until the guest sent one. Every series is on the Prometheus /metrics endpoint; the full upload is REST-only at raw_report_url. Call get_vm for state and IP.",
 		hintRead, idArg), t.getVMMetrics)
 	s.AddTool(newTool(ToolGetVMAttestation,
 		"Read-only. Return the current boot's attestation: whether it is required, whether user-data was released, when the guest first asked for a nonce, and the verified/failed verdict of the initrd quote (gates user-data) and the ready quote (PCR 13 included). Reset on every installed boot.",

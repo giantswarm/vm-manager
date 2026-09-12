@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -24,13 +25,14 @@ type errBody struct {
 	} `json:"error"`
 }
 
-func newRESTServer(t *testing.T) *httptest.Server {
+func newRESTServer(t *testing.T) (*httptest.Server, api.Services) {
 	t.Helper()
+	svc := newServices(t)
 	mux := http.NewServeMux()
-	api.NewREST(newServices(t), nil).Register(mux)
+	api.NewREST(svc, nil).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, svc
 }
 
 // do sends a request with an optional JSON body and returns the status and
@@ -68,7 +70,7 @@ func expectError(t *testing.T, status int, body []byte, wantStatus int, wantCode
 }
 
 func TestGetHost(t *testing.T) {
-	ts := newRESTServer(t)
+	ts, _ := newRESTServer(t)
 	status, body := do(t, ts, http.MethodGet, "/host", nil)
 	require.Equal(t, http.StatusOK, status, string(body))
 	var info host.Info
@@ -80,14 +82,14 @@ func TestGetHost(t *testing.T) {
 }
 
 func TestOpenAPI(t *testing.T) {
-	ts := newRESTServer(t)
+	ts, _ := newRESTServer(t)
 	status, body := do(t, ts, http.MethodGet, "/openapi.yaml", nil)
 	require.Equal(t, http.StatusOK, status)
 	assert.Contains(t, string(body), "openapi: 3.1.0")
 	for _, route := range []string{
 		"/host:", "/images:", "/images/{ref}:", "/networks:", "/networks/{name}:", "/vms:", "/vms/{id}:",
 		"/vms/{id}/start:", "/vms/{id}/stop:", "/vms/{id}/reboot:", "/vms/{id}/exec:", "/vms/{id}/forward:",
-		"/vms/{id}/console:", "/vms/{id}/attestation:", "/vms/{id}/metrics:",
+		"/vms/{id}/console:", "/vms/{id}/attestation:", "/vms/{id}/metrics:", "/vms/{id}/report:",
 	} {
 		assert.Contains(t, string(body), "  "+route, "every REST route is documented")
 	}
@@ -100,7 +102,7 @@ func TestOpenAPI(t *testing.T) {
 }
 
 func TestUnknownRouteIsJSON(t *testing.T) {
-	ts := newRESTServer(t)
+	ts, _ := newRESTServer(t)
 	status, body := do(t, ts, http.MethodGet, "/nope", nil)
 	e := expectError(t, status, body, http.StatusNotFound, "not_found")
 	assert.Contains(t, e.Error.Message, "GET /api/v1/nope")
@@ -110,7 +112,7 @@ func TestUnknownRouteIsJSON(t *testing.T) {
 // mapping: 404 for unknown resources, 409 for a network in use and a
 // lifecycle conflict, 400 for invalid specs and bodies.
 func TestVMLifecycleREST(t *testing.T) {
-	ts := newRESTServer(t)
+	ts, svc := newRESTServer(t)
 
 	status, body := do(t, ts, http.MethodGet, "/images/"+testImageRef, nil)
 	require.Equal(t, http.StatusOK, status, string(body))
@@ -164,7 +166,23 @@ func TestVMLifecycleREST(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, string(body))
 	status, body = do(t, ts, http.MethodGet, "/vms/"+v.ID+"/metrics", nil)
 	require.Equal(t, http.StatusOK, status, string(body))
-	assert.Contains(t, string(body), `"report": null`)
+	var m api.MetricsResponse
+	require.NoError(t, json.Unmarshal(body, &m))
+	assert.Equal(t, string(vm.StateInstalling), m.Host.State)
+	assert.Nil(t, m.Guest)
+	assert.Contains(t, string(body), `"guest": null`, "the guest section is explicit")
+	status, body = do(t, ts, http.MethodGet, "/vms/"+v.ID+"/report", nil)
+	expectError(t, status, body, http.StatusNotFound, "not_found")
+	require.NoError(t, svc.VM.StoreReport(context.Background(), v.ID, []byte(`{"metrics":[{"name":"io.systemd.Manager.UnitsTotal","value":7}]}`)))
+	status, body = do(t, ts, http.MethodGet, "/vms/"+v.ID+"/report", nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	assert.JSONEq(t, `{"metrics":[{"name":"io.systemd.Manager.UnitsTotal","value":7}]}`, string(body), "the upload is served in full")
+	status, body = do(t, ts, http.MethodGet, "/vms/"+v.ID+"/metrics", nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	require.NoError(t, json.Unmarshal(body, &m))
+	require.NotNil(t, m.Guest)
+	assert.Equal(t, 1, m.Guest.SeriesExported)
+	assert.Equal(t, api.Prefix+"/vms/"+v.ID+"/report", m.RawReportURL)
 
 	status, body = do(t, ts, http.MethodPost, "/vms/"+v.ID+"/start", nil)
 	expectError(t, status, body, http.StatusConflict, "conflict")

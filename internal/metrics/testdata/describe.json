@@ -1,0 +1,112 @@
+[
+  {
+    "name": "io.systemd.Manager.ActiveTimestamp",
+    "type": "gauge",
+    "description": "Per unit metric: timestamp of active state transitions in microseconds; 0 indicates the transition has not occurred"
+  },
+  {
+    "name": "io.systemd.Manager.InactiveExitTimestamp",
+    "type": "gauge",
+    "description": "Per unit metric: timestamp when the unit last exited the inactive state in microseconds; 0 indicates the transition has not occurred"
+  },
+  {
+    "name": "io.systemd.Manager.JobsQueued",
+    "type": "gauge",
+    "description": "Number of jobs currently queued"
+  },
+  {
+    "name": "io.systemd.Manager.NRestarts",
+    "type": "counter",
+    "description": "Per unit metric: number of restarts"
+  },
+  {
+    "name": "io.systemd.Manager.ReloadCount",
+    "type": "counter",
+    "description": "Number of successful manager reloads since startup; resets across daemon-reexec"
+  },
+  {
+    "name": "io.systemd.Manager.StateChangeTimestamp",
+    "type": "gauge",
+    "description": "Per unit metric: timestamp of the last state change in microseconds; 0 indicates no state change has occurred"
+  },
+  {
+    "name": "io.systemd.Manager.StatusErrno",
+    "type": "gauge",
+    "description": "Per service metric: errno status of the service"
+  },
+  {
+    "name": "io.systemd.Manager.SystemState",
+    "type": "string",
+    "description": "Overall system state"
+  },
+  {
+    "name": "io.systemd.Manager.UnitActiveState",
+    "type": "string",
+    "description": "Per unit metric: active state"
+  },
+  {
+    "name": "io.systemd.Manager.UnitLoadState",
+    "type": "string",
+    "description": "Per unit metric: load state"
+  },
+  {
+    "name": "io.systemd.Manager.UnitsByLoadStateTotal",
+    "type": "gauge",
+    "description": "Total number of units by load state"
+  },
+  {
+    "name": "io.systemd.Manager.UnitsByStateTotal",
+    "type": "gauge",
+    "description": "Total number of units of different state"
+  },
+  {
+    "name": "io.systemd.Manager.UnitsByTypeTotal",
+    "type": "gauge",
+    "description": "Total number of units of different types"
+  },
+  {
+    "name": "io.systemd.Manager.UnitsTotal",
+    "type": "gauge",
+    "description": "Total number of units"
+  },
+  {
+    "name": "io.systemd.Network.AddressState",
+    "type": "string",
+    "description": "Per interface metric: address state"
+  },
+  {
+    "name": "io.systemd.Network.AdministrativeState",
+    "type": "string",
+    "description": "Per interface metric: administrative state"
+  },
+  {
+    "name": "io.systemd.Network.CarrierState",
+    "type": "string",
+    "description": "Per interface metric: carrier state"
+  },
+  {
+    "name": "io.systemd.Network.IPv4AddressState",
+    "type": "string",
+    "description": "Per interface metric: IPv4 address state"
+  },
+  {
+    "name": "io.systemd.Network.IPv6AddressState",
+    "type": "string",
+    "description": "Per interface metric: IPv6 address state"
+  },
+  {
+    "name": "io.systemd.Network.ManagedInterfaces",
+    "type": "gauge",
+    "description": "Number of network interfaces managed by systemd-networkd"
+  },
+  {
+    "name": "io.systemd.Network.OperationalState",
+    "type": "string",
+    "description": "Per interface metric: operational state"
+  },
+  {
+    "name": "io.systemd.Network.RequiredForOnline",
+    "type": "string",
+    "description": "Per interface metric: required operational state for online, or 'no' if not required"
+  }
+]
