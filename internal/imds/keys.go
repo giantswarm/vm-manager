@@ -63,8 +63,11 @@ var Keys = []Key{
 		Description: "network name the VM is attached to"},
 	{Path: "/public-keys/0", Pattern: "/public-keys/{index}", Method: http.MethodGet, Property: "IMDS_KEY_SSH_KEY",
 		Description: "n-th authorized key; 0 is imported as ssh.authorized_keys.root"},
-	{Path: "/user-data", Method: http.MethodGet, Property: "IMDS_KEY_USERDATA",
-		Description: "CAPI bootstrap data as Ignition JSON, gated by the initrd-stage attestation"},
+	// No hwdb property: Ignition fetches it through ignition.config.url on the
+	// kernel command line, and systemd-imds --import must not ask for it
+	// (it would see the 503 while the key is gated and fail the import unit).
+	{Path: "/user-data", Method: http.MethodGet,
+		Description: "CAPI bootstrap data as Ignition JSON for ignition-fetch.service: 503 + Retry-After while gated by the initrd-stage attestation, 204 when the VM has none"},
 	{Path: "/instance-id", Method: http.MethodGet,
 		Description: "vm-manager's VM ID"},
 	{Path: "/kubernetes-version", Method: http.MethodGet,

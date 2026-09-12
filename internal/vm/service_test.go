@@ -662,7 +662,7 @@ func TestAttestationGating(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code)
 	assert.Equal(t, "attested", body)
 	code, _ = get("/user-data")
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusServiceUnavailable, code, "gated user-data is retryable for Ignition")
 
 	att := h.svc.IMDSDeps().Attestor
 	nonce, err := att.Nonce(h.ctx, v.ID)
