@@ -162,11 +162,11 @@ func (a *NoopAttestor) Nonce(_ context.Context, vmID string) (string, error) {
 	if a.nonces == nil {
 		a.nonces = make(map[string]map[string]time.Time)
 	}
+	now := a.now()
+	a.sweepLocked(now)
 	if a.nonces[vmID] == nil {
 		a.nonces[vmID] = make(map[string]time.Time)
 	}
-	now := a.now()
-	a.sweepLocked(now)
 	for len(a.nonces[vmID]) >= maxNoncesPerVM {
 		delete(a.nonces[vmID], oldestNonce(a.nonces[vmID]))
 	}
