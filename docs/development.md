@@ -108,14 +108,15 @@ host requirements.
   TPM2_Quote (TPMS_ATTEST, TPMT_SIGNATURE, AK TPMT_PUBLIC): magic and type,
   AK attributes, signature, nonce, PCR digest. `tpmquote/quotetest` produces
   real quotes on the go-tpm simulator (cgo) for tests.
-- `internal/attest` — the `imds.Attestor` behind `--attestation=verify`:
-  nonces, AK pinning per VM on the first verified initrd quote (trust on
-  first use), PCR 11 against the image's `policy.json` phase paths, PCRs
-  0-7 (and 13 at ready) against its golden values;
-  `--attestation-learn-golden` accepts and records missing golden values and
-  `vm-manager image golden <image> --from-vm <id>` writes them back.
-  `--attestation=noop` (the default until the image integration flips it)
-  runs `imds.NoopAttestor`, which verifies nothing.
+- `internal/attest` — the `imds.Attestor` behind `--attestation=verify`,
+  the default: nonces, AK pinning per VM on the first verified initrd quote
+  (trust on first use), PCR 11 against the image's `policy.json` phase
+  paths, PCRs 0, 2-4, 6, 7 (and 13 at ready) against its golden values (PCR
+  1 and 5 differ per VM: SMBIOS credentials, boot entry, GPT; they are
+  recorded, not compared); `--attestation-learn-golden` accepts and records
+  missing golden values and `vm-manager image golden <image> --from-vm <id>`
+  writes them back. `--attestation=noop` (opt-in) runs `imds.NoopAttestor`,
+  which verifies nothing.
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 - `images/` — the mkosi build of the guest image and the Kubernetes sysext
   (`make -C images keys base`, outputs in `images/build/`; see
@@ -155,15 +156,25 @@ curl -s localhost:18080/api/v1/openapi.yaml
 
 The full loop with a guest, on a host where `GET /api/v1/host` says `ready`:
 
+A fresh `images/build/policy.json` has no golden PCR values, and the default
+`--attestation=verify` rejects every quote without them, so the first server
+runs in learn mode; `vm-manager image golden` records the values of one
+attested VM and the server is restarted without the flag (the e2e does the
+same in `e2e/attestation_test.go`):
+
 ```sh
-make -C images keys base                                  # images/build/giantswarm-vm-base_<v>.{efi,raw}
-./vm-manager serve -v --listen 127.0.0.1:18080 --state-dir /tmp/vmm --image-dir images/build
+make -C images keys base verify                           # images/build/giantswarm-vm-base_<v>.{efi,raw}, policy.json
+./vm-manager serve -v --listen 127.0.0.1:18080 --state-dir /tmp/vmm --image-dir images/build \
+    --attestation-learn-golden                            # bring-up only, until image golden ran
 
 API=localhost:18080/api/v1
 curl -s $API/images | jq '.[].id'
 curl -s -X POST $API/networks -d '{"name":"lab","cidr":"192.168.130.0/24"}' | jq .gateway
 ID=$(curl -s -X POST $API/vms -d '{"name":"node-1","network":"lab","wait_for":"installed"}' | jq -r .id)
-curl -s $API/vms/$ID | jq '{state, ip, lastError}'       # booting -> ready
+curl -s $API/vms/$ID | jq '{state, ip, lastError}'       # booting -> attesting -> ready
+curl -s $API/vms/$ID/attestation | jq                     # initrd and ready quote, learned PCRs
+./vm-manager image golden giantswarm-vm-base --from-vm $ID --server http://127.0.0.1:18080 --image-dir images/build
+# restart serve without --attestation-learn-golden: later VMs verify against the recorded values
 curl -s "$API/vms/$ID/console?lines=40" | jq -r .console
 curl -s -X POST $API/vms/$ID/exec -d '{"command":["systemctl","is-system-running"]}' | jq .
 curl -s -X DELETE $API/vms/$ID -o /dev/null -w '%{http_code}\n'

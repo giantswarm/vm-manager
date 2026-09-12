@@ -149,7 +149,7 @@ func TestServeOptionsComplete(t *testing.T) {
 	o = base()
 	require.NoError(t, o.complete())
 	assert.Equal(t, metrics.DefaultMaxGuestSeries, o.metricsGuestSeriesLimit, "an unset limit is the default")
-	assert.Equal(t, attestationNoop, o.attestation, "empty means the default")
+	assert.Equal(t, attestationVerify, o.attestation, "empty means the default, verify")
 	o = base()
 	o.metricsGuestSeriesLimit = -1
 	assert.ErrorContains(t, o.complete(), "--metrics-guest-series-limit")
@@ -159,7 +159,7 @@ func TestServeOptionsComplete(t *testing.T) {
 	assert.ErrorContains(t, o.complete(), "--attestation: \"maybe\"")
 
 	o = base()
-	o.learnGolden = true
+	o.attestation, o.learnGolden = attestationNoop, true
 	assert.ErrorContains(t, o.complete(), "--attestation-learn-golden needs --attestation=verify")
 
 	o = base()

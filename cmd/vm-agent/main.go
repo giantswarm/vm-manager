@@ -21,15 +21,21 @@
 //
 // # How the image runs it
 //
-// The initrd ships vm-agent-attest.service with After=network-online.target
-// and Before=ignition-fetch.service running `vm-agent attest --stage=initrd`;
-// until that quote verifies, the IMDS answers /user-data with 403 and
-// Ignition cannot fetch its config. The root file system ships the same
-// unit with After=systemd-sysext.service systemd-pcrphase.service running
-// `vm-agent attest --stage=ready`, so the quote covers the merged system
-// extensions (PCR 13) and the full PCR 11 phase path. Both units are
-// Type=oneshot with Restart=on-failure; exit code 2 is a policy decision the
-// host has already logged, a restart re-quotes with a fresh nonce.
+// The initrd ships vm-agent-attest.service (images/mkosi.initrd.conf),
+// wanted by initrd.target, After=network-online.target and
+// systemd-pcrphase-initrd.service, Before=ignition-fetch.service, running
+// `vm-agent attest --stage=initrd --timeout=90s`; until that quote verifies,
+// the IMDS answers /user-data with 503 + Retry-After and Ignition's fetch
+// stage keeps retrying. The root file system ships the same unit name
+// (images/mkosi.images/base) After=vm-kubernetes.service and
+// systemd-pcrphase.service, Before=multi-user.target, running `vm-agent
+// attest --stage=ready`, so the quote covers the Kubernetes sysext
+// measurement (PCR 13) and the full PCR 11 phase path and precedes READY=1.
+// Both units are Type=oneshot without Restart= or OnFailure=: a rejection
+// (exit 2) is a policy decision the host has logged and re-quoting the same
+// PCRs cannot change it; the unit fails visibly and the boot goes on (with
+// require_attestation the fetch stage then times out into emergency.target).
+// The agent itself retries the IMDS with backoff until --timeout.
 package main
 
 import (

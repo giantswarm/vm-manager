@@ -143,10 +143,20 @@ Phase B, installed boot (every boot from now on):
 4. OVMF -> systemd-boot -> UKI (measured into PCR 11 with `.pcrsig`), credentials from the
    ESP. In the initrd: verity root, repart grows var, systemd-imdsd early network brings up
    DHCP from the virtual network, imds import (hostname, ssh key -> `/run/credstore`).
-5. Still in the initrd, `vm-agent attest --stage=initrd` fetches a nonce, quotes PCRs 0-7
-   and 11 (phase `enter-initrd`) with an AK and posts quote + event logs. vm-manager
-   verifies and marks the VM attested; until then `/user-data` is 503 with `Retry-After`,
-   which Ignition's fetch stage retries with backoff (see the IMDS contract).
+5. Still in the initrd (implemented: `images/mkosi.initrd.conf`), `vm-agent-attest.service`
+   (wanted by `initrd.target`, `After=systemd-pcrphase-initrd.service` so PCR 11 carries
+   exactly `enter-initrd`, after the IMDS early network, `Before=ignition-fetch.service`
+   through a drop-in on the fetch unit) runs `vm-agent attest --stage=initrd --timeout=90s`:
+   a nonce, a quote of PCRs 0-7 and 11 with the VM's AK, posted with both event logs.
+   vm-manager verifies and marks the VM attested; until then `/user-data` is 503 with
+   `Retry-After`, which Ignition's fetch stage retries with backoff (see the IMDS
+   contract). A rejected quote fails the unit visibly (exit 2) but not the boot: with
+   `require_attestation` the fetch stage times out into `emergency.target`, without it
+   user-data was released when the boot started and the verdict is on record only. The
+   unit is skipped on the installer boot, with `systemd.imds=no` and outside vm-manager
+   (`ConditionFirmware=smbios-field(sys_vendor = GiantSwarm)`). Proven by
+   `e2e/attestation_test.go`: verified quote, user-data applied by Ignition; a boot on
+   `OVMF_CODE.secboot.4m.fd` rejected with a golden mismatch on PCR 0 and 7 and gated.
 6. Ignition (first boot only: `ignition.firstboot` on the cmdline) fetches the Ignition
    config from `/user-data` (`ignition-fetch.service`), runs its disks, mount and files
    stages, which write CAPI's files and systemd units (kubeadm config, the kubeadm unit)
@@ -165,10 +175,12 @@ Phase B, installed boot (every boot from now on):
    PCR 13 from the artifact (`policy.json` `pcr13.<version>`, images/README.md). A VM
    without a Kubernetes version skips the unit. CAPI's unit, ordered
    `After=vm-kubernetes.service`, runs `kubeadm init|join` and writes
-   `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready`, also
-   `After=vm-kubernetes.service`, posts a second quote covering PCR 13 and the full phase
-   path for `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service`;
-   the e2e measures 14 s from the installed boot to ready with a 2 s download.
+   `/run/cluster-api/bootstrap-success.complete`. `vm-agent-attest.service` of the root
+   (implemented: `images/mkosi.images/base`, `After=vm-kubernetes.service
+   systemd-pcrphase.service`, `Before=multi-user.target`) runs `vm-agent attest
+   --stage=ready` and posts a second quote covering PCR 13 and the full phase path for
+   `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
+   quote; the e2e measures 14 s from the installed boot to ready with a 2 s download.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
 
 Fast path for later: pre-install on the host with `systemd-repart` from the same
@@ -214,6 +226,24 @@ skipping phase A when TPM-bound install credentials are not needed.
   deletes every `kubernetes_*.raw` other than the requested version before it refreshes;
   exactly one file, one merged extension, one PCR 13 measurement per boot. A changed
   `/kubernetes-version` takes effect on the next boot (no live switch of a running node).
+- **PCR 1 and 5 are per VM (resolved by exclusion).** The first golden-path boot showed
+  them differing between two VMs on the same firmware and image: EDK2 measures the SMBIOS
+  tables into PCR 1 (`SmbiosMeasurementDxe`, type 11 OEM strings are not filtered), and
+  vm-manager's type 11 strings are per-VM credentials (hostname, machine ID, SSH key,
+  notify socket), as is the `Boot####` entry whose device path carries the ESP's
+  partition GUID; PCR 5 holds the GPT of the installed disk with per-install partition
+  UUIDs. `attest.GoldenIndexes` is therefore 0, 2-4, 6, 7 and 13; PCR 1 and 5 stay in
+  every quote and in `get_vm_attestation` for forensics. The integrity story rests on 0
+  (firmware), 4 (boot loader and UKI), 7 (Secure Boot policy), 11 (UKI and phases) and
+  13 (sysext). A per-VM prediction of 1 and 5 by replaying the firmware event log the
+  agent already posts (`event_log`) against what vm-manager itself passed as SMBIOS and
+  what sysinstall wrote as GPT is the follow-up if they are wanted.
+- **PCR 12 is not in the policy.** systemd-stub measures the kernel command line
+  additions (`io.systemd.stub.kernel-cmdline-extra`, i.e. `ignition.firstboot`) and
+  credentials into PCR 12, not 11, so the policy's PCR 11 does not cover them and the
+  command line is no tamper case for it; the agent does not quote PCR 12 yet. A
+  predicted PCR 12 (the stub's measurements are documented and vm-manager knows what
+  it passed) would close this.
 - **VM processes and vm-manager restarts.** v1 runs QEMU and swtpm as child processes;
   a vm-manager restart marks VMs stopped. Running each VM as a transient systemd unit
   (`systemd-run --scope`) is the planned fix.
@@ -252,12 +282,21 @@ pcrs:{sha256:{"0":..}}, event_log, userspace_log}` (binary fields base64, `stage
 `initrd` or `ready`). Verification: signature over the quote with `ak_pub`, nonce match,
 PCR digest matches `pcrs`, PCR 11 equals the value computed with `systemd-measure calculate`
 for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
-`enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0-7 equal the image policy's
-golden values recorded by `vm-manager image golden`, and at `ready` PCR 13 equals the
+`enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0, 2-4, 6 and 7 equal the
+image policy's golden values recorded by `vm-manager image golden` (PCR 1 and 5 are quoted
+and recorded, not compared: see the open point below), and at `ready` PCR 13 equals the
 policy's `pcr13` entry for the VM's Kubernetes version (written by
 `images/scripts/verify-kubernetes`; golden 13 when the VM has none). Only the
 `initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
+
+`--attestation=verify` is the default of `vm-manager serve`; `noop` is opt-in for hosts
+without a policy. Golden values are recorded once per image and firmware: start the
+server with `--attestation-learn-golden` (the verifier accepts golden PCRs without a
+value and reports them as learned), boot one VM, run `vm-manager image golden <image>
+--from-vm <id>` (writes `golden.sha256` into the image's `policy.json`, which
+`images/scripts/verify` preserves across rebuilds of the same version), restart without
+the flag. Learn mode is never for production: it would accept any firmware.
 
 ## How CAPI fits
 

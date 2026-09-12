@@ -65,7 +65,7 @@ func TestImageGolden(t *testing.T) {
 	err := runImageGolden(ctx, opts("vm-initrd"), "giantswarm-vm-base", io.Discard)
 	assert.ErrorContains(t, err, "no verified ready-stage quote (initrd verified: true)")
 	err = runImageGolden(ctx, opts("vm-noop"), "giantswarm-vm-base", io.Discard)
-	assert.ErrorContains(t, err, "carries 0 of the 9 golden PCRs")
+	assert.ErrorContains(t, err, "carries 0 of the 7 golden PCRs")
 	err = runImageGolden(ctx, opts("vm-gone"), "giantswarm-vm-base", io.Discard)
 	assert.ErrorContains(t, err, "404")
 	err = runImageGolden(ctx, opts("vm-ready"), "other-image", io.Discard)
@@ -76,13 +76,13 @@ func TestImageGolden(t *testing.T) {
 
 	var out bytes.Buffer
 	require.NoError(t, runImageGolden(ctx, opts("vm-ready"), "giantswarm-vm-base", &out))
-	assert.Equal(t, "recorded golden sha256 PCRs 0,1,2,3,4,5,6,7,13 of vm vm-ready (ak ak-fp) into "+policyPath+"\n", out.String())
+	assert.Equal(t, "recorded golden sha256 PCRs 0,2,3,4,6,7,13 of vm vm-ready (ak ak-fp) into "+policyPath+"\n", out.String())
 
 	raw, err := os.ReadFile(policyPath) // #nosec G304 -- test temp dir.
 	require.NoError(t, err)
 	p, err := attest.ParsePolicy(raw)
 	require.NoError(t, err)
-	assert.Len(t, p.Golden[attest.Bank], 9)
+	assert.Len(t, p.Golden[attest.Bank], len(attest.GoldenIndexes))
 	assert.Equal(t, hexOf(13), p.Golden[attest.Bank][13])
 	assert.Equal(t, hexOf(1), p.PCR11[attest.PhaseInitrd], "the rest of the file is kept")
 	var doc map[string]json.RawMessage
