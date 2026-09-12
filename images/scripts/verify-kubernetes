@@ -1,34 +1,105 @@
 #!/usr/bin/env bash
-# Offline verification of the kubernetes sysext. No root, no boot: the DDI is
-# read with sfdisk and systemd-dissect --validate, the erofs is extracted with
-# fsck.erofs, and the extension is merged onto the base tree with systemd-sysext
-# in an unprivileged user namespace (directory form of the extension; loop
-# devices for the DDI itself need root). Writes the expected PCR 13 of a guest
-# running this version into build/policy.json (pcr13.<version>, step 10).
+# Offline verification of the published kubernetes sysexts. No root, no boot:
+# each DDI is read with sfdisk and systemd-dissect --validate, the erofs is
+# extracted with fsck.erofs, and the extension is merged onto the base tree
+# with systemd-sysext in an unprivileged user namespace (directory form of the
+# extension; loop devices for the DDI itself need root).
+#
+#   verify-kubernetes <build> <keys> [version...]
+#
+# Without versions, every kubernetes_<v>.raw listed in
+# build/sysupdate/kubernetes/SHA256SUMS is verified. The directory is checked
+# as a whole first (signature, sums, the transfer's MatchPattern names every
+# file), then each version (steps 1-8), and the expected PCR 13 of a guest
+# running each version is written to build/policy.json (pcr13.<version>,
+# step 9); pcr13 entries of versions no longer published are dropped.
 set -euo pipefail
 
-build="${1:?build dir}" version="${2:?kubernetes version}" keys="${3:?keys dir}"
-name="kubernetes_$version"
-img="$build/$name.raw"
+build="${1:?build dir}" keys="${2:?keys dir}"
+shift 2
 base="$build/base"
 sysupdate="$build/sysupdate/kubernetes"
 transfer="$base/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer"
+policy="$build/policy.json"
 
 tmp="$(mktemp -d)"
 trap 'chmod -R u+rwX "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 fail() { echo "verify-kubernetes: FAIL: $*" >&2; exit 1; }
 ok() { echo "verify-kubernetes: ok: $*"; }
 
-for f in "$img" "$build/$name.roothash" "$base/usr/lib/os-release" "$transfer" "$sysupdate/$name.raw" "$sysupdate/SHA256SUMS.gpg"; do
+for f in "$base/usr/lib/os-release" "$transfer" "$sysupdate/SHA256SUMS" "$sysupdate/SHA256SUMS.gpg"; do
         [[ -s "$f" ]] || fail "$f missing (run make base kubernetes)"
 done
-roothash="$(tr -d '\n' <"$build/$name.roothash")"
-[[ ${#roothash} -eq 64 ]] || fail "roothash $roothash is not a sha256"
+mapfile -t published < <(sed -n 's/^[0-9a-f]\{64\}  kubernetes_\(.*\)\.raw$/\1/p' "$sysupdate/SHA256SUMS" | sort -V)
+[[ ${#published[@]} -gt 0 ]] || fail "$sysupdate/SHA256SUMS lists no kubernetes_<v>.raw (run make kubernetes)"
+versions=("$@")
+[[ ${#versions[@]} -gt 0 ]] || versions=("${published[@]}")
+fingerprint="$(openssl x509 -in "$keys/verity.crt" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
 
-# 1. Partition table: root, verity, signature and nothing else (a sysext DDI
-#    has no ESP); root/verity UUIDs derived from the root hash as for the disk.
-sfdisk --json "$img" >| "$tmp/sfdisk.json"
-eval "$(python3 - "$tmp/sfdisk.json" "$roothash" <<'EOF'
+# A. The component directory: SHA256SUMS.gpg verifies with the key the guest
+#    trusts, every file is listed with the right sum, nothing is listed that
+#    is not there, and the base image's transfer matches every published
+#    version (and nothing else in the directory).
+# gpg rewrites a --keyring file it opens (see scripts/verify); use a copy.
+pubring="$(mktemp)"
+cp "$keys/import-pubring.pgp" "$pubring"
+GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$pubring" \
+        --verify "$sysupdate/SHA256SUMS.gpg" "$sysupdate/SHA256SUMS" 2>/dev/null || fail "SHA256SUMS.gpg does not verify"
+rm -f "$pubring" "$pubring~"
+(cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
+unlisted="$(cd "$sysupdate" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n' | sort | comm -23 - <(cut -c67- SHA256SUMS | sort))"
+[[ -z "$unlisted" ]] || fail "not in SHA256SUMS: $unlisted (republish with make kubernetes)"
+ok "sysupdate/kubernetes: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") file(s), versions ${published[*]}"
+
+python3 - "$transfer" "$sysupdate" "${published[@]}" <<'EOF'
+import configparser, os, re, sys
+transfer, sysupdate, *versions = sys.argv[1:]
+c = configparser.ConfigParser(strict=False, interpolation=None)
+c.read(transfer)
+src, tgt = c["Source"], c["Target"]
+def fail(msg):
+    sys.exit(f"verify-kubernetes: FAIL: transfer {os.path.basename(transfer)}: {msg}")
+if "@v" not in src["MatchPattern"] or "@v" not in tgt["MatchPattern"]:
+    fail("MatchPattern must carry @v, the version vm-kubernetes.service asks for")
+if not src["Path"].rstrip("/").endswith("/sysupdate/" + os.path.basename(sysupdate)):
+    fail(f"Source Path={src['Path']} is not the {os.path.basename(sysupdate)} component")
+if c["Transfer"].get("Verify", "yes") != "yes":
+    fail("Verify=no")
+if tgt["Path"] != "/var/lib/extensions":
+    fail(f"Target Path={tgt['Path']}, systemd-sysext looks in /var/lib/extensions")
+instances = int(tgt.get("InstancesMax", "2"))
+if instances < 2:
+    fail(f"InstancesMax={instances}, sysupdate.d(5) rejects less than 2")
+regex = re.compile("^" + re.escape(src["MatchPattern"]).replace(re.escape("@v"), "(?P<v>[^/]+)") + "$")
+for v in versions:
+    if not os.path.isfile(os.path.join(sysupdate, src["MatchPattern"].replace("@v", v))):
+        fail(f"expects {src['MatchPattern'].replace('@v', v)} for {v} in {sysupdate}, found {sorted(os.listdir(sysupdate))}")
+for f in sorted(os.listdir(sysupdate)):
+    if f.startswith("SHA256SUMS"):
+        continue
+    m = regex.match(f)
+    if not m:
+        fail(f"{f} in {sysupdate} does not match Source MatchPattern={src['MatchPattern']}")
+    if m.group("v") not in versions:
+        fail(f"{f} is not in SHA256SUMS")
+print(f"verify-kubernetes: ok: transfer {os.path.basename(transfer)}: {src['Path']}{src['MatchPattern']} -> {tgt['Path']}/{tgt['MatchPattern']} matches {', '.join(versions)} (Verify=yes, InstancesMax={instances})")
+EOF
+
+# B. One version: the DDI, its signature, content, units, the merge, PCR 13.
+verify_version() {
+        local version="$1" name="kubernetes_$1" img="$build/kubernetes_$1.raw" ext="$tmp/ext-$1" roothash compr top releases line
+        for f in "$img" "$build/$name.roothash" "$sysupdate/$name.raw"; do
+                [[ -s "$f" ]] || fail "$f missing (run make kubernetes KUBERNETES_VERSION=$version)"
+        done
+        cmp -s "$img" "$sysupdate/$name.raw" || fail "$sysupdate/$name.raw is not the built $img (republish with make kubernetes KUBERNETES_VERSION=$version)"
+        roothash="$(tr -d '\n' <"$build/$name.roothash")"
+        [[ ${#roothash} -eq 64 ]] || fail "roothash $roothash is not a sha256"
+        echo "verify-kubernetes: --- $name"
+
+        # 1. Partition table: root, verity, signature and nothing else (a sysext DDI
+        #    has no ESP); root/verity UUIDs derived from the root hash as for the disk.
+        sfdisk --json "$img" >| "$tmp/sfdisk.json"
+        eval "$(python3 - "$tmp/sfdisk.json" "$roothash" <<'EOF'
 import json, sys
 types = {
     "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709": "root",
@@ -54,19 +125,18 @@ for d, p in parts.items():
     print(f"{d}_offset={p['start'] * sector} {d}_size={p['size'] * sector}")
 EOF
 )"
-ok "partitions root/verity/sig only, root/verity UUIDs match roothash halves"
+        ok "partitions root/verity/sig only, root/verity UUIDs match roothash halves"
 
-# 2. systemd-dissect accepts it under a policy that demands signed verity for
-#    root and no /usr partition (the default sysext policy is more permissive).
-systemd-dissect --validate --image-policy=root=signed:usr=absent "$img" >/dev/null || fail "systemd-dissect --validate rejects $img"
-ok "systemd-dissect --validate (root=signed:usr=absent)"
+        # 2. systemd-dissect accepts it under a policy that demands signed verity for
+        #    root and no /usr partition (the default sysext policy is more permissive).
+        systemd-dissect --validate --image-policy=root=signed:usr=absent "$img" >/dev/null || fail "systemd-dissect --validate rejects $img"
+        ok "systemd-dissect --validate (root=signed:usr=absent)"
 
-# 3. Signature partition: the JSON root hash is ours and the signing
-#    certificate is the verity certificate of this key set (what the base image
-#    trusts in /usr/lib/verity.d/).
-dd if="$img" bs=512 skip=$((sig_offset / 512)) count=$((sig_size / 512)) status=none | tr -d '\000' >| "$tmp/sig.json"
-fingerprint="$(openssl x509 -in "$keys/verity.crt" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
-python3 - "$tmp/sig.json" "$roothash" "$fingerprint" <<'EOF'
+        # 3. Signature partition: the JSON root hash is ours and the signing
+        #    certificate is the verity certificate of this key set (what the base image
+        #    trusts in /usr/lib/verity.d/).
+        dd if="$img" bs=512 skip=$((sig_offset / 512)) count=$((sig_size / 512)) status=none | tr -d '\000' >| "$tmp/sig.json"
+        python3 - "$tmp/sig.json" "$roothash" "$fingerprint" <<'EOF'
 import json, sys
 sig = json.load(open(sys.argv[1]))
 if sig["rootHash"] != sys.argv[2]:
@@ -74,29 +144,28 @@ if sig["rootHash"] != sys.argv[2]:
 if sig["certificateFingerprint"].lower() != sys.argv[3]:
     sys.exit(f"verify-kubernetes: FAIL: signed with certificate {sig['certificateFingerprint']}, keys/verity.crt is {sys.argv[3]}")
 EOF
-[[ -s "$base/usr/lib/verity.d/verity.crt" ]] && cmp -s "$base/usr/lib/verity.d/verity.crt" "$keys/verity.crt" \
-        || fail "base tree does not trust $keys/verity.crt in /usr/lib/verity.d/"
-ok "verity signature covers $roothash, certificate $fingerprint (trusted by the base tree)"
+        [[ -s "$base/usr/lib/verity.d/verity.crt" ]] && cmp -s "$base/usr/lib/verity.d/verity.crt" "$keys/verity.crt" \
+                || fail "base tree does not trust $keys/verity.crt in /usr/lib/verity.d/"
+        ok "verity signature covers $roothash, certificate $fingerprint (trusted by the base tree)"
 
-# 4. erofs: compressed, and the extension content.
-dump.erofs -s --offset="$root_offset" "$img" >| "$tmp/erofs.txt" 2>&1 || fail "dump.erofs cannot read the root partition"
-compr="$(sed -n 's/^Filesystem compr_algs:[[:space:]]*//p' "$tmp/erofs.txt")"
-[[ -n "$compr" ]] || fail "root erofs is not compressed (SYSTEMD_REPART_MKFS_OPTIONS_EROFS not applied?)"
-ext="$tmp/ext"
-mkdir -p "$ext"
-fsck.erofs --extract="$ext" --no-preserve-owner --offset="$root_offset" "$img" >/dev/null 2>&1 || fail "fsck.erofs cannot extract the root partition"
-top="$(ls -A "$ext" | sort | tr '\n' ' ')"
-[[ "$top" == "opt usr " || "$top" == "usr " ]] || fail "sysext top level must be usr (and an empty opt), got: $top"
-[[ ! -d "$ext/opt" || -z "$(ls -A "$ext/opt")" ]] || fail "/opt is not empty: CNI DaemonSets need a writable /opt/cni/bin"
-[[ ! -e "$ext/usr/lib/os-release" ]] || fail "sysext ships /usr/lib/os-release (would override the host's)"
-ok "content: only /usr (no /etc, /var, /opt content, no os-release), erofs compressed with $compr"
+        # 4. erofs: compressed, and the extension content.
+        dump.erofs -s --offset="$root_offset" "$img" >| "$tmp/erofs.txt" 2>&1 || fail "dump.erofs cannot read the root partition"
+        compr="$(sed -n 's/^Filesystem compr_algs:[[:space:]]*//p' "$tmp/erofs.txt")"
+        [[ -n "$compr" ]] || fail "root erofs is not compressed (SYSTEMD_REPART_MKFS_OPTIONS_EROFS not applied?)"
+        mkdir -p "$ext"
+        fsck.erofs --extract="$ext" --no-preserve-owner --offset="$root_offset" "$img" >/dev/null 2>&1 || fail "fsck.erofs cannot extract the root partition"
+        top="$(ls -A "$ext" | sort | tr '\n' ' ')"
+        [[ "$top" == "opt usr " || "$top" == "usr " ]] || fail "sysext top level must be usr (and an empty opt), got: $top"
+        [[ ! -d "$ext/opt" || -z "$(ls -A "$ext/opt")" ]] || fail "/opt is not empty: CNI DaemonSets need a writable /opt/cni/bin"
+        [[ ! -e "$ext/usr/lib/os-release" ]] || fail "sysext ships /usr/lib/os-release (would override the host's)"
+        ok "content: only /usr (no /etc, /var, /opt content, no os-release), erofs compressed with $compr"
 
-# 5. extension-release: exactly one file, named after the image, matching the
-#    base os-release the way systemd-sysext(8) matches it.
-releases=("$ext"/usr/lib/extension-release.d/extension-release.*)
-[[ ${#releases[@]} -eq 1 && "$(basename "${releases[0]}")" == "extension-release.$name" ]] \
-        || fail "expected exactly usr/lib/extension-release.d/extension-release.$name, got: ${releases[*]##*/}"
-python3 - "${releases[0]}" "$base/usr/lib/os-release" "$version" <<'EOF'
+        # 5. extension-release: exactly one file, named after the image, matching the
+        #    base os-release the way systemd-sysext(8) matches it.
+        releases=("$ext"/usr/lib/extension-release.d/extension-release.*)
+        [[ ${#releases[@]} -eq 1 && "$(basename "${releases[0]}")" == "extension-release.$name" ]] \
+                || fail "expected exactly usr/lib/extension-release.d/extension-release.$name, got: ${releases[*]##*/}"
+        python3 - "${releases[0]}" "$base/usr/lib/os-release" "$version" <<'EOF'
 import shlex, sys
 def env(path):
     out = {}
@@ -125,106 +194,83 @@ check(ext.get("EXTENSION_RELOAD_MANAGER") == "1", "EXTENSION_RELOAD_MANAGER=1 mi
 print("verify-kubernetes: ok: extension-release: " + " ".join(f"{k}={v}" for k, v in ext.items()))
 EOF
 
-# 6. Binaries and their versions (x86-64 host: run them from the extracted tree).
-#    The extension is an overlay delta: a package the base tree already has
-#    (iptables) leaves no trace in it, so the preflight tools may come from
-#    either layer.
-for b in kubeadm kubelet kubectl containerd containerd-shim-runc-v2 runc crictl; do
-        [[ -f "$ext/usr/bin/$b" || -L "$ext/usr/bin/$b" ]] || fail "/usr/bin/$b missing from the extension"
-done
-for b in conntrack socat ethtool iptables; do
-        [[ -e "$ext/usr/bin/$b" || -e "$base/usr/bin/$b" ]] || fail "/usr/bin/$b neither in the extension nor in the base tree"
-done
-chmod u+x "$ext/usr/bin/kubeadm" "$ext/usr/bin/kubelet"
-[[ "$("$ext/usr/bin/kubeadm" version -o short)" == "v$version" ]] || fail "kubeadm reports $("$ext/usr/bin/kubeadm" version -o short), image says $version"
-[[ "$("$ext/usr/bin/kubelet" --version)" == "Kubernetes v$version" ]] || fail "kubelet reports $("$ext/usr/bin/kubelet" --version)"
-[[ -x "$ext/usr/lib/cni/bridge" ]] || fail "/usr/lib/cni/bridge missing"
-ok "kubeadm/kubelet v$version, kubectl, containerd, runc, crictl, CNI plugins in /usr/lib/cni, preflight tools"
+        # 6. Binaries and their versions (x86-64 host: run them from the extracted tree).
+        #    The extension is an overlay delta: a package the base tree already has
+        #    (iptables) leaves no trace in it, so the preflight tools may come from
+        #    either layer.
+        for b in kubeadm kubelet kubectl containerd containerd-shim-runc-v2 runc crictl; do
+                [[ -f "$ext/usr/bin/$b" || -L "$ext/usr/bin/$b" ]] || fail "/usr/bin/$b missing from the extension"
+        done
+        for b in conntrack socat ethtool iptables; do
+                [[ -e "$ext/usr/bin/$b" || -e "$base/usr/bin/$b" ]] || fail "/usr/bin/$b neither in the extension nor in the base tree"
+        done
+        chmod u+x "$ext/usr/bin/kubeadm" "$ext/usr/bin/kubelet" "$ext/usr/bin/kubectl" "$ext/usr/bin/containerd" "$ext/usr/bin/runc" "$ext/usr/bin/crictl"
+        [[ "$("$ext/usr/bin/kubeadm" version -o short)" == "v$version" ]] || fail "kubeadm reports $("$ext/usr/bin/kubeadm" version -o short), image says $version"
+        [[ "$("$ext/usr/bin/kubelet" --version)" == "Kubernetes v$version" ]] || fail "kubelet reports $("$ext/usr/bin/kubelet" --version)"
+        [[ "$("$ext/usr/bin/kubectl" version --client -o json | python3 -c 'import json, sys; print(json.load(sys.stdin)["clientVersion"]["gitVersion"])')" == "v$version" ]] \
+                || fail "kubectl reports $("$ext/usr/bin/kubectl" version --client 2>&1 | head -1), image says $version"
+        [[ -x "$ext/usr/lib/cni/bridge" ]] || fail "/usr/lib/cni/bridge missing"
+        # containerd prints "containerd github.com/containerd/containerd/v2 v2.3.5 <commit>";
+        # Arch builds crictl without its version string.
+        ok "kubeadm/kubelet/kubectl v$version; containerd $("$ext/usr/bin/containerd" --version | /usr/bin/grep -oE ' v[0-9][^ ]*' | head -1 | tr -d ' '), $("$ext/usr/bin/runc" --version | head -1), CNI plugins in /usr/lib/cni, crictl, preflight tools"
 
-# 7. Units, drop-ins and configuration shipped by the extension.
-for f in usr/lib/systemd/system/kubelet.service usr/lib/systemd/system/containerd.service \
-         usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf \
-         usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf \
-         usr/lib/systemd/system-preset/50-kubernetes.preset usr/lib/vm-manager/containerd.toml \
-         usr/lib/sysctl.d/90-kubernetes.conf usr/lib/sysctl.d/50-kubelet.conf usr/lib/modules-load.d/kubelet.conf usr/lib/tmpfiles.d/kubernetes.conf; do
-        [[ -s "$ext/$f" ]] || fail "$f missing"
-done
-python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); r = c["plugins"]["io.containerd.cri.v1.runtime"]
+        # 7. Units, drop-ins and configuration shipped by the extension.
+        for f in usr/lib/systemd/system/kubelet.service usr/lib/systemd/system/containerd.service \
+                 usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf \
+                 usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf \
+                 usr/lib/systemd/system-preset/50-kubernetes.preset usr/lib/vm-manager/containerd.toml \
+                 usr/lib/sysctl.d/90-kubernetes.conf usr/lib/sysctl.d/50-kubelet.conf usr/lib/modules-load.d/kubelet.conf usr/lib/tmpfiles.d/kubernetes.conf; do
+                [[ -s "$ext/$f" ]] || fail "$f missing"
+        done
+        python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); r = c["plugins"]["io.containerd.cri.v1.runtime"]
 assert r["containerd"]["runtimes"]["runc"]["options"]["SystemdCgroup"] is True, "SystemdCgroup"
 assert r["cni"]["bin_dirs"][:2] == ["/opt/cni/bin", "/usr/lib/cni"], r["cni"]["bin_dirs"]' "$ext/usr/lib/vm-manager/containerd.toml" \
-        || fail "containerd.toml does not parse or lacks SystemdCgroup/bin_dirs"
-/usr/bin/grep -q 'containerd.toml' "$ext/usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf" || fail "containerd drop-in does not point at containerd.toml"
-/usr/bin/grep -q '^Upholds=containerd.service kubelet.service' "$ext/usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf" || fail "multi-user.target drop-in lacks Upholds="
-for u in systemd-modules-load.service systemd-sysctl.service; do
-        /usr/bin/grep -qx 'After=systemd-sysext.service' "$base/usr/lib/systemd/system/$u.d/vm-manager.conf" 2>/dev/null || fail "base tree does not order $u after systemd-sysext.service"
-done
-ok "units: kubelet + containerd with vm-manager drop-ins, Upholds= from multi-user.target, containerd.toml (SystemdCgroup, CNI dirs), base orders modules-load/sysctl after sysext"
+                || fail "containerd.toml does not parse or lacks SystemdCgroup/bin_dirs"
+        /usr/bin/grep -q 'containerd.toml' "$ext/usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf" || fail "containerd drop-in does not point at containerd.toml"
+        /usr/bin/grep -q '^Upholds=containerd.service kubelet.service' "$ext/usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf" || fail "multi-user.target drop-in lacks Upholds="
+        for u in systemd-modules-load.service systemd-sysctl.service; do
+                /usr/bin/grep -qx 'After=systemd-sysext.service' "$base/usr/lib/systemd/system/$u.d/vm-manager.conf" 2>/dev/null || fail "base tree does not order $u after systemd-sysext.service"
+        done
+        ok "units: kubelet + containerd with vm-manager drop-ins, Upholds= from multi-user.target, containerd.toml (SystemdCgroup, CNI dirs), base orders modules-load/sysctl after sysext"
 
-# 8. Merge onto the base tree with systemd-sysext, in an unprivileged user
-#    namespace (private mount namespace: nothing on the host or in build/
-#    changes). The extension is offered as a directory; that exercises the
-#    extension-release matching against the base os-release and the unit
-#    files as systemd will see them, but not the DDI/verity path (step 1-3).
-if unshare -Urm --propagation=shared true 2>/dev/null; then
-        mkdir -p "$tmp/root"
-        unshare -Urm --propagation=shared bash -c '
-                set -euo pipefail
-                root="$1" base="$2" ext="$3" name="$4"
-                mount -t tmpfs tmpfs /run
-                mount --bind -o ro "$base" "$root"
-                mount -t tmpfs tmpfs "$root/var"
-                mkdir -p "$root/var/lib/extensions/$name"
-                mount --bind -o ro "$ext" "$root/var/lib/extensions/$name"
-                systemd-sysext --root="$root" --no-reload merge
-                systemd-sysext --root="$root" status --no-legend
-                test -x "$root/usr/bin/kubeadm"
-                test -s "$root/usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf"
-                test -s "$root/usr/lib/systemd/system/systemd-networkd.service"
-                systemd-analyze --root="$root" verify containerd.service kubelet.service multi-user.target
-        ' -- "$tmp/root" "$base" "$ext" "$name" >| "$tmp/merge.txt" 2>&1 || fail "merge onto the base tree failed: $(tail -3 "$tmp/merge.txt" | tr '\n' ' ')"
-        ok "systemd-sysext merged $name onto the base tree ($(/usr/bin/grep -m1 '^/usr' "$tmp/merge.txt" | tr -s ' ')); systemd-analyze verify is clean"
-else
-        echo "verify-kubernetes: skip: unprivileged user namespaces unavailable, merge test not run"
-fi
+        # 8. Merge onto the base tree with systemd-sysext, in an unprivileged user
+        #    namespace (private mount namespace: nothing on the host or in build/
+        #    changes). The extension is offered as a directory; that exercises the
+        #    extension-release matching against the base os-release and the unit
+        #    files as systemd will see them, but not the DDI/verity path (step 1-3).
+        if unshare -Urm --propagation=shared true 2>/dev/null; then
+                mkdir -p "$tmp/root"
+                unshare -Urm --propagation=shared bash -c '
+                        set -euo pipefail
+                        root="$1" base="$2" ext="$3" name="$4"
+                        mount -t tmpfs tmpfs /run
+                        mount --bind -o ro "$base" "$root"
+                        mount -t tmpfs tmpfs "$root/var"
+                        mkdir -p "$root/var/lib/extensions/$name"
+                        mount --bind -o ro "$ext" "$root/var/lib/extensions/$name"
+                        systemd-sysext --root="$root" --no-reload merge
+                        systemd-sysext --root="$root" status --no-legend
+                        test -x "$root/usr/bin/kubeadm"
+                        test -s "$root/usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf"
+                        test -s "$root/usr/lib/systemd/system/systemd-networkd.service"
+                        systemd-analyze --root="$root" verify containerd.service kubelet.service multi-user.target
+                ' -- "$tmp/root" "$base" "$ext" "$name" >| "$tmp/merge.txt" 2>&1 || fail "merge onto the base tree failed: $(tail -3 "$tmp/merge.txt" | tr '\n' ' ')"
+                ok "systemd-sysext merged $name onto the base tree ($(/usr/bin/grep -m1 '^/usr' "$tmp/merge.txt" | tr -s ' ')); systemd-analyze verify is clean"
+        else
+                echo "verify-kubernetes: skip: unprivileged user namespaces unavailable, merge test not run"
+        fi
 
-# 9. sysupdate: the base image's transfer matches the published file name.
-python3 - "$transfer" "$version" "$sysupdate" <<'EOF'
-import configparser, os, sys
-transfer, version, sysupdate = sys.argv[1:]
-c = configparser.ConfigParser(strict=False, interpolation=None)
-c.read(transfer)
-src, tgt = c["Source"], c["Target"]
-fname = src["MatchPattern"].replace("@v", version)
-if not os.path.isfile(os.path.join(sysupdate, fname)):
-    sys.exit(f"verify-kubernetes: FAIL: transfer expects {fname} in {sysupdate}, found {os.listdir(sysupdate)}")
-if not src["Path"].rstrip("/").endswith("/sysupdate/" + os.path.basename(sysupdate)):
-    sys.exit(f"verify-kubernetes: FAIL: transfer Source Path={src['Path']} is not the {os.path.basename(sysupdate)} component")
-if c["Transfer"].get("Verify", "yes") != "yes":
-    sys.exit("verify-kubernetes: FAIL: transfer has Verify=no")
-if tgt["Path"] != "/var/lib/extensions":
-    sys.exit(f"verify-kubernetes: FAIL: transfer Target Path={tgt['Path']}, systemd-sysext looks in /var/lib/extensions")
-print(f"verify-kubernetes: ok: transfer {os.path.basename(transfer)}: {src['Path']}{fname} -> {tgt['Path']}/{tgt['MatchPattern'].replace('@v', version)} (Verify=yes)")
-EOF
-# gpg rewrites a --keyring file it opens (see scripts/verify); use a copy.
-pubring="$(mktemp)"
-cp "$keys/import-pubring.pgp" "$pubring"
-GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$pubring" \
-        --verify "$sysupdate/SHA256SUMS.gpg" "$sysupdate/SHA256SUMS" 2>/dev/null || fail "SHA256SUMS.gpg does not verify"
-rm -f "$pubring" "$pubring~"
-(cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
-ok "sysupdate/kubernetes: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifact(s)"
-
-# 10. Expected PCR 13 of a guest running this version, into policy.json as
-#     pcr13.<version> (next to the pcr11 values scripts/verify writes; other
-#     versions and the golden values are kept). The rule, mirrored by
-#     attest.SysextPCR: PCR 13 starts at zero; the initrd's
-#     systemd-pcrosseparator.service extends it with the word "os-separator";
-#     vm-kubernetes.service extends it once with the SHA256SUMS line of the
-#     merged file, "<sha256>  kubernetes_<version>.raw" (no newline), through
-#     systemd-pcrextend. Each extension is PCR := sha256(PCR || sha256(word)).
-line="$(/usr/bin/grep -E "  $name\.raw\$" "$sysupdate/SHA256SUMS")"
-[[ -n "$line" ]] || fail "SHA256SUMS has no line for $name.raw"
-python3 - "$build/policy.json" "$version" "$line" <<'EOF'
+        # 9. Expected PCR 13 of a guest running this version, into policy.json as
+        #    pcr13.<version> (next to the pcr11 values scripts/verify writes; other
+        #    versions and the golden values are kept). The rule, mirrored by
+        #    attest.SysextPCR: PCR 13 starts at zero; the initrd's
+        #    systemd-pcrosseparator.service extends it with the word "os-separator";
+        #    vm-kubernetes.service extends it once with the SHA256SUMS line of the
+        #    merged file, "<sha256>  kubernetes_<version>.raw" (no newline), through
+        #    systemd-pcrextend. Each extension is PCR := sha256(PCR || sha256(word)).
+        line="$(/usr/bin/grep -E "  $name\.raw\$" "$sysupdate/SHA256SUMS")"
+        [[ -n "$line" ]] || fail "SHA256SUMS has no line for $name.raw"
+        python3 - "$policy" "$version" "$line" <<'EOF'
 import hashlib, json, sys
 policy, version, line = sys.argv[1:]
 pcr = bytes(32)
@@ -239,6 +285,31 @@ json.dump(out, open(policy, "w"), indent=2)
 open(policy, "a").write("\n")
 print(f"verify-kubernetes: ok: pcr13[{version}] = {pcr.hex()} (os-separator, then '{line}') written to {policy}")
 EOF
+        echo "verify-kubernetes: $name.raw $(du -h "$img" | cut -f1) ($(du -sh "$ext" | cut -f1) uncompressed), roothash $roothash"
+}
 
-echo "verify-kubernetes: $name.raw $(du -h "$img" | cut -f1) ($(du -sh "$ext" | cut -f1) uncompressed), roothash $roothash"
-echo "verify-kubernetes: PASS"
+for version in "${versions[@]}"; do
+        verify_version "$version"
+done
+
+# C. policy.json carries pcr13 for exactly the published versions: a version
+#    whose file was retired from the directory can no longer be attested.
+python3 - "$policy" "${published[@]}" <<'EOF'
+import json, sys
+policy, *published = sys.argv[1:]
+out = json.load(open(policy))
+pcr13 = out.get("pcr13", {})
+stale = sorted(v for v in pcr13 if v not in published)
+for v in stale:
+    del pcr13[v]
+missing = [v for v in published if v not in pcr13]
+if missing:
+    sys.exit(f"verify-kubernetes: FAIL: {policy} lacks pcr13 for published {missing}; run verify-kubernetes without versions")
+if stale:
+    json.dump(out, open(policy, "w"), indent=2)
+    open(policy, "a").write("\n")
+    print(f"verify-kubernetes: dropped pcr13 of unpublished {', '.join(stale)} from {policy}")
+print(f"verify-kubernetes: ok: {policy} pcr13 covers {', '.join(sorted(pcr13))}")
+EOF
+
+echo "verify-kubernetes: PASS (${versions[*]})"

@@ -147,6 +147,8 @@ func TestCompareVersions(t *testing.T) {
 		{"1.0.0-rc2", "1.0.0-rc1", 1},
 		{"abc", "abd", -1},
 		{"1.32.0", "1.31.2", 1},
+		{"1.36.4", "1.35.4", 1},
+		{"1.35.10", "1.35.4", 1},
 	}
 	for _, tc := range tests {
 		assert.Equal(t, tc.want, CompareVersions(tc.a, tc.b), "%s vs %s", tc.a, tc.b)

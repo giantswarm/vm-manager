@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Download the Arch packages of one Kubernetes release from the Arch Linux
+# Archive into a directory mkosi serves as a local pacman repository to the
+# kubernetes sysext build (--volatile-package-directory=, see the Makefile):
+#
+#   fetch-kubernetes-packages <version> <dir>
+#     <dir>/kubeadm-<version>-<pkgrel>-x86_64.pkg.tar.zst
+#     <dir>/kubelet-<version>-<pkgrel>-x86_64.pkg.tar.zst
+#     <dir>/kubectl-<version>-<pkgrel>-x86_64.pkg.tar.zst
+#     <dir>/signatures/<package>.sig
+#
+# The signatures live in a subdirectory because mkosi feeds everything
+# matching *.pkg.tar* at the top level to repo-add, which rejects them.
+#
+# The official repositories carry one Kubernetes release at a time; the
+# archive (https://archive.archlinux.org/packages/) keeps every build that was
+# ever published, so any release can be built, and a listed release keeps
+# building after the repositories moved on. The highest pkgrel of the version
+# is taken. mkosi's local repository is SigLevel=Never, so the signatures are
+# checked here against the Arch packagers' keyring (archlinux-keyring, the
+# trust root of pacman itself), refusing keys on its revocation list. Files
+# that are present and verify are kept; a partial or bad download is removed.
+set -euo pipefail
+
+version="${1:?kubernetes version}" dir="${2:?package dir}"
+archive="${ARCHLINUX_ARCHIVE:-https://archive.archlinux.org/packages}"
+keyring="${ARCHLINUX_KEYRING:-/usr/share/pacman/keyrings/archlinux.gpg}"
+revoked="${keyring%.gpg}-revoked"
+packages=(kubeadm kubelet kubectl)
+
+fail() { echo "fetch-kubernetes-packages: $*" >&2; exit 1; }
+log() { echo "fetch-kubernetes-packages: $*"; }
+
+[[ -s "$keyring" ]] || fail "$keyring missing (archlinux-keyring), set ARCHLINUX_KEYRING"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# The keyring ships ASCII-armored (pacman-key imports it); import it into a
+# throw-away home so nothing outside $dir changes.
+gpg=(gpg --homedir "$tmp" --batch --quiet)
+"${gpg[@]}" --import "$keyring" 2>/dev/null || fail "cannot import $keyring"
+
+# verify <package file> <signature>: the detached signature is valid and from
+# a key of the keyring that is not revoked. Prints the signing key.
+verify() {
+        local status fpr
+        status="$("${gpg[@]}" --status-fd 1 --verify "$2" "$1" 2>/dev/null)" || return 1
+        fpr="$(sed -n 's/^\[GNUPG:\] VALIDSIG \([0-9A-F]*\) .*/\1/p' <<<"$status" | head -1)"
+        [[ -n "$fpr" ]] || return 1
+        if [[ -s "$revoked" ]] && /usr/bin/grep -qix "$fpr" "$revoked"; then
+                echo "fetch-kubernetes-packages: ${1##*/} is signed by revoked key $fpr" >&2
+                return 1
+        fi
+        echo "$fpr"
+}
+
+sigs="$dir/signatures"
+mkdir -p "$sigs"
+pattern="${version//./\\.}"
+for pkg in "${packages[@]}"; do
+        # The archive's directory index lists every build of the package;
+        # <pkg>-<version>-<pkgrel>-x86_64.pkg.tar.zst, highest pkgrel wins.
+        # An offline rebuild skips the index when a build is already present.
+        present=("$dir/$pkg-$version-"*"-x86_64.pkg.tar.zst")
+        if [[ -s "${present[0]}" ]] && key="$(verify "${present[0]}" "$sigs/${present[0]##*/}.sig")"; then
+                log "$pkg: ${present[0]##*/} present, signed by $key"
+                continue
+        fi
+        file="$(curl -fsSL --retry 3 "$archive/${pkg:0:1}/$pkg/" \
+                | /usr/bin/grep -oE "$pkg-$pattern-[0-9]+(\.[0-9]+)?-x86_64\.pkg\.tar\.zst" | sort -Vu | tail -1)" \
+                || fail "cannot list $archive/${pkg:0:1}/$pkg/"
+        [[ -n "$file" ]] || fail "the archive has no $pkg $version (see $archive/${pkg:0:1}/$pkg/)"
+        rm -f "$dir/$pkg-$version-"*"-x86_64.pkg.tar.zst" "$sigs/$pkg-$version-"*"-x86_64.pkg.tar.zst.sig"
+        for f in "$file" "$file.sig"; do
+                curl -fsSL --retry 3 -o "$tmp/$f" "$archive/${pkg:0:1}/$pkg/$f" || fail "download of $f failed"
+        done
+        key="$(verify "$tmp/$file" "$tmp/$file.sig")" || fail "$file: signature does not verify against $keyring"
+        mv "$tmp/$file.sig" "$sigs/"
+        mv "$tmp/$file" "$dir/"
+        log "$pkg: $file ($(du -h "$dir/$file" | cut -f1)), signed by $key"
+done

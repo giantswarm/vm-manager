@@ -13,8 +13,14 @@
 #     build/sysupdate/kubernetes/
 #       kubernetes_<v>.raw                     -> /usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer
 #
-# Each directory gets SHA256SUMS and a detached SHA256SUMS.gpg (keys/gnupg),
-# which the guest verifies against /etc/systemd/import-pubring.pgp.
+# The directory accumulates: publishing a version replaces that version's
+# files and keeps every other version (`make kubernetes-all` publishes each
+# Kubernetes release side by side, a base bump leaves the previous release
+# for sysupdate to move from). SHA256SUMS is regenerated over everything
+# present and signed again (detached SHA256SUMS.gpg, keys/gnupg), which the
+# guest verifies against /etc/systemd/import-pubring.pgp; publishing the same
+# version twice is a no-op but for the signature. To retire a version, delete
+# its files and publish any version.
 #
 # The base partition UUIDs are encoded in the file names (@u) because they are
 # derived from the verity root hash and roothash= on the UKI command line only
@@ -40,13 +46,14 @@ else:
 ' "$1"
 }
 
-rm -rf "$out"
 mkdir -p "$out"
 case "$component" in
 base)
         [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing" >&2; exit 1; }
         root_uuid="$(partuuid 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709)"
         verity_uuid="$(partuuid 2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5)"
+        # A rebuilt version carries new partition UUIDs: drop the old names.
+        rm -f "$out/${name}_"*.root.raw "$out/${name}_"*.verity.raw "$out/$name.verity-sig.raw" "$out/$name.efi"
         link "$name.root-x86-64.raw"            "${name}_${root_uuid}.root.raw"
         link "$name.root-x86-64-verity.raw"     "${name}_${verity_uuid}.verity.raw"
         link "$name.root-x86-64-verity-sig.raw" "$name.verity-sig.raw"
@@ -54,6 +61,7 @@ base)
         ;;
 kubernetes)
         [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing (run make kubernetes)" >&2; exit 1; }
+        rm -f "$out/$name.raw"
         link "$name.raw" "$name.raw"
         ;;
 *)
@@ -65,5 +73,5 @@ esac
 (cd "$out" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n' | sort | xargs -r sha256sum >| SHA256SUMS)
 GNUPGHOME="$keys/gnupg" gpg --batch --quiet --yes --detach-sign --output "$out/SHA256SUMS.gpg" "$out/SHA256SUMS"
 
-echo "publish-sysupdate: $out"
+echo "publish-sysupdate: $out ($name published, $(/usr/bin/grep -c . "$out/SHA256SUMS") files)"
 sed 's/^/  /' "$out/SHA256SUMS"
