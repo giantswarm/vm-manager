@@ -153,12 +153,22 @@ Phase B, installed boot (every boot from now on):
    into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
    the stages run with an empty config.
 7. Real system: systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
-   the guest reads `/kubernetes-version` from IMDS and runs
+   then `vm-kubernetes.service` (base image, `After=network-online.target
+   systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service`, wanted
+   by `multi-user.target`) reads `/kubernetes-version` from the IMDS and runs
    `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
    the artifact directory is served unfiltered because its `SHA256SUMS` is signed at build
-   time), `systemd-sysext merge` activates it (see the PCR 13 note under open points), then CAPI's unit runs `kubeadm init|join` and writes
-   `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready` posts a
-   second quote covering PCR 13 and the full phase path for `get_vm_attestation`.
+   time), removes any other `kubernetes_*.raw`, merges the extension with
+   `systemd-sysext refresh` (daemon-reload via `EXTENSION_RELOAD_MANAGER=1`, `Upholds=`
+   starts containerd and kubelet) and extends PCR 13 with `systemd-pcrextend` using the
+   file's `SHA256SUMS` line (`<sha256>  kubernetes_<version>.raw`), so the host predicts
+   PCR 13 from the artifact (`policy.json` `pcr13.<version>`, images/README.md). A VM
+   without a Kubernetes version skips the unit. CAPI's unit, ordered
+   `After=vm-kubernetes.service`, runs `kubeadm init|join` and writes
+   `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready`, also
+   `After=vm-kubernetes.service`, posts a second quote covering PCR 13 and the full phase
+   path for `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service`;
+   the e2e measures 14 s from the installed boot to ready with a 2 s download.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
 
 Fast path for later: pre-install on the host with `systemd-repart` from the same
@@ -167,13 +177,21 @@ skipping phase A when TPM-bound install credentials are not needed.
 
 ### Open points found while building waves 1 and 2
 
-- **PCR 13 and sysexts.** systemd 261 measures only stub-loaded extensions
-  (`<uki>.efi.extra.d/*.sysext.raw` on the ESP) into PCR 13; extensions merged from
-  `/var/lib/extensions` are not measured. To keep the Kubernetes layer attested, either the
-  phase-A installer pulls the sysext onto the target ESP next to the UKI (a sysupdate transfer
-  with `PathRelativeTo=esp`) so the stub loads and measures it on the first installed boot, or
-  the ready-stage agent extends PCR 13 with the sysext root hash through `systemd-pcrextend`.
-  Decided in wave 3 with the attestation work.
+- **PCR 13 and sysexts (resolved).** systemd 261 measures only stub-loaded extensions
+  (`<uki>.efi.extra.d/*.sysext.raw` on the ESP) into PCR 13, and those extend the initrd
+  (`/.extra/sysext/` is searched only there), not the installed root; the measured object
+  is the stub's cpio archive, which a host cannot predict from the artifact alone, and the
+  206 MB would have to fit the 512 MB ESP before the first installed boot. Decided:
+  `vm-kubernetes.service` extends PCR 13 itself after the merge with `systemd-pcrextend`
+  and the file's `SHA256SUMS` line. PCR 13 of a boot is then exactly two events,
+  "os-separator" (initrd, `systemd-pcrosseparator.service`) and that line, each
+  `PCR := sha256(PCR || sha256(word))`; `images/scripts/verify-kubernetes` writes the
+  result as `pcr13.<version>` into `policy.json`, `attest.SysextPCR` is the same rule in
+  Go, and the ready-stage verifier compares the VM's Kubernetes version against it,
+  falling back to `golden.sha256.13` (a VM without Kubernetes: the os-separator value
+  alone). Verified end to end by `e2e/kubernetes_sysext_test.go` against the vTPM.
+  `vm-manager image golden` still records golden 13 from whatever VM it is pointed at;
+  point it at a VM without a Kubernetes version when the fallback should mean "no sysext".
 - **Volatile `/etc`.** Solved: the image no longer boots with `systemd.volatile=overlay`.
   `persistent-etc.service` in the initrd mounts the var partition on `/sysroot/var` and an
   overlay on `/sysroot/etc` whose upper and work directories are `/var/lib/etc-overlay/`,
@@ -191,9 +209,11 @@ skipping phase A when TPM-bound install credentials are not needed.
 - **Host loopback alias.** The virtual network can translate `HostIP()` to the host's
   `127.0.0.1`, which would expose vm-manager's own API to unattested guests. It is opt-in
   per network (`EnableHostAlias`) and off for VM networks.
-- **Sysext file lifecycle.** systemd-sysext merges every `kubernetes_*.raw` it finds, so a
-  version change must remove the superseded file (the transfer uses `InstancesMax=2`, so
-  vm-manager or the guest unit deletes the old one after a successful switch).
+- **Sysext file lifecycle (resolved).** systemd-sysext merges every `kubernetes_*.raw` it
+  finds and sysupdate.d(5) rejects `InstancesMax=` below 2, so `vm-kubernetes.service`
+  deletes every `kubernetes_*.raw` other than the requested version before it refreshes;
+  exactly one file, one merged extension, one PCR 13 measurement per boot. A changed
+  `/kubernetes-version` takes effect on the next boot (no live switch of a running node).
 - **VM processes and vm-manager restarts.** v1 runs QEMU and swtpm as child processes;
   a vm-manager restart marks VMs stopped. Running each VM as a transient systemd unit
   (`systemd-run --scope`) is the planned fix.
@@ -232,8 +252,10 @@ pcrs:{sha256:{"0":..}}, event_log, userspace_log}` (binary fields base64, `stage
 `initrd` or `ready`). Verification: signature over the quote with `ak_pub`, nonce match,
 PCR digest matches `pcrs`, PCR 11 equals the value computed with `systemd-measure calculate`
 for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
-`enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0-7 (and 13 for `ready`)
-equal the image policy's golden values recorded by `vm-manager image golden`. Only the
+`enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0-7 equal the image policy's
+golden values recorded by `vm-manager image golden`, and at `ready` PCR 13 equals the
+policy's `pcr13` entry for the VM's Kubernetes version (written by
+`images/scripts/verify-kubernetes`; golden 13 when the VM has none). Only the
 `initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
 
