@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strings"
 	"time"
@@ -186,18 +187,65 @@ func (s *Service) newID() (string, error) {
 	}
 }
 
-// freeCID returns the lowest vsock CID no VM holds; the caller holds s.mu.
-func (s *Service) freeCID() uint32 {
+// cidSpread is the range the per-service CID base is drawn from. vsock CIDs
+// are host-global, and several vm-managers (developer runs, parallel e2e
+// suites) share one host; each starts from a base derived from its state dir
+// so their allocations rarely meet, and startProcess retries when they do.
+const cidSpread = 1 << 20
+
+// maxCIDRetries bounds how often a start is retried with a fresh CID when
+// the kernel reports the guest CID in use by a VM this service does not know.
+const maxCIDRetries = 16
+
+// cidBase is where this service starts scanning for free CIDs.
+func (s *Service) cidBase() uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s.opts.StateDir))
+	return qemu.MinCID + h.Sum32()%cidSpread
+}
+
+// freeCID returns the first vsock CID at or after the service's base that
+// no VM of this service holds; the caller holds s.mu.
+func (s *Service) freeCID() uint32 { return s.freeCIDFrom(s.cidBase()) }
+
+// freeCIDFrom returns the first free CID at or after start, wrapping around
+// the valid range; the caller holds s.mu.
+func (s *Service) freeCIDFrom(start uint32) uint32 {
 	used := make(map[uint32]bool, len(s.vms))
 	for _, e := range s.vms {
 		used[e.rec.CID] = true
 	}
-	for cid := uint32(qemu.MinCID); cid < qemu.MaxCID; cid++ {
+	const span = uint64(qemu.MaxCID - qemu.MinCID)
+	if start < qemu.MinCID || start >= qemu.MaxCID {
+		start = qemu.MinCID
+	}
+	for i := uint64(0); i < span; i++ {
+		cid := qemu.MinCID + uint32((uint64(start-qemu.MinCID)+i)%span)
 		if !used[cid] {
 			return cid
 		}
 	}
 	return qemu.MaxCID
+}
+
+// reassignCID moves e to the next free CID after prev and persists it.
+func (s *Service) reassignCID(e *entry, prev uint32) (uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.freeCIDFrom(prev + 1)
+	e.rec.CID = next
+	if err := s.persist(e); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// isCIDInUse recognises QEMU's vhost-vsock failure for a guest CID another
+// VM on the host already holds.
+func isCIDInUse(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unable to set guest cid") ||
+		(strings.Contains(msg, "guest-cid") && strings.Contains(msg, "in use"))
 }
 
 // provision creates the per-VM files and takes the volume and the lease.
@@ -307,14 +355,36 @@ func (s *Service) startProcess(ctx context.Context, e *entry, phase qemu.Phase, 
 	if phase == qemu.PhaseBoot {
 		p.notify = s.opts.Notify.Subscribe(rec.CID)
 	}
-	spec := s.qemuSpec(rec, phase, img, att.SocketPath, att.MAC, t.SocketPath())
-	inst, err := s.opts.Runtime.Start(ctx, spec)
-	if err != nil {
-		s.stopTPM(rec.ID, t)
-		if phase == qemu.PhaseBoot {
-			s.opts.Notify.Unsubscribe(rec.CID)
+	var inst Instance
+	for attempt := 0; ; attempt++ {
+		spec := s.qemuSpec(rec, phase, img, att.SocketPath, att.MAC, t.SocketPath())
+		inst, err = s.opts.Runtime.Start(ctx, spec)
+		if err == nil {
+			break
 		}
-		return nil, fmt.Errorf("start qemu: %w", err)
+		if !isCIDInUse(err) || attempt >= maxCIDRetries {
+			s.stopTPM(rec.ID, t)
+			if phase == qemu.PhaseBoot {
+				s.opts.Notify.Unsubscribe(rec.CID)
+			}
+			return nil, fmt.Errorf("start qemu: %w", err)
+		}
+		// Another vm-manager on this host holds the CID: move on.
+		prev := rec.CID
+		next, rerr := s.reassignCID(e, prev)
+		if rerr != nil {
+			s.stopTPM(rec.ID, t)
+			if phase == qemu.PhaseBoot {
+				s.opts.Notify.Unsubscribe(prev)
+			}
+			return nil, fmt.Errorf("start qemu: %w; reassign cid: %w", err, rerr)
+		}
+		s.log.Warn("vsock cid in use on this host, retrying with the next one", "id", rec.ID, "cid", prev, "next", next)
+		rec.CID = next
+		if phase == qemu.PhaseBoot {
+			s.opts.Notify.Unsubscribe(prev)
+			p.notify = s.opts.Notify.Subscribe(next)
+		}
 	}
 	p.inst = inst
 	p.wait = inst.Wait()
