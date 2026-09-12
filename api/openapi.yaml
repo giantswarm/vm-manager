@@ -630,6 +630,19 @@ components:
         at:
           type: string
           format: date-time
+        akFingerprint:
+          type: string
+          description: sha256 of the attestation key's public area; set by the verifying attestor.
+        pcrs:
+          type: object
+          description: Quoted sha256 PCR values by index, set once the PCR digest verified.
+          additionalProperties:
+            type: string
+        learned:
+          type: array
+          description: PCR indexes accepted without a golden value in the image policy.
+          items:
+            type: integer
     Attestation:
       type: object
       required: [required, userDataReleased]

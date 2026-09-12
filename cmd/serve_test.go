@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/attest"
+	"github.com/giantswarm/vm-manager/internal/imds"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -147,7 +149,36 @@ func TestServeOptionsComplete(t *testing.T) {
 	o = base()
 	require.NoError(t, o.complete())
 	assert.Equal(t, metrics.DefaultMaxGuestSeries, o.metricsGuestSeriesLimit, "an unset limit is the default")
+	assert.Equal(t, attestationNoop, o.attestation, "empty means the default")
 	o = base()
 	o.metricsGuestSeriesLimit = -1
 	assert.ErrorContains(t, o.complete(), "--metrics-guest-series-limit")
+
+	o = base()
+	o.attestation = "maybe"
+	assert.ErrorContains(t, o.complete(), "--attestation: \"maybe\"")
+
+	o = base()
+	o.learnGolden = true
+	assert.ErrorContains(t, o.complete(), "--attestation-learn-golden needs --attestation=verify")
+
+	o = base()
+	o.attestation, o.learnGolden = attestationVerify, true
+	require.NoError(t, o.complete())
+}
+
+// TestAttestorWiring builds both attestors; the verifier resolves the VM
+// service lazily, so it must not need c.vm at construction.
+func TestAttestorWiring(t *testing.T) {
+	c := &components{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a, err := c.attestor(&serveOptions{attestation: attestationNoop}, log)
+	require.NoError(t, err)
+	assert.IsType(t, &imds.NoopAttestor{}, a)
+
+	a, err = c.attestor(&serveOptions{attestation: attestationVerify, learnGolden: true}, log)
+	require.NoError(t, err)
+	assert.IsType(t, &attest.Verifier{}, a)
+	_, err = a.SubmitQuote(context.Background(), "vm-1", imds.QuoteRequest{Stage: imds.StageInitrd, Nonce: "00"})
+	assert.NoError(t, err, "an unknown nonce is a rejection, not an error, and the policy is never consulted")
 }

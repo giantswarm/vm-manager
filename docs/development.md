@@ -104,8 +104,18 @@ host requirements.
 - `internal/tpm` — one swtpm per VM (see above).
 - `internal/runtime/proc`, `internal/runtime/qemu` — process supervision
   and the QEMU runtime (see above).
-- `internal/attest` — planned: the quote verifier behind `imds.Attestor`;
-  until it lands the service runs `imds.NoopAttestor`.
+- `internal/tpmquote` — pure parsing and cryptographic verification of a
+  TPM2_Quote (TPMS_ATTEST, TPMT_SIGNATURE, AK TPMT_PUBLIC): magic and type,
+  AK attributes, signature, nonce, PCR digest. `tpmquote/quotetest` produces
+  real quotes on the go-tpm simulator (cgo) for tests.
+- `internal/attest` — the `imds.Attestor` behind `--attestation=verify`:
+  nonces, AK pinning per VM on the first verified initrd quote (trust on
+  first use), PCR 11 against the image's `policy.json` phase paths, PCRs
+  0-7 (and 13 at ready) against its golden values;
+  `--attestation-learn-golden` accepts and records missing golden values and
+  `vm-manager image golden <image> --from-vm <id>` writes them back.
+  `--attestation=noop` (the default until the image integration flips it)
+  runs `imds.NoopAttestor`, which verifies nothing.
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 - `images/` — the mkosi build of the guest image and the Kubernetes sysext
   (`make -C images keys base`, outputs in `images/build/`; see

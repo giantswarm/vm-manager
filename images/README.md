@@ -49,7 +49,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}` |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `vm-manager image golden` adds `golden: {sha256: {"0": hex, ..., "7": hex, "13": hex}}` (PCRs 0-7 and 13 of a known-good boot), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]` and PCRs 0-7 (and 13 at the ready stage) with `golden` |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
 
 `make kubernetes` (or `make images`) adds, via `scripts/publish-sysupdate kubernetes`:

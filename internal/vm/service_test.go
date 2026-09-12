@@ -53,6 +53,8 @@ type harness struct {
 	imageDir string
 	imgs     *vmtest.Images
 	metrics  *metricsRecorder
+	// attestor, when set, is the Options.Attestor of the next start.
+	attestor imds.Attestor
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -134,6 +136,7 @@ func (h *harness) start() {
 		Runtime:          h.rt,
 		Networks:         h.nets,
 		Notify:           h.notify,
+		Attestor:         h.attestor,
 		OVMFCode:         filepath.Join(h.imageDir, "OVMF_CODE.fd"),
 		OVMFVarsTemplate: filepath.Join(h.imageDir, "OVMF_VARS.fd"),
 		Region:           "host1",

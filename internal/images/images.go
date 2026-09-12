@@ -237,12 +237,34 @@ func (c *Catalog) kubernetesVersions() []string {
 // policy loads <id>_<version>.policy.json, else policy.json when it names
 // this image (or names none).
 func (c *Catalog) policy(id, version string) json.RawMessage {
-	if raw := readJSON(filepath.Join(c.dir, id+"_"+version+policySuffix)); raw != nil {
-		return raw
+	_, raw := c.policySource(id, version)
+	return raw
+}
+
+// PolicyPath is the file Image.Policy came from, or, for an image without a
+// policy, where one would be written: <id>_<version>.policy.json.
+func (c *Catalog) PolicyPath(img Image) string {
+	if path, _ := c.policySource(img.ID, img.Version); path != "" {
+		return path
 	}
-	raw := readJSON(filepath.Join(c.dir, policyFile))
+	return c.perImagePolicy(img.ID, img.Version)
+}
+
+func (c *Catalog) perImagePolicy(id, version string) string {
+	return filepath.Join(c.dir, id+"_"+version+policySuffix)
+}
+
+// policySource returns the policy file that applies to an image and its
+// content, or "" and nil when there is none.
+func (c *Catalog) policySource(id, version string) (string, json.RawMessage) {
+	perImage := c.perImagePolicy(id, version)
+	if raw := readJSON(perImage); raw != nil {
+		return perImage, raw
+	}
+	shared := filepath.Join(c.dir, policyFile)
+	raw := readJSON(shared)
 	if raw == nil {
-		return nil
+		return "", nil
 	}
 	var head struct {
 		ImageID      string `json:"image_id"`
@@ -250,12 +272,12 @@ func (c *Catalog) policy(id, version string) json.RawMessage {
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
 		c.log.Warn("policy.json is not a JSON object, ignored", "err", err)
-		return nil
+		return "", nil
 	}
 	if (head.ImageID != "" && head.ImageID != id) || (head.ImageVersion != "" && head.ImageVersion != version) {
-		return nil
+		return "", nil
 	}
-	return raw
+	return shared, raw
 }
 
 func readJSON(path string) json.RawMessage {

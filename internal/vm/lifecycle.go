@@ -707,6 +707,9 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	s.broadcastLocked()
 	s.mu.Unlock()
 	s.opts.Metrics.ForgetVM(id)
+	if f, ok := s.opts.Attestor.(Forgetter); ok {
+		f.Forget(id)
+	}
 	s.log.Info("vm deleted", "id", id)
 	return s.persistNetworks()
 }
