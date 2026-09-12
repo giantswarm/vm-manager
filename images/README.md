@@ -146,6 +146,12 @@ cache, `make images verify` (everything, warm) ~30 s.
 - `systemd-modules-load.service.d/` and `systemd-sysctl.service.d/vm-manager.conf`:
   `After=systemd-sysext.service`, so `modules-load.d/` and `sysctl.d/` entries of a
   merged extension are applied (upstream has no such ordering).
+- `network/70-kubernetes-cni.network`: `Unmanaged=yes` for veth and dummy devices
+  (nspawn's `ve-*`/`vb-*` excepted). They are `Type=ether` like the virtio NIC, and a
+  managed link is detached from a master its `.network` does not name (see `KeepMaster=`
+  in systemd.network(5)): the first cluster e2e saw every pod veth removed from `cni0`,
+  the bridge down and no pod able to reach the API server. CNI bridges, vxlan and ipip
+  devices have their own `Type=` and never matched `80-vm-manager.network`.
 
 ## Ignition
 
@@ -379,7 +385,10 @@ reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
   `system-preset/50-kubernetes.preset` still records the policy for `systemctl preset`.
 - `sysctl.d/90-kubernetes.conf` (bridge-nf-call-ip{,6}tables, IPv6 forwarding; the
   kubelet package brings `ip_forward` and `br_netfilter`), `tmpfiles.d/kubernetes.conf`
-  (`/etc/cni/net.d`, `/opt/cni/bin`).
+  (`/etc/cni/net.d`, `/opt/cni/bin`). The links a CNI creates are left to it by the base
+  image's `network/70-kubernetes-cni.network` (see [Image content](#image-content-mkosiimagesbasemkosiextra)); the
+  cluster e2e checks `networkctl list` reports `cni0`, `flannel.1` and the pod veths as
+  unmanaged.
 - `usr/lib/extension-release.d/extension-release.kubernetes_<kv>`: `ID=arch`
   (the base has neither `SYSEXT_LEVEL` nor `VERSION_ID`, rolling release, so ID alone
   is matched), `SYSEXT_ID=kubernetes`, `SYSEXT_VERSION_ID=<kv>`, `SYSEXT_SCOPE=system`,
@@ -423,15 +432,27 @@ address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
    `containerd.service` and `kubelet.service`. The unit checks that
    `systemd-sysext status` lists exactly `kubernetes_<kv>` on `/usr`.
 5. PCR 13 is extended, see below.
+6. The node stack is made usable: `systemd-modules-load.service` and
+   `systemd-sysctl.service` are restarted, because on a boot that downloaded the
+   extension they ran before it existed (the `After=systemd-sysext.service` ordering
+   only helps on later boots), so `br_netfilter`, `net.ipv4.ip_forward` and
+   `bridge-nf-call-iptables` from the extension's `modules-load.d/` and `sysctl.d/`
+   apply on the first boot too; and `systemctl start containerd.service` waits for the
+   `Upholds=` start, so the CRI socket is there. Without this step kubeadm's preflight
+   on the first boot fails with `[ERROR CRI]` (no `/run/containerd/containerd.sock`
+   yet) and `[ERROR FileContent--proc-sys-net-ipv4-ip_forward]`, as
+   `e2e/kubernetes_cluster_test.go` showed.
 
 In the e2e (`e2e/kubernetes_sysext_test.go`, `make e2e`) the download of the 206 MB takes
 about 2 s, the unit 2.7 s, and the installed boot reaches `READY=1` (which waits for the
 unit) after 14 s. Units that need the extension or the measurement order
 `After=vm-kubernetes.service`: the kubeadm unit from CAPI's Ignition config
-(docs/design.md, boot flow step 7) and the ready-stage attestation quote. Until
-`kubeadm init/join` wrote `/var/lib/kubelet/config.yaml`, `kubelet.service` exits and
-`Restart=always` brings it back every 10 s: `activating (auto-restart)`, never `failed`,
-so `systemctl --failed` stays empty; the e2e pins that.
+(docs/design.md, boot flow step 7) and the ready-stage attestation quote; step 6 is
+what makes that one ordering line enough for `kubeadm init|join`
+(`e2e/kubernetes_cluster_test.go` bootstraps a control plane and joins a worker that
+way). Until `kubeadm init/join` wrote `/var/lib/kubelet/config.yaml`, `kubelet.service`
+exits and `Restart=always` brings it back every 10 s: `activating (auto-restart)`, never
+`failed`, so `systemctl --failed` stays empty; the e2e pins that.
 
 Lifecycle: `InstancesMax=2` in the transfer is the minimum sysupdate.d(5) accepts, hence
 step 2 (a superseded file is removed before the refresh, never left for a later boot).

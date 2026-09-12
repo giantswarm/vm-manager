@@ -24,6 +24,14 @@
 #     other PCR 13 event of a boot is the initrd's "os-separator", so the host
 #     predicts the value from the artifact alone (images/scripts/verify-kubernetes
 #     writes it to policy.json as pcr13.<version>).
+#  6. The node stack is made usable for units ordered After=vm-kubernetes.service
+#     (the kubeadm unit from CAPI's Ignition config): on a boot that downloaded
+#     the extension, systemd-modules-load.service and systemd-sysctl.service
+#     ran before it existed, so its modules-load.d/ (br_netfilter) and sysctl.d/
+#     (net.ipv4.ip_forward, bridge-nf-call-iptables) are applied now; and the
+#     Upholds= start of containerd is waited for, so the CRI socket kubeadm's
+#     preflight dials is there when this unit is active. kubelet is left to
+#     its restart loop until kubeadm configures it.
 #
 # A different /kubernetes-version on a later boot replaces the file and the
 # merge; PCR 13 then carries the new version only, because this runs once per
@@ -85,3 +93,9 @@ done < <(systemd-sysext status --no-legend --no-pager 2>/dev/null)
 line="$(cd "$extensions" && sha256sum "$name")"
 /usr/lib/systemd/systemd-pcrextend --pcr="$pcr" "$line"
 log "measured '$line' into PCR $pcr"
+
+# Modules first: net.bridge.* exists only once br_netfilter is loaded. Both
+# are no-ops on a boot where systemd-sysext.service merged the extension early.
+systemctl restart systemd-modules-load.service systemd-sysctl.service
+systemctl start containerd.service
+log "kubernetes_$version active: modules and sysctls applied, containerd started"
