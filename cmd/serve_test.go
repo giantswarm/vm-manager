@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -105,6 +106,22 @@ func TestServeWiring(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "serve did not come up again")
 	cancel()
 	require.NoError(t, <-done)
+}
+
+// TestNewComponentsFailureCleansUp makes the image catalog fail to load: the
+// components built before it are closed and the error is returned, not a
+// nil dereference in the deferred close.
+func TestNewComponentsFailureCleansUp(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "vmm-fail")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	notADir := filepath.Join(stateDir, "images-file")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o600))
+	o := &serveOptions{stateDir: stateDir, imageDir: notADir, networkSubnet: "192.168.222.0/24", defaultNetwork: "default", stopTimeout: time.Second}
+
+	c, err := newComponents(context.Background(), o, metrics.New(metrics.Options{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.ErrorContains(t, err, "load images")
+	assert.Nil(t, c)
 }
 
 func TestServeOptionsComplete(t *testing.T) {

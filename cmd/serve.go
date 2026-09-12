@@ -229,8 +229,10 @@ type components struct {
 	stopTimeout time.Duration
 }
 
-func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, log *slog.Logger) (c *components, err error) {
-	c = &components{stopTimeout: o.stopTimeout}
+func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, log *slog.Logger) (_ *components, err error) {
+	// c is a local, not the named result: the error returns below hand back
+	// nil, and the deferred close must still see the partially built set.
+	c := &components{stopTimeout: o.stopTimeout}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, c.close(log))
