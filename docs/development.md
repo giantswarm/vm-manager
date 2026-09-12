@@ -4,6 +4,7 @@
 make build          # binary for the current platform (./vm-manager)
 make test           # unit + contract tests, race detector when a C toolchain is present
 make test-race      # the same with -race forced
+make test-integration # tests tagged `integration`: real QEMU + OVMF + swtpm on this host (skip without /dev/kvm)
 make lint           # golangci-lint v2 with the pre-commit linters (gosec, goconst, govet)
 make serve          # go run . -v serve (SERVE_ARGS="--listen 127.0.0.1:18080" to override)
 make help           # every target with its description
@@ -24,6 +25,27 @@ with `images/`; see `Makefile.custom.mk` for the placeholder and
   `ready` / `missing` verdict. Commands go through an injectable `Runner`
   and file probes are relative to `Options.Root`, so tests run on a fixture
   tree without the VM stack.
+- `internal/runtime/proc` — starts and supervises long-running host
+  processes (QEMU, swtpm) behind the injectable `Exec` interface, the
+  long-running counterpart of `host.Runner`: `OSExec` for the host,
+  `FakeExec` for tests (records commands, the test drives exit codes and
+  signals), plus `Tail`, the bounded stderr capture.
+- `internal/runtime/qemu` — the VM process runtime. `Command(Spec)` is a
+  pure function from a `Spec` (phase `install` or `boot`, UKI, installer
+  DDI, target disk, netdevs, SMBIOS type 1, credentials as SMBIOS type 11
+  `io.systemd.credential` strings, vsock CID, swtpm socket, OVMF paths,
+  serial log, QMP socket) to the exact `qemu-system-x86_64` argv;
+  `Runtime.Start` seeds the per-VM OVMF vars, launches QEMU and returns an
+  `Instance` (`Wait`, `Stop` = QMP `system_powerdown` -> SIGTERM -> SIGKILL,
+  `Kill`, `QMP`); `QMP` is the minimal client (capabilities, `query-status`,
+  `system_powerdown`, `quit`, events); `NotifyListener` binds AF_VSOCK for
+  the guest's `READY=1` and renders the `vmm.notify_socket` credential
+  (`vsock-stream:2:<port>`). `integration_test.go` (tag `integration`)
+  boots real OVMF with swtpm and user networking, no image needed.
+- `internal/tpm` — one swtpm per VM: `Manager.Start` creates the state
+  dir, runs `swtpm socket --tpm2` with a unixio control socket that ends
+  the process when QEMU disconnects, waits for the socket, and `Instance`
+  stops it.
 - `internal/apierr` — the sentinel errors (`ErrNotFound`, `ErrInvalid`,
   `ErrConflict`, `ErrUnsupported`) domain packages wrap so both API surfaces
   answer the same status and code.
@@ -39,11 +61,12 @@ with `images/`; see `Makefile.custom.mk` for the placeholder and
 - `api/openapi.yaml` — the REST contract; served at `/api/v1/openapi.yaml`.
 
 Domain packages from [design.md](design.md) (`internal/vm`,
-`internal/runtime/qemu`, `internal/network`, `internal/imds`,
-`internal/storage`, `internal/attest`, `internal/images`) plug in the same
-way as `internal/host`: a `Service` with context-taking methods, a field on
-`api.Services`, one `s.AddTool` in `NewMCPServer` and one route in
-`REST.Register` per operation, errors wrapped from `internal/apierr`.
+`internal/network`, `internal/imds`, `internal/storage`, `internal/attest`,
+`internal/images`) plug in the same way as `internal/host`: a `Service` with
+context-taking methods, a field on `api.Services`, one `s.AddTool` in
+`NewMCPServer` and one route in `REST.Register` per operation, errors
+wrapped from `internal/apierr`. `internal/vm` drives `internal/runtime/qemu`
+and `internal/tpm`; they expose no API surface of their own.
 
 ## Adding a tool
 

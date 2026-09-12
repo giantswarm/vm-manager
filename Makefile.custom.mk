@@ -4,6 +4,10 @@
 test-race: ## Run tests with the race detector regardless of the toolchain probe in Makefile.gen.go.mk.
 	go test -race ./...
 
+.PHONY: test-integration
+test-integration: ## Run the integration-tagged tests: real QEMU, OVMF and swtpm on this host (skips without /dev/kvm).
+	go test -race -count=1 -tags integration -run Integration ./internal/...
+
 .PHONY: serve
 serve: ## Run the server locally with debug logging (make run prints the CLI help).
 	go run . -v serve $(SERVE_ARGS)
