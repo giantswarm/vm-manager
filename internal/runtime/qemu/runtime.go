@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,6 +63,13 @@ type Runtime struct {
 	startTimeout     time.Duration
 	powerdownTimeout time.Duration
 	stopGrace        time.Duration
+
+	// The binary's release, probed once on the first Start (compat.go);
+	// versionKnown is false when the probe failed, and args then go to
+	// QEMU as rendered.
+	versionOnce  sync.Once
+	version      Version
+	versionKnown bool
 }
 
 // New builds a Runtime.
@@ -99,6 +107,24 @@ func New(opts Options) *Runtime {
 	return r
 }
 
+// qemuVersion probes the binary's release once (its own short timeout, not
+// the VM's ctx: a host fact, not part of one start) and reports false when
+// the probe failed, in which case Start passes the arguments as rendered.
+func (r *Runtime) qemuVersion() (Version, bool) {
+	r.versionOnce.Do(func() {
+		v, err := probeVersion(context.Background(), r.binary)
+		if err != nil {
+			r.log.Debug("qemu version probe failed, arguments go to qemu as rendered", "binary", r.binary, "error", err)
+			return
+		}
+		r.version, r.versionKnown = v, true
+		if v.Less(reconnectMSSince) {
+			r.log.Info("qemu older than "+reconnectMSSince.String()+": -netdev reconnect-ms is passed as reconnect (seconds)", "version", v.String())
+		}
+	})
+	return r.version, r.versionKnown
+}
+
 // Instance is a running VM.
 type Instance struct {
 	spec   Spec
@@ -120,6 +146,9 @@ func (r *Runtime) Start(ctx context.Context, spec Spec) (*Instance, error) {
 	args, err := Command(spec)
 	if err != nil {
 		return nil, err
+	}
+	if v, ok := r.qemuVersion(); ok {
+		args = compatArgs(args, v)
 	}
 	if err := r.prepare(spec); err != nil {
 		return nil, err

@@ -313,7 +313,9 @@ of a manual run reuses that run's artifact instead. `test` enables `/dev/kvm` (u
 and `ovmf` from apt and `swtpm` from `ppa:stefanberger/swtpm-noble` (noble's swtpm 0.7.3 rejects
 the `terminate` ctrl option of swtpm 0.8+ that `internal/tpm` passes) and unloads Ubuntu's
 AppArmor profile for swtpm, which denies sockets and state outside its allowed paths (the
-per-test directories under `/mnt/e2e` are; the runner's systemd 255
+per-test directories under `/mnt/e2e` are). Noble's QEMU is 8.2.2: `internal/runtime/qemu`
+probes the release once and passes the network's `-netdev stream` re-dial option as
+`reconnect=<s>` there instead of the `reconnect-ms=` of QEMU 9.2+ (the runner's systemd 255
 has no `systemd-ssh-proxy` and no storage provider: the harness dials ssh over AF_VSOCK from Go
 and vm-manager falls back to file-backed volumes), downloads the artifact to `/mnt/e2e/image` and
 runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short socket paths) and
