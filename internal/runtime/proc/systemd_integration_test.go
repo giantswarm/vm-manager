@@ -57,12 +57,9 @@ func TestIntegrationSystemdExec(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, p.PID(), p2.PID())
 	require.NoError(t, p2.Signal(syscall.SIGTERM))
-	st := exitOf(t, p2)
-	assert.Equal(t, -1, st.Code)
-	assert.EqualError(t, st.Err, "signal: terminated")
 	// The first launcher's watcher fires too; whichever settles first
-	// releases the unit, so the other may only learn that it is gone.
-	assert.Equal(t, -1, exitOf(t, p).Code)
+	// releases the unit, and the other may only learn that it is gone.
+	assertWatchersSettled(t, exitOf(t, p), exitOf(t, p2), "signal: terminated", unit)
 	assert.Contains(t, systemctlShow(t, x.Manager, unit, "LoadState"), "LoadState=not-found", "unit released")
 	_, err = second.Attach(ctx, p.Handle())
 	assert.ErrorIs(t, err, ErrGone)
@@ -70,7 +67,7 @@ func TestIntegrationSystemdExec(t *testing.T) {
 	// An exit code survives the round trip through the unit.
 	p3, err := x.Start(ctx, Cmd{Path: "sh", Args: []string{"-c", "exit 3"}, Unit: UnitName(id, "exit")})
 	require.NoError(t, err)
-	st = exitOf(t, p3)
+	st := exitOf(t, p3)
 	assert.Equal(t, 3, st.Code)
 	assert.EqualError(t, st.Err, "exit status 3")
 }

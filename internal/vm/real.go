@@ -119,5 +119,11 @@ func (n realNetwork) Forward(ctx context.Context, hostAddr, vmIP string, port in
 // SystemClock is the wall clock.
 type SystemClock struct{}
 
-func (SystemClock) Now() time.Time                         { return time.Now() }
-func (SystemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (SystemClock) Now() time.Time                 { return time.Now() }
+func (SystemClock) NewTimer(d time.Duration) Timer { return systemTimer{t: time.NewTimer(d)} }
+
+// systemTimer adapts *time.Timer, whose channel is a field, to Timer.
+type systemTimer struct{ t *time.Timer }
+
+func (t systemTimer) C() <-chan time.Time { return t.t.C }
+func (t systemTimer) Stop() bool          { return t.t.Stop() }
