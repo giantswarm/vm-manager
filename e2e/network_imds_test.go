@@ -71,7 +71,6 @@ const (
 	importUnit       = "systemd-imds-import.service"
 	importedHostname = "Imported hostname as credential 'firstboot.hostname'."
 	importedSSHKey   = "Imported SSH key as credential 'ssh.authorized_keys.root'."
-	reportMediaType  = "application/vnd.io.systemd.report"
 	sshBanner        = "SSH-2.0"
 	// Serial console markers of an installed boot: OVMF's boot manager
 	// entry (systemd-boot, installed by bootctl during sysinstall) and the
@@ -229,15 +228,10 @@ func assertReport(ctx context.Context, t *testing.T, m *mcpClient, id string) {
 	for {
 		var metrics api.MetricsResponse
 		m.call(ctx, api.ToolGetVMMetrics, map[string]any{"id": id}, &metrics)
-		if len(metrics.Report) > 0 && string(metrics.Report) != "null" {
-			var report struct {
-				MediaType string            `json:"mediaType"`
-				Metrics   []json.RawMessage `json:"metrics"`
-			}
-			require.NoError(t, json.Unmarshal(metrics.Report, &report), "report: %s", metrics.Report)
-			assert.Equal(t, reportMediaType, report.MediaType)
-			assert.NotEmpty(t, report.Metrics)
-			t.Logf("systemd-report upload received: %d metrics", len(report.Metrics))
+		if metrics.Guest != nil {
+			assert.Positive(t, metrics.Guest.Series, "series in the guest's report")
+			t.Logf("systemd-report upload received: %d families, %d series (%d exported)",
+				metrics.Guest.Families, metrics.Guest.Series, metrics.Guest.SeriesExported)
 			return
 		}
 		if time.Now().After(deadline) {

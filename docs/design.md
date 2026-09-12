@@ -174,19 +174,20 @@ skipping phase A when TPM-bound install credentials are not needed.
   with `PathRelativeTo=esp`) so the stub loads and measures it on the first installed boot, or
   the ready-stage agent extends PCR 13 with the sysext root hash through `systemd-pcrextend`.
   Decided in wave 3 with the attestation work.
-- **Volatile `/etc`.** The first image boots with `systemd.volatile=overlay` because
-  firstboot needs a writable `/etc`. Everything Ignition writes there is lost on reboot, so
-  Kubernetes nodes would not survive a restart. Wave 3 makes `/etc` persistent (an overlay
-  whose upper directory lives in `/var`, set up in the initrd) before the Kubernetes e2e.
-- **Ignition and `/var`.** The initrd mounts no var partition under `/sysroot`
-  (systemd-gpt-auto-generator only synthesizes `/sysroot/usr` there), so a file Ignition
-  writes below `/var` lands in the overlay's tmpfs upper, and the real system then skips
-  the var partition ("already populated, ignoring"). Until the persistent-`/etc` work
-  mounts var in the initrd (`ignition-files.service` is already ordered after
-  `sysroot-var.mount`), user-data must not write below `/var`; the Ignition e2e writes
-  `/etc` and units only. Without an initrd attestation agent, a VM with
-  `require_attestation: true` and user-data sits in Ignition's fetch loop until its 2-minute
-  fetch timeout and then in `emergency.target` (documented by the e2e's gated subtest).
+- **Volatile `/etc`.** Solved: the image no longer boots with `systemd.volatile=overlay`.
+  `persistent-etc.service` in the initrd mounts the var partition on `/sysroot/var` and an
+  overlay on `/sysroot/etc` whose upper and work directories are `/var/lib/etc-overlay/`,
+  plus `/root` and `/opt` as bind mounts from var, before `initrd-root-fs.target`; the root
+  stays the read-only verity erofs. Firstboot's output, the machine ID, SSH host keys,
+  enabled units and whatever Ignition writes to `/etc` survive reboots
+  (`e2e/persistent_etc_test.go`; details in `images/README.md`, "Persistent state").
+- **Ignition and `/var`.** Solved by the same change: the var partition is mounted on
+  `/sysroot/var` before `initrd-root-fs.target`, and `ignition-files.service` runs after
+  it (`After=initrd-root-fs.target sysroot-var.mount`), so what user-data writes below
+  `/var`, `/etc`, `/root` or `/opt` lands on the partition. Without an initrd attestation
+  agent, a VM with `require_attestation: true` and user-data sits in Ignition's fetch loop
+  until its 2-minute fetch timeout and then in `emergency.target` (documented by the
+  e2e's gated subtest).
 - **Host loopback alias.** The virtual network can translate `HostIP()` to the host's
   `127.0.0.1`, which would expose vm-manager's own API to unattested guests. It is opt-in
   per network (`EnableHostAlias`) and off for VM networks.

@@ -1,0 +1,25 @@
+# Mounts the writable parts of the installed system under /sysroot before the
+# initrd hands over: the var partition on /var, a persistent overlay on /etc
+# (upper and work directories on var), /root and /opt bind-mounted from var.
+# The rest of the root stays the read-only dm-verity erofs. This is the slot
+# systemd-volatile-root.service occupies for systemd.volatile=; the sysext and
+# confext merges into /sysroot run after it. See images/README.md,
+# "Persistent state".
+[Unit]
+Description=Persistent /etc, /root and /opt on the var partition
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/images/README.md
+DefaultDependencies=no
+AssertPathExists=/etc/initrd-release
+# The installer boot (phase A, vm.install-target credential present) runs on
+# the read-only installer image, which has no var partition, and writes
+# nothing to /etc; it stays on the plain verity root.
+ConditionCredential=!vm.install-target
+After=sysroot.mount systemd-repart.service
+Before=initrd-root-fs.target systemd-sysext-sysroot.service systemd-confext-sysroot.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vm-manager/persistent-etc

@@ -23,7 +23,7 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.images/base/` | the OS tree (`Format=directory`, `Output=base`): package list, `mkosi.extra/` content (units, presets, repart and sysupdate definitions, hwdb), `mkosi.postinst` (hwdb compile, PGP pubring, mask). The main image and the sysext consume it via `BaseTrees=%O/base` |
 | `mkosi.images/kubernetes/` | the Kubernetes sysext (`Format=sysext`, `Overlay=yes`): package list, `mkosi.version` (= Kubernetes version), `mkosi.extra/` (drop-ins, containerd.toml, sysctl, tmpfiles, preset), `mkosi.postinst` (version guard, drops `/opt`, seeds extension-release) |
 | `mkosi.repart/` | partition definitions of the *base image*: ESP 256M, erofs root (zstd), verity hash, verity signature |
-| `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
+| `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, `persistent-etc.service` with its script `usr/lib/vm-manager/persistent-etc` (see [Persistent state](#persistent-state)), the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp` |
 | `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>`, `verify` (base), `verify-kubernetes`, `smoke-boot` |
@@ -95,12 +95,12 @@ cache, `make images verify` (everything, warm) ~30 s.
   definition order), `20-`/`21-`/`22-` and `30-var.conf` are symlinks to the sysinstall
   definitions: on the installed disk the first boot creates the `_empty` B slots that
   systemd-sysinstall deferred; on a plain smoke boot of the base image it creates B slots
-  and var (var is then mounted from the next boot on, since systemd-gpt-auto-generator
-  already ran) and grows var. A drop-in disables `systemd-repart.service` when the
+  and var (mounted by the initrd from the next boot on; that boot runs on a tmpfs, see
+  [Persistent state](#persistent-state)) and grows var. A drop-in disables `systemd-repart.service` when the
   `vm.install-target` credential is present (installer boot, read-only root disk).
-- `/var` is empty in the image (`RemoveFiles=/var/*`): systemd-gpt-auto-generator mounts
-  the var partition (UUID keyed by the machine ID, found through
-  `/run/systemd/volatile-root` under the overlay) only over an empty directory.
+- `/var` is empty in the image (`RemoveFiles=/var/*`): the var partition is mounted over
+  it in the initrd (`persistent-etc.service`, see [Persistent state](#persistent-state)),
+  together with the `/etc` overlay and the `/root` and `/opt` bind mounts.
   `tmpfiles.d/vm-manager.conf` recreates `/var/empty` (sshd), `/var/lock` and
   `/var/log/journal` on it; the rest comes from systemd's own tmpfiles catalog.
 - `vm-sysinstall.service` (enabled, `ConditionCredential=vm.install-target`,
@@ -125,7 +125,7 @@ cache, `make images verify` (everything, warm) ~30 s.
   `systemd-ssh-generator`'s AF_VSOCK port 22 listener), `vm-sysinstall.service`,
   `vm-report-upload.timer`, and disables `systemd-sysupdate*.timer`, `systemd-homed`,
   `machines.target`. `systemd-pcrphase*` are the systemd defaults.
-- Kernel command line: `console=ttyS0,115200 systemd.volatile=overlay systemd.imds.import=yes systemd.firstboot=off`
+- Kernel command line: `console=ttyS0,115200 systemd.imds.import=yes systemd.firstboot=off`
   plus `roothash=<hash>` added by mkosi.
 - `systemd-modules-load.service.d/` and `systemd-sysctl.service.d/vm-manager.conf`:
   `After=systemd-sysext.service`, so `modules-load.d/` and `sysctl.d/` entries of a
@@ -173,7 +173,8 @@ generator (`/run/ignition.env` only carried the platform id). Two deliberate ord
 differences: `ignition-disks.service` is not `Before=sysroot.mount` (the verity root cannot
 be reformatted, and that ordering would serialise every boot's root mount behind DHCP,
 because ordering also applies to condition-skipped jobs), and there is no
-`ignition-remount-sysroot.service` (`/sysroot` is writable through the overlay).
+`ignition-remount-sysroot.service` (`/sysroot/etc`, `/sysroot/var`, `/sysroot/root` and
+`/sysroot/opt` are writable through the mounts of `persistent-etc.service`).
 
 Command line: the UKI carries `ignition.platform.id=metal
 ignition.config.url=http://169.254.169.254/giantswarm/v1/user-data`. `ignition.firstboot`
@@ -191,10 +192,68 @@ is "no config", the stages finish with nothing to do). The initrd stage of the
 attestation agent must be ordered `Before=ignition-fetch.service`: its verified quote is
 what turns the 503 into 200.
 
-Caveat: the initrd mounts no var partition under `/sysroot`, so user-data must not write
-below `/var` yet (the file would land in the overlay's tmpfs upper and make gpt-auto skip
-the var partition, "already populated"); `ignition-files.service` is already ordered after
-`sysroot-var.mount` for when the persistent-`/etc` work mounts it.
+What Ignition writes lands on the var partition: `persistent-etc.service` (see
+[Persistent state](#persistent-state)) mounts var, the `/etc` overlay and the `/root` and
+`/opt` bind mounts under `/sysroot` before `initrd-root-fs.target`, which
+`ignition-mount.service` and `ignition-files.service` are ordered after (their
+`After=systemd-volatile-root.service` is a no-op now; `persistent-etc.service` took that
+slot). Files below `/var`, `/etc`, `/root` and `/opt` therefore persist across reboots;
+the rest of the root is the read-only erofs and a file there fails with EROFS.
+
+## Persistent state
+
+The root stays the read-only, dm-verity protected erofs. What has to be writable lives on
+the var partition and is mounted into place by the initrd before it hands over:
+`mkosi.initrd.conf/mkosi.extra/usr/lib/vm-manager/persistent-etc`, run by
+`persistent-etc.service` (`initrd-root-fs.target.wants/`, `After=sysroot.mount
+systemd-repart.service`, `Before=initrd-root-fs.target systemd-sysext-sysroot.service
+systemd-confext-sysroot.service`), which is the slot systemd-volatile-root.service(8)
+fills for `systemd.volatile=`.
+
+| Path | Mount | Backing |
+|---|---|---|
+| `/var` | ext4 from `/dev/disk/by-partlabel/var` (systemd-repart labels a partition after its type when the definition sets no `Label=`), `systemd-fsck` before, `systemd-growfs` after (`x-systemd.growfs` is fstab-only) | partition 8 of the installed disk |
+| `/etc` | overlayfs, `lowerdir=` the image's `/etc`, `upperdir=`/`workdir=` on var | `/var/lib/etc-overlay/{upper,work}` |
+| `/root` | bind mount (systemd's `tmpfiles.d/provision.conf` writes `/root/.ssh/authorized_keys` from `ssh.authorized_keys.root`) | `/var/roothome` |
+| `/opt` | bind mount (CNI DaemonSets install into `/opt/cni/bin`) | `/var/opt` |
+
+- `systemd-firstboot` (host, first boot) writes `/etc/hostname` and friends into the
+  overlay, PID 1 commits the `system.machine_id` credential to `/etc/machine-id`, sshd's
+  host keys (`sshdgenkeys.service`) are generated once; all of it survives reboots, as do
+  units enabled with `systemctl enable` and whatever a provisioning stage in the initrd
+  (ordered after `persistent-etc.service`) writes to `/sysroot/etc`. `ConditionFirstBoot=`
+  holds on the first boot only (`/etc/machine-id` is `uninitialized` in the image), so
+  `systemd-firstboot.service` runs once.
+- An empty upper hides nothing: the merged `/etc` starts out as the image's `/etc`.
+- `/home`, `/srv` and `/usr/local` stay read-only (nothing in the image uses them);
+  another writable directory is one `bind` line in the script. `/root` and `/opt` are
+  bind mounts rather than symlinks into `/var` because systemd-tmpfiles 261 refuses
+  `d` lines on symlinks ("already exists and is not a directory").
+- Without a var partition (a plain boot of the base image; the partition is created by
+  systemd-repart on the host, so it exists from the second boot on) or with one that
+  fails fsck or mount, the script mounts a tmpfs on `/var`, logs it and continues: that
+  boot is volatile like the former `systemd.volatile=overlay`, the next one persistent.
+  The installer boot (`vm.install-target` credential) skips the unit altogether, see
+  Deviations.
+- `make e2e` (`e2e/persistent_etc_test.go`) proves the installed system: a file and an
+  enabled unit written to `/etc` survive `reboot_vm`, the unit runs on the new boot, SSH
+  host key and machine ID are unchanged, `/etc` is the overlay and the file shows up
+  under `/var/lib/etc-overlay/upper`, `/root` and `/opt` are bound from the partition.
+- systemd-gpt-auto-generator(8) finds `/var` already mounted on the host and does nothing;
+  systemd-confext-sysroot.service(8), ordered after the unit, sees `/sysroot/var/lib/confexts`.
+- Known limitation, shutdown: var is not unmounted cleanly at power-off; the next boot's
+  `systemd-fsck` (run by the script before mounting) replays the journal ("var:
+  recovering journal", logged by `e2e/persistent_etc_test.go`). systemd-shutdown(8)
+  syncs before it powers off, so nothing is lost, but it cannot get rid of the overlay:
+  the service manager treats `/etc` as extrinsic and leaves it mounted, and unmounting
+  the overlay fails with EBUSY without any process holding a file in it (verified with
+  an `etc.mount.d` drop-in that opted it into `umount.target`, and by hand with every
+  stoppable service stopped; an overlay on a tmpfs upper behaves the same). While the
+  overlay exists it pins the writers of var's ext4, so neither unmounting nor
+  systemd-shutdown's read-only remount of `/var` can succeed. Overlayfs itself does not
+  pin the upper *mount* (verified on the host). To be tracked down with a debug
+  `systemd-shutdown`; candidates are mount-namespace peers of `/etc` in sandboxed
+  services (`PrivateMounts=`/`ProtectSystem=`) that survive into the final phase.
 
 ## Kubernetes sysext
 
@@ -213,9 +272,10 @@ reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
 - `containerd.service.d/10-vm-manager.conf`: `--config /usr/lib/vm-manager/containerd.toml`
   (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/opt/cni/bin',
   '/usr/lib/cni']`, `conf_dir=/etc/cni/net.d`. `/opt` is deliberately *not* in the
-  extension (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): with
-  `systemd.volatile=overlay` the base root is writable per boot, so CNI DaemonSets can
-  install into `/opt/cni/bin`, which would be read-only under a sysext overlay.
+  extension (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): `/opt` is a
+  bind mount of `/var/opt` (see [Persistent state](#persistent-state)), so CNI DaemonSets
+  can install into `/opt/cni/bin` and keep it across reboots, which a sysext overlay on
+  `/opt` would make read-only.
 - `kubelet.service.d/20-vm-manager.conf`: `KUBELET_ARGS=--container-runtime-endpoint=unix:///run/containerd/containerd.sock`
   (Arch's unit sources it from `/etc/kubernetes/kubelet.env`, which is not shippable),
   `Wants=/After=network-online.target containerd.service`. `10-kubeadm.conf` comes from
@@ -354,27 +414,33 @@ and SMBIOS type 11 credentials `io.systemd.credential:vm.install-target=/dev/dis
 `vm-sysinstall.service` partitions the target from `/usr/lib/repart.sysinstall.d/`,
 installs the UKI and TPM-encrypted credentials with `bootctl link`, `bootctl install`,
 then reboots (run QEMU with `-no-reboot`). The same `system.machine_id` must be passed
-in both phases: systemd-repart derives the var partition UUID from the machine ID and
-systemd-gpt-auto-generator only mounts var when it matches.
+in both phases: it becomes the installed system's persistent `/etc/machine-id` on the
+first boot, and systemd-repart derives the var partition UUID from it (the initrd
+mounts var by its partition label; systemd-gpt-auto-generator would require the match).
 
 Installed boot (phase B): OVMF -> systemd-boot -> `EFI/Linux/giantswarm-vm-base_<v>.efi`.
 In the initrd, `systemd-imds-early-network.service` configures networkd for
 169.254.169.254, `systemd-imds-import.service` turns `/hostname` and `/public-keys/0`
 into `firstboot.hostname` and `ssh.authorized_keys.root` credentials; the verity root is
-set up from `roothash=`, `/` becomes a tmpfs overlay (`systemd.volatile=overlay`), var
-is mounted from the disk. On the first installed boot vm-manager adds `ignition.firstboot`
-to the command line and the `ignition-*` units fetch `/user-data` from the IMDS and apply
-it to `/sysroot` before the switch root, see [Ignition](#ignition). Serial console is
-`ttyS0`; ssh is reachable on AF_VSOCK port 22.
+set up from `roothash=`, `persistent-etc.service` mounts var from the disk and the
+persistent `/etc` overlay, `/root` and `/opt` on it (see [Persistent state](#persistent-state)).
+On the first installed boot vm-manager adds `ignition.firstboot` to the command line and
+the `ignition-*` units fetch `/user-data` from the IMDS and apply it to `/sysroot` before
+the switch root, see [Ignition](#ignition). Serial console is `ttyS0`; ssh is reachable
+on AF_VSOCK port 22.
 
 ## Deviations from docs/design.md and the systemd/mkosi man pages
 
-- `systemd.volatile=overlay` was added to the kernel command line. With a verity
-  erofs root `/etc` is read-only, and `systemd-firstboot.service` has
-  `ConditionPathIsReadWrite=/etc`, so credential-driven provisioning (hostname,
-  machine ID, ssh key) would silently be skipped. The overlay makes `/etc` writable
-  per boot; persistent state is confined to var. Consequence: SSH host keys are
-  regenerated on every boot (`sshdgenkeys.service`) until they are persisted in var.
+- `persistent-etc.service` (initrd) mounts var, the `/etc` overlay and the `/root` and
+  `/opt` bind mounts from a script rather than through mount units or an `/etc/fstab`
+  entry with `x-initrd.mount`: systemd-gpt-auto-generator(8) mounts var only on the
+  host, and a mount unit whose `What=` is a device (static or generated from fstab)
+  pulls in the device unit and waits `DefaultDeviceTimeoutSec=` (90 s) for it *before*
+  its own `ConditionCredential=` is evaluated, which would stall the installer boot (no
+  var partition on the installer image) and the first plain boot of the base image (var
+  is created by systemd-repart on the host). The script checks for the partition after
+  `udevadm settle` and falls back to a tmpfs instead. Details in
+  [Persistent state](#persistent-state).
 - `systemd.firstboot=off` on the command line: disables only the interactive prompts
   of systemd-firstboot (the unit still runs and applies credentials), needed for a
   headless VM.
@@ -408,14 +474,12 @@ it to `/sysroot` before the switch root, see [Ignition](#ignition). Serial conso
   UUIDs over to the copies (needed for `roothash=` discovery on the installed disk).
   The two-phase install is verified by `make e2e` at the repo root
   (`e2e/install_boot_test.go`), which also checks these UUIDs, not here.
-- The installer boot runs without the volatile overlay: a drop-in in the initrd
-  (`systemd-volatile-root.service.d/vm-manager.conf`, `ConditionCredential=!vm.install-target`)
-  skips `systemd-volatile-root.service` when the install credential is present.
-  `CopyBlocks=auto` makes systemd-repart resolve the source partitions from the block
-  device behind `/usr`, and under `systemd.volatile=overlay` that is an overlayfs with
-  no block device ("Failed to resolve automatic CopyBlocks= path for partition type
-  root"). On the plain verity root it walks from `/dev/mapper/root` to the data and
-  hash partitions and copies their UUIDs. The installed system keeps the overlay.
+- The installer boot runs on the plain verity root: `persistent-etc.service` has
+  `ConditionCredential=!vm.install-target`. The installer image has no var partition and
+  nothing needs writing to `/etc` there; `CopyBlocks=auto` resolves the source partitions
+  from the block device behind `/usr` (`/dev/mapper/root`, from which systemd-repart walks
+  to the data and hash partitions and copies their UUIDs), which an overlay on `/etc`
+  alone would not disturb either.
 - `/usr/lib/vm-manager/sysinstall` exports `KERNEL_INSTALL_CONF_ROOT=/boot/kernel-install`
   and puts `layout=uki` there on a tmpfs over the installer's (empty) `/boot`.
   systemd-sysinstall dissects the freshly written target (erofs root, target ESP on
@@ -432,11 +496,12 @@ it to `/sysroot` before the switch root, see [Ignition](#ignition). Serial conso
   installed disks. To be dropped once bootctl tolerates a read-only root for a token
   derived from os-release.
 - `systemd-firstboot.service.d/vm-manager.conf` applies the static hostname to the
-  running kernel (`ExecStartPost=` writing `/proc/sys/kernel/hostname`): with the volatile
-  `/etc`, the `/etc/hostname` that systemd-firstboot writes from `firstboot.hostname`
-  never reaches PID 1, which read it before firstboot ran, and the file is gone again by
-  the next boot; without the drop-in the hostname stays `DEFAULT_HOSTNAME` (`archlinux`)
-  unless a separate `system.hostname` credential is passed on every boot.
+  running kernel (`ExecStartPost=` writing `/proc/sys/kernel/hostname`) on the first
+  boot: PID 1 read `/etc/hostname` before systemd-firstboot wrote it from
+  `firstboot.hostname`, so without the drop-in the first boot would run as
+  `DEFAULT_HOSTNAME` (`archlinux`) unless a separate `system.hostname` credential is
+  passed. From the second boot on `/etc/hostname` persists, PID 1 reads it itself and
+  `systemd-firstboot.service` no longer runs (`ConditionFirstBoot=`).
 - `/usr/lib/vm-manager/sysinstall` passes `--reboot=no` and reboots with
   `systemctl reboot` itself: sysinstall's own reboot asks logind
   (`io.systemd.Shutdown`), which cannot start on the read-only installer root
