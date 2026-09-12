@@ -1,0 +1,32 @@
+#!/bin/sh
+# Exitrd, part 3 (parts 1 and 2: run-initramfs-root.mount and
+# tmpfiles.d/vm-manager-exitrd.conf): wait until the var partition's ext4
+# superblock is gone before systemd-shutdown(8) syncs and powers off.
+#
+# systemd-shutdown runs the executables in system-shutdown/ after its unmount
+# loop, in both of its instances; only the exitrd one (/etc/initrd-release)
+# has anything to do. Its loop unmounted the sysext overlay from /usr, the
+# last user of the Kubernetes image's dm-verity device (deferred removal) and
+# loop device (autoclear); the kernel tears both down on workqueues, and only
+# that tear-down closes the image file on var, which by then is the last
+# reference to var's superblock: /var itself was unmounted long before by the
+# service manager (the loop device was set up in systemd-sysext's own mount
+# namespace, so its backing file never pinned the mount). systemd-shutdown
+# does not wait for work it did not start: it logs "All loop devices
+# detached", syncs and calls reboot(2) a few milliseconds later, and when
+# ext4_put_super has not run by then, var's journal stays marked dirty and the
+# next boot's fsck logs "var: recovering journal". A live superblock is
+# visible as /sys/fs/ext4/<device>; the wait is 10-20 ms.
+set -u
+[ -e /etc/initrd-release ] || exit 0
+var=$(readlink -e /dev/disk/by-partlabel/var 2>/dev/null) || exit 0
+sb="/sys/fs/ext4/${var##*/}"
+i=0
+while [ -d "$sb" ] && [ "$i" -lt 500 ]; do
+        i=$((i + 1))
+        sleep 0.01
+done
+if [ -d "$sb" ]; then
+        echo "vm-manager-var: $var still has a live ext4 superblock after 5 s, its journal will need recovery on the next boot" >&2
+fi
+exit 0
