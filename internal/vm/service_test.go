@@ -429,6 +429,37 @@ func TestInstallTimeoutKillsAndKeepsConsole(t *testing.T) {
 	assert.Empty(t, h.store.names())
 }
 
+// TestDeleteDuringInstall deletes a VM while its installer runs: the process
+// is stopped and its exit awaited before anything else is released, no
+// installed boot follows, and nothing of the VM remains.
+func TestDeleteDuringInstall(t *testing.T) {
+	h := newHarness(t)
+	v := h.create("half-installed")
+	h.waitInstances(1)
+	h.waitTimers(1)
+	require.Equal(t, 1, h.tpm.running())
+	h.ev.reset()
+
+	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
+
+	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.list(),
+		"installer stopped and gone (swtpm stopped by its supervisor) before lease, volume and disk are released")
+	assert.Equal(t, 1, h.rt.count(), "the installer's exit did not start phase B")
+	assert.Zero(t, h.tpm.running())
+	assert.Empty(t, h.store.names())
+	assert.Empty(t, h.lan().Leases())
+	assert.NoDirExists(t, v.Paths.Dir)
+	assert.Empty(t, h.svc.List())
+	_, err := h.svc.Get(v.ID)
+	require.ErrorIs(t, err, apierr.ErrNotFound)
+
+	// The install timeout fires into nothing: no supervisor is left.
+	h.clock.Advance(DefaultInstallTimeout)
+	h.awaitClose(h.closeAsync())
+	assert.Equal(t, 1, h.rt.count())
+	assert.NotContains(t, h.ev.list(), "qemu.kill")
+}
+
 // TestCloseDuringInstallHandoff drives Close into the install-to-boot
 // handoff. Once Close has begun, phase B is not started (pending handoff) or
 // is stopped by Close like any other process (start already in flight), and
