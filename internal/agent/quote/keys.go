@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
+
+	"github.com/giantswarm/vm-manager/internal/tpmquote"
 )
 
 // Persistent handles. Both lie in the owner-controlled persistent range, in
@@ -18,32 +20,6 @@ const (
 	// a TPM has one; otherwise the EK is derived transiently from RSAEKTemplate.
 	EKHandle tpm2.TPMHandle = 0x81010001
 )
-
-// AKTemplate is the attestation key: ECC P-256, restricted signing,
-// ECDSA-SHA256, fixed to this TPM and to its parent, no authorization
-// value. Restricted plus SignEncrypt is what lets it sign TPM2_Quote output
-// and nothing supplied from outside.
-var AKTemplate = tpm2.TPMTPublic{
-	Type:    tpm2.TPMAlgECC,
-	NameAlg: tpm2.TPMAlgSHA256,
-	ObjectAttributes: tpm2.TPMAObject{
-		FixedTPM:            true,
-		FixedParent:         true,
-		SensitiveDataOrigin: true,
-		UserWithAuth:        true,
-		NoDA:                true,
-		Restricted:          true,
-		SignEncrypt:         true,
-	},
-	Parameters: tpm2.NewTPMUPublicParms(tpm2.TPMAlgECC, &tpm2.TPMSECCParms{
-		Scheme: tpm2.TPMTECCScheme{
-			Scheme: tpm2.TPMAlgECDSA,
-			Details: tpm2.NewTPMUAsymScheme(tpm2.TPMAlgECDSA,
-				&tpm2.TPMSSigSchemeECDSA{HashAlg: tpm2.TPMAlgSHA256}),
-		},
-		CurveID: tpm2.TPMECCNistP256,
-	}),
-}
 
 // AK is the loaded persistent attestation key.
 type AK struct {
@@ -92,40 +68,45 @@ func readAK(tpm transport.TPM) (*AK, error) {
 }
 
 // ErrForeignAK is returned when AKHandle holds a key that was not created
-// from AKTemplate: reused or cloned TPM state, or another tool's key. The
+// from tpmquote.AKTemplate: reused or cloned TPM state, or another tool's key. The
 // agent refuses to quote with it rather than adopt an unknown key; clearing
 // the TPM state (a new VM) is the remedy.
 var ErrForeignAK = errors.New("persistent object is not the vm-manager attestation key")
 
 // matchesAKTemplate checks the immutable parts of a public area against
-// AKTemplate: algorithm, name algorithm, attributes and the ECC parameters
-// (curve, scheme, hash). The unique field is the key itself and differs.
+// tpmquote.AKTemplate: algorithm, name algorithm, attributes and the ECC
+// parameters (curve, scheme, hash). The unique field is the key itself and
+// differs. This is stricter than the verifier's tpmquote.Parse, which also
+// admits other restricted signing keys; the agent only ever quotes with the
+// exact key it created.
 func matchesAKTemplate(pub *tpm2.TPMTPublic) error {
+	want := tpmquote.AKTemplate
 	switch {
-	case pub.Type != AKTemplate.Type:
-		return fmt.Errorf("type %v, want %v", pub.Type, AKTemplate.Type)
-	case pub.NameAlg != AKTemplate.NameAlg:
-		return fmt.Errorf("name algorithm %v, want %v", pub.NameAlg, AKTemplate.NameAlg)
-	case pub.ObjectAttributes != AKTemplate.ObjectAttributes:
-		return fmt.Errorf("attributes %+v, want %+v", pub.ObjectAttributes, AKTemplate.ObjectAttributes)
+	case pub.Type != want.Type:
+		return fmt.Errorf("type %v, want %v", pub.Type, want.Type)
+	case pub.NameAlg != want.NameAlg:
+		return fmt.Errorf("name algorithm %v, want %v", pub.NameAlg, want.NameAlg)
+	case pub.ObjectAttributes != want.ObjectAttributes:
+		return fmt.Errorf("attributes %+v, want %+v", pub.ObjectAttributes, want.ObjectAttributes)
 	}
 	got, err := pub.Parameters.ECCDetail()
 	if err != nil {
 		return fmt.Errorf("ecc parameters: %w", err)
 	}
-	want, _ := AKTemplate.Parameters.ECCDetail()
+	wantECC, _ := want.Parameters.ECCDetail()
 	switch {
-	case got.CurveID != want.CurveID:
-		return fmt.Errorf("curve %v, want %v", got.CurveID, want.CurveID)
-	case got.Scheme.Scheme != want.Scheme.Scheme:
-		return fmt.Errorf("scheme %v, want %v", got.Scheme.Scheme, want.Scheme.Scheme)
+	case got.CurveID != wantECC.CurveID:
+		return fmt.Errorf("curve %v, want %v", got.CurveID, wantECC.CurveID)
+	case got.Scheme.Scheme != wantECC.Scheme.Scheme:
+		return fmt.Errorf("scheme %v, want %v", got.Scheme.Scheme, wantECC.Scheme.Scheme)
 	}
 	gotHash, err := got.Scheme.Details.ECDSA()
 	if err != nil {
 		return fmt.Errorf("scheme details: %w", err)
 	}
-	if gotHash.HashAlg != tpm2.TPMAlgSHA256 {
-		return fmt.Errorf("scheme hash %v, want %v", gotHash.HashAlg, tpm2.TPMAlgSHA256)
+	wantHash, _ := wantECC.Scheme.Details.ECDSA()
+	if gotHash.HashAlg != wantHash.HashAlg {
+		return fmt.Errorf("scheme hash %v, want %v", gotHash.HashAlg, wantHash.HashAlg)
 	}
 	return nil
 }
@@ -142,7 +123,7 @@ func createAK(tpm transport.TPM) error {
 	defer flush(tpm, srk.ObjectHandle)
 	parent := tpm2.NamedHandle{Handle: srk.ObjectHandle, Name: srk.Name}
 
-	created, err := tpm2.Create{ParentHandle: parent, InPublic: tpm2.New2B(AKTemplate)}.Execute(tpm)
+	created, err := tpm2.Create{ParentHandle: parent, InPublic: tpm2.New2B(tpmquote.AKTemplate)}.Execute(tpm)
 	if err != nil {
 		return fmt.Errorf("create ak: %w", err)
 	}

@@ -59,11 +59,15 @@ var (
 	ErrBank = errors.New("unsupported pcr bank")
 )
 
-// AKTemplate is the attestation key the guest agent creates and the checks
-// in Parse expect: an ECC P-256 restricted signing key (ECDSA-SHA256,
-// nameAlg SHA256) fixed to the TPM. Any fixedTPM+fixedParent+
-// sensitiveDataOrigin+restricted+sign, non-decrypt ECC P-256 or RSA 2048 key
-// passes; this is the reference template.
+// AKTemplate is the attestation key: the one definition the guest agent
+// (internal/agent/quote) creates at its persistent handle and refuses to
+// replace with anything else, and the reference the checks in Parse and the
+// test fixtures derive from. It is an ECC P-256 restricted signing key
+// (ECDSA-SHA256, nameAlg SHA256) fixed to this TPM and its parent, with no
+// authorization value; restricted plus sign is what lets it sign TPM2_Quote
+// output and nothing supplied from outside. Parse admits more than the
+// template: any fixedTPM+fixedParent+sensitiveDataOrigin+restricted+sign,
+// non-decrypt ECC P-256 or RSA 2048 key passes.
 var AKTemplate = tpm2.TPMTPublic{
 	Type:    tpm2.TPMAlgECC,
 	NameAlg: tpm2.TPMAlgSHA256,

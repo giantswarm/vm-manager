@@ -1,7 +1,7 @@
 // Package attest is the imds.Attestor that verifies guest TPM quotes: it
-// issues nonces, checks each quote cryptographically with internal/tpmquote,
-// pins the attestation key of a VM on its first verified initrd quote and
-// compares the PCRs against the image's policy.
+// issues nonces (internal/nonce), checks each quote cryptographically with
+// internal/tpmquote, pins the attestation key of a VM on its first verified
+// initrd quote and compares the PCRs against the image's policy.
 //
 // # Verification order
 //
@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/nonce"
 	"github.com/giantswarm/vm-manager/internal/tpmquote"
 )
 
@@ -95,7 +96,7 @@ const pinMismatch = "ak %s is not the key enrolled for this vm (%s)"
 type Verifier struct {
 	opts   Options
 	log    *slog.Logger
-	nonces nonces
+	nonces *nonce.Store
 
 	mu  sync.Mutex
 	vms map[string]*vmState
@@ -118,12 +119,12 @@ func New(opts Options) (*Verifier, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Verifier{opts: opts, log: opts.Logger, nonces: nonces{now: opts.Now}, vms: make(map[string]*vmState)}, nil
+	return &Verifier{opts: opts, log: opts.Logger, nonces: nonce.New(nonce.WithClock(opts.Now)), vms: make(map[string]*vmState)}, nil
 }
 
 // Nonce implements imds.Attestor.
 func (v *Verifier) Nonce(_ context.Context, vmID string) (string, error) {
-	return v.nonces.issue(vmID)
+	return v.nonces.Issue(vmID)
 }
 
 // SubmitQuote implements imds.Attestor; see the package documentation for
@@ -138,7 +139,7 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 		return imds.QuoteResult{Message: res.Message}, nil
 	}
 
-	if !v.nonces.consume(vmID, req.Nonce) {
+	if !v.nonces.Consume(vmID, req.Nonce) {
 		return reject("unknown or expired nonce")
 	}
 	if !req.Stage.Valid() {
@@ -265,7 +266,7 @@ func (v *Verifier) Forget(vmID string) {
 	v.mu.Lock()
 	delete(v.vms, vmID)
 	v.mu.Unlock()
-	v.nonces.forget(vmID)
+	v.nonces.Forget(vmID)
 }
 
 func (v *Verifier) pinned(vmID string) (string, bool) {

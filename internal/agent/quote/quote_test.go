@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/tpmquote"
 )
 
 // newSimulator starts the Microsoft reference TPM. It needs cgo; without it
@@ -252,7 +253,7 @@ func TestOpenMissingDevice(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
-// A key at AKHandle that was not created from AKTemplate must not be adopted.
+// A key at AKHandle that was not created from tpmquote.AKTemplate must not be adopted.
 func TestEnsureAKRefusesForeignKey(t *testing.T) {
 	sim := transport.FromReadWriter(newSimulator(t))
 	srk, err := tpm2.CreatePrimary{
@@ -262,7 +263,7 @@ func TestEnsureAKRefusesForeignKey(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = tpm2.FlushContext{FlushHandle: srk.ObjectHandle}.Execute(sim) })
 
-	foreign := AKTemplate
+	foreign := tpmquote.AKTemplate
 	foreign.ObjectAttributes.Restricted = false // an unrestricted signing key
 	created, err := tpm2.Create{
 		ParentHandle: tpm2.NamedHandle{Handle: srk.ObjectHandle, Name: srk.Name},
