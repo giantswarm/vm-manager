@@ -27,8 +27,6 @@ Follow-ups recorded by reviews and agents, not yet scheduled:
   but not compared; event-log replay is the proper fix.
 - A swtpm that is alive but unreachable at reattach is treated as gone (VM runs without TPM).
 - The caller identity is only logged; VM records carry no `requestedBy` unlike agent-manager.
-- `.circleci/` is devctl-generated but CircleCI is not enabled; reconcile with the GitHub
-  Actions pipeline of row 18.
 - Nine sequential e2e tests take ~10 min; parallelise or shard when the suite grows.
 
 ## Wave 1: repo, scaffold, image, first boot

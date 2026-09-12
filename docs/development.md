@@ -287,8 +287,11 @@ token from this server's own OAuth flow. `vm-manager image golden --token` (or
 ## CI
 
 GitHub Actions, `.github/workflows/`. The devctl-generated `zz_generated.*` workflows add
-pre-commit, gitleaks, semantic PR titles and the release automation (`.circleci/` is not
-enabled). The tiers are those of [design.md](design.md) "Testing strategy".
+pre-commit, gitleaks, semantic PR titles and the release automation. CircleCI generation is
+switched off for this repo in giantswarm/github (`gen.ci.generate: false` in
+`repositories/team-bumblebee.yaml`): the image build needs an Arch container and the boot
+tests nested KVM, and nothing is published through the architect pipeline. The tiers are
+those of [design.md](design.md) "Testing strategy".
 
 | Workflow | Runs on | When | What |
 |---|---|---|---|
