@@ -221,7 +221,7 @@ func (s *server) attestQuote(w http.ResponseWriter, r *http.Request, inst Instan
 	res, err := s.Attestor.SubmitQuote(r.Context(), inst.ID, req)
 	if err != nil {
 		s.Log.ErrorContext(r.Context(), "imds quote", "vm", inst.ID, "stage", req.Stage, "err", err)
-		writeText(w, statusFor(err), "quote not processed: "+err.Error())
+		writeText(w, statusFor(err), "quote not processed")
 		return
 	}
 	res.Stage = req.Stage
@@ -263,7 +263,7 @@ func (s *server) report(w http.ResponseWriter, r *http.Request, inst Instance) {
 	}
 	if err := s.Reports.StoreReport(r.Context(), inst.ID, raw); err != nil {
 		s.Log.ErrorContext(r.Context(), "imds report", "vm", inst.ID, "err", err)
-		writeText(w, statusFor(err), "report not stored: "+err.Error())
+		writeText(w, statusFor(err), "report not stored")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

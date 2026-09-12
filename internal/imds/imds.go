@@ -131,10 +131,16 @@ func (a FSArtifacts) Open(component, name string) (fs.File, error) {
 // NonceTTL is how long a nonce from /attest/nonce stays valid.
 const NonceTTL = 5 * time.Minute
 
+// maxNoncesPerVM bounds outstanding nonces for one VM so a guest that keeps
+// asking for nonces without ever quoting cannot grow the map without limit;
+// the oldest nonce is dropped when the cap is reached.
+const maxNoncesPerVM = 8
+
 // NoopAttestor hands out nonces and accepts every quote that echoes an
 // unexpired one back; it verifies nothing about the TPM. It exists for tests
 // and bring-up before the verifier lands and must not back a production
-// server. The zero value is ready to use.
+// server. The zero value is ready to use. Expired nonces are swept on every
+// call and at most maxNoncesPerVM are kept per VM.
 type NoopAttestor struct {
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
@@ -159,8 +165,39 @@ func (a *NoopAttestor) Nonce(_ context.Context, vmID string) (string, error) {
 	if a.nonces[vmID] == nil {
 		a.nonces[vmID] = make(map[string]time.Time)
 	}
-	a.nonces[vmID][nonce] = a.now()
+	now := a.now()
+	a.sweepLocked(now)
+	for len(a.nonces[vmID]) >= maxNoncesPerVM {
+		delete(a.nonces[vmID], oldestNonce(a.nonces[vmID]))
+	}
+	a.nonces[vmID][nonce] = now
 	return nonce, nil
+}
+
+// sweepLocked drops expired nonces and empty per-VM maps; callers hold a.mu.
+func (a *NoopAttestor) sweepLocked(now time.Time) {
+	for vmID, issued := range a.nonces {
+		for nonce, t := range issued {
+			if now.Sub(t) > NonceTTL {
+				delete(issued, nonce)
+			}
+		}
+		if len(issued) == 0 {
+			delete(a.nonces, vmID)
+		}
+	}
+}
+
+// oldestNonce returns the key with the earliest issue time; issued is not empty.
+func oldestNonce(issued map[string]time.Time) string {
+	var oldest string
+	var oldestAt time.Time
+	for nonce, t := range issued {
+		if oldest == "" || t.Before(oldestAt) {
+			oldest, oldestAt = nonce, t
+		}
+	}
+	return oldest
 }
 
 // SubmitQuote implements Attestor: the quote verifies iff its nonce was issued
@@ -168,11 +205,13 @@ func (a *NoopAttestor) Nonce(_ context.Context, vmID string) (string, error) {
 func (a *NoopAttestor) SubmitQuote(_ context.Context, vmID string, req QuoteRequest) (QuoteResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := a.now()
 	issued, ok := a.nonces[vmID][req.Nonce]
 	if ok {
 		delete(a.nonces[vmID], req.Nonce)
 	}
-	if !ok || a.now().Sub(issued) > NonceTTL {
+	a.sweepLocked(now)
+	if !ok || now.Sub(issued) > NonceTTL {
 		return QuoteResult{Message: "unknown or expired nonce"}, nil
 	}
 	return QuoteResult{Verified: true, Message: "nonce matched; quote not verified (noop attestor)"}, nil

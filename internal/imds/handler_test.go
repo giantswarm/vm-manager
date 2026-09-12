@@ -394,6 +394,13 @@ func TestNoopAttestor(t *testing.T) {
 	res, err = a.SubmitQuote(ctx, vmID, QuoteRequest{Nonce: nonce})
 	require.NoError(t, err)
 	assert.False(t, res.Verified, "nonces expire after NonceTTL")
+	assert.Empty(t, a.nonces, "expired nonces are swept")
+
+	for i := 0; i < maxNoncesPerVM+3; i++ {
+		_, err = a.Nonce(ctx, vmID)
+		require.NoError(t, err)
+	}
+	assert.Len(t, a.nonces[vmID], maxNoncesPerVM, "outstanding nonces per VM are capped")
 }
 
 func TestReleasesUserData(t *testing.T) {
