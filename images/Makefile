@@ -5,6 +5,7 @@
 #   make keys base verify-base smoke-boot    base-only cycle
 #   make kubernetes verify-kubernetes        sysext only (base tree is reused)
 #   make ignition                            Ignition binary for the initrd (cached)
+#   make agent                               vm-agent binary for base and initrd (make -C .. agent)
 #   make PROFILE=debug base smoke-boot       root autologin, empty root password
 #   make clean                               drop build/ (keys/ are kept)
 
@@ -24,10 +25,17 @@ SCRIPTS  := scripts
 IGNITION_VERSION := v2.27.0
 IGNITION_DIR     := $(BUILD)/ignition
 IGNITION_STAMP   := $(IGNITION_DIR)/stamp-$(IGNITION_VERSION)
+# vm-agent (attestation) for the initrd and the root file system, built static
+# by the repo root's `make agent` into ../bin/vm-agent and staged as a tree
+# that ExtraTrees= of mkosi.images/base/mkosi.conf and mkosi.initrd.conf/
+# mkosi.conf copy in as /usr/bin/vm-agent.
+AGENT_DIR  := $(BUILD)/agent
+AGENT_TREE := $(AGENT_DIR)/tree
+AGENT_BIN  := $(AGENT_TREE)/usr/bin/vm-agent
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition images base kubernetes verify verify-base verify-kubernetes smoke-boot clean summary
+.PHONY: all keys ignition agent images base kubernetes verify verify-base verify-kubernetes smoke-boot clean summary
 
 all: keys images verify
 
@@ -45,16 +53,26 @@ $(IGNITION_STAMP): $(SCRIPTS)/build-ignition
 	rm -f $(IGNITION_DIR)/stamp-*
 	touch $@
 
+# go build is incremental, so the agent is rebuilt on every image build; a
+# changed binary changes the base tree and the initrd (and with them PCR 11).
+agent: $(AGENT_BIN)
+
+$(AGENT_BIN): FORCE
+	$(MAKE) -C .. agent
+	install -Dm0755 ../bin/vm-agent $@
+
+FORCE:
+
 # One mkosi run builds the base tree, the kubernetes sysext (--dependency=
 # appends to Dependencies=base of mkosi.conf) and the disk image, then lays out
 # both sysupdate directories (renamed artifacts, SHA256SUMS, SHA256SUMS.gpg).
-images: keys ignition
+images: keys ignition agent
 	$(MKOSI) $(MKOSI_ARGS) --force --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
 
 # Base tree and disk image only.
-base: keys ignition
+base: keys ignition agent
 	$(MKOSI) $(MKOSI_ARGS) --force build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 

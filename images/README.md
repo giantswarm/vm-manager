@@ -49,7 +49,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `vm-manager image golden` adds `golden: {sha256: {"0": hex, ..., "7": hex, "13": hex}}` (PCRs 0-7 and 13 of a known-good boot), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]` and PCRs 0-7 (and 13 at the ready stage) with `golden` |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}`; `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
 | `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
@@ -65,8 +65,8 @@ Root and verity partition UUIDs are derived from the root hash (first/last 128 b
 which is how `roothash=` locates them; that is why the sysupdate file names carry
 the partition UUID (`@u`).
 
-Sizes for 0.1.0: `.raw` 646 MB (472 MB used), `.efi` 97 MB (kernel 17 MB, initrd 80 MB
-of which 61 MB is mkosi's default initrd and 6.9 MB Ignition), root erofs (zstd) 400 MB, verity 3.2 MB,
+Sizes for 0.1.0: `.raw` 651 MB (488 MB used), `.efi` 102 MB (kernel 17 MB, initrd 84 MB
+of which 61 MB is mkosi's default initrd, 6.9 MB Ignition and 3.9 MB `vm-agent`), root erofs (zstd) 400 MB, verity 3.2 MB,
 signature 1.9 KB. A warm `make base` (nothing changed) takes ~10 s, a cold one with
 package downloads ~3 min; `make verify-base` ~5 s; `make smoke-boot` ~30 s wall, the guest
 reaches multi-user.target after ~7 s. The kubernetes sysext for 1.36.4 is 206 MB
@@ -83,6 +83,9 @@ cache, `make images verify` (everything, warm) ~30 s.
   `/user-data` is deliberately not an hwdb key: Ignition fetches it through
   `ignition.config.url`, and `systemd-imds --import` must not see the 503 the IMDS answers
   while the key is gated by attestation.
+- `/usr/bin/vm-agent` (from `make agent` at the repo root, static, 9.8 MB) with
+  `vm-agent-attest.service` (ready stage, enabled by the preset); the initrd carries the
+  same binary with the initrd-stage unit. See [Attestation](#attestation).
 - `/usr/lib/repart.sysinstall.d/`: target layout for `systemd-sysinstall`: ESP 512M,
   root A / verity A / verity-sig A with `CopyBlocks=auto` and labels `%M_%A[...]`
   (`giantswarm-vm-base_0.1.0`, `_verity`, `_verity_sig`), empty B slots labelled `_empty`
@@ -202,8 +205,9 @@ once released, 503 + `Retry-After` while gated by attestation (Ignition retries 
 status >= 500 with 200 ms..5 s backoff for `--fetch-timeout`, 2 min; then the fetch fails
 and the boot lands in `emergency.target`), 204 when the VM has no user-data (an empty body
 is "no config", the stages finish with nothing to do). The initrd stage of the
-attestation agent must be ordered `Before=ignition-fetch.service`: its verified quote is
-what turns the 503 into 200.
+attestation agent runs `Before=ignition-fetch.service` (`vm-agent-attest.service` plus the
+`ignition-fetch.service.d/10-vm-agent-attest.conf` drop-in, see
+[Attestation](#attestation)): its verified quote is what turns the 503 into 200.
 
 What Ignition writes lands on the var partition: `persistent-etc.service` (see
 [Persistent state](#persistent-state)) mounts var, the `/etc` overlay and the `/root` and
@@ -212,6 +216,65 @@ What Ignition writes lands on the var partition: `persistent-etc.service` (see
 `After=systemd-volatile-root.service` is a no-op now; `persistent-etc.service` took that
 slot). Files below `/var`, `/etc`, `/root` and `/opt` therefore persist across reboots;
 the rest of the root is the read-only erofs and a file there fails with EROFS.
+
+## Attestation
+
+`vm-agent` (`cmd/vm-agent`, `make agent` at the repo root: `CGO_ENABLED=0`, checked
+static, 9.8 MB) is staged by `images/Makefile` (`agent` target, a prerequisite of `base`
+and `images`) into `build/agent/tree/usr/bin/vm-agent` and copied by `ExtraTrees=` into
+both the base tree (`mkosi.images/base/mkosi.conf`) and the initrd
+(`mkosi.initrd.conf/mkosi.conf`); it adds 3.9 MB to the zstd initrd (9.8 MB uncompressed),
+84 MB in total for 0.1.0. `go build` is incremental, so every image build rebuilds it; a
+changed agent changes the initrd and with it PCR 11. It speaks to the vTPM at
+`/dev/tpmrm0` and to the IMDS; `docs/design.md` "Attestation protocol" has the wire
+format, `internal/attest` the verifier.
+
+Two units of the same name, `vm-agent-attest.service`, one per stage:
+
+| Where | Ordering | Runs |
+|---|---|---|
+| initrd (`mkosi.initrd.conf/mkosi.extra`) | `initrd.target.wants/`; `After=basic.target network-online.target systemd-imds-early-network.service systemd-imds-import.service tpm2.target systemd-tpm2-setup-early.service systemd-pcrphase-initrd.service`, `Before=ignition-fetch.service ignition-complete.target`; `ignition-fetch.service.d/10-vm-agent-attest.conf` adds `Wants=`+`After=vm-agent-attest.service` to the fetch stage | `vm-agent attest --stage=initrd --timeout=90s`: nonce, quote of PCRs 0-7 and 11, posted with the firmware and userspace event logs. Every installed boot, not only the first: vm-manager gates user-data again on every boot |
+| root (`mkosi.images/base/mkosi.extra`, preset-enabled) | `WantedBy=multi-user.target`, `Before=multi-user.target`; `After=network-online.target systemd-imds-import.service systemd-tpm2-setup.service vm-kubernetes.service systemd-pcrphase.service` | `vm-agent attest --stage=ready --timeout=90s`: PCRs 0-7, 11 and 13 once the sysext is merged and measured and PCR 11 carries the full phase path; `READY=1` follows it |
+
+Why the ordering matters: `systemd-pcrphase-initrd.service` extends PCR 11 with
+`enter-initrd` when it starts and with `leave-initrd` when it stops, which happens at the
+switch root (`Conflicts=initrd-switch-root.target`), after every unit of `initrd.target`;
+the initrd quote therefore sees exactly the `enter-initrd` value `scripts/verify` wrote to
+`policy.json`. `systemd-pcrphase.service` extends `ready` in the root, so the ready quote
+matches `enter-initrd:leave-initrd:sysinit:ready`. `vm-kubernetes.service` measures the
+sysext into PCR 13 before the ready quote.
+
+Conditions, the same on both units: `ConditionCredential=!vm.install-target` (the
+installer boot has nothing to attest), `ConditionKernelCommandLine=!systemd.imds=no`
+(no IMDS) and `ConditionFirmware=smbios-field(sys_vendor = GiantSwarm)`, the SMBIOS
+vendor vm-manager sets and the hwdb record keys on: a boot of the image elsewhere
+(`make smoke-boot`, `mkosi vm`) skips the units instead of waiting `--timeout` for an
+IMDS nobody serves.
+
+Exit codes and failure: the agent exits 0 when the verifier accepted the quote, 2 when
+it rejected it (the reason is printed, e.g. `golden mismatch: pcr 0 expected ..., got
+...`), 1 on any other error (no IMDS within `--timeout`, no TPM). 2 and 1 fail the unit,
+visibly (`StandardOutput=journal+console`, so the verdict is in `get_vm_console` and
+`journalctl -u vm-agent-attest.service`), but not the boot: no `OnFailure=`, no
+`Restart=` (re-quoting the same PCRs cannot change the verdict). With
+`require_attestation` the IMDS keeps answering `/user-data` with 503, Ignition's fetch
+stage retries until its 2-minute timeout and the boot lands in `emergency.target`;
+without it user-data was released when the boot started and the boot proceeds with the
+failed unit on record. `get_vm_attestation` shows both stages either way.
+
+Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only. The
+firmware PCRs a golden value can pin across VMs are 0 (firmware code), 2 and 3 (option
+ROMs), 4 (boot loader and UKI), 6 (os-separator only) and 7 (Secure Boot policy). PCR 1
+and 5 are quoted and recorded but not compared: EDK2 measures the SMBIOS tables into
+PCR 1, and the type 11 strings vm-manager passes are per-VM credentials (hostname,
+machine ID, SSH key, notify socket), as is the `Boot####` entry with the ESP's partition
+GUID; PCR 5 holds the GPT of the installed disk with its per-install partition UUIDs.
+Bring-up of a new image or firmware: start vm-manager with
+`--attestation-learn-golden`, boot one VM, `vm-manager image golden giantswarm-vm-base
+--from-vm <id> --image-dir <dir>`, restart without the flag; from then on the default
+`--attestation=verify` rejects a boot on other firmware (`e2e/attestation_test.go` proves
+this with `OVMF_CODE.secboot.4m.fd`: `golden mismatch` on PCR 0 and 7, user-data gated,
+Ignition in its fetch loop).
 
 ## Persistent state
 
@@ -439,7 +502,11 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    `IMDS_KEY_USERDATA`); `usr/bin/ignition` with the four stage units, their
    `ignition-complete.target` and `initrd.target` wiring, every `NEEDED` library of the
    binary, and `ignition.config.url=` / `ignition.platform.id=metal` on the UKI cmdline
-   (and no `ignition.firstboot`).
+   (and no `ignition.firstboot`); `usr/bin/vm-agent` (statically linked) with
+   `vm-agent-attest.service` wanted by `initrd.target`, ordered after
+   `systemd-pcrphase-initrd.service` and before `ignition-fetch.service` (the drop-in),
+   the ready-stage unit enabled in the root and the same binary size in the root erofs
+   (`dump.erofs`).
 7. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 8. Writes `build/policy.json`.
 

@@ -75,7 +75,7 @@ func TestPersistentEtc(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 
-	srv := startServer(ctx, t, dir, image.Dir)
+	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 
 	var n vm.NetworkInfo

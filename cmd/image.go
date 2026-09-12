@@ -46,7 +46,7 @@ func newImageGoldenCmd() *cobra.Command {
 		Use:   "golden <image-ref> --from-vm <id>",
 		Short: "Record the golden PCR values of an attested VM into the image's policy.json",
 		Long: `Read the verified ready-stage quote of a VM from the running server and write
-its PCRs 0-7 and 13 as the golden values into the policy.json of the image, so
+its PCRs 0, 2-4, 6, 7 and 13 as the golden values into the policy.json of the image, so
 the verifier (--attestation=verify) can compare every later boot of that image
 against a known-good one. The VM must have attested with --attestation=verify;
 during bring-up start the server with --attestation-learn-golden so the first

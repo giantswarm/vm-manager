@@ -645,7 +645,7 @@ func TestUnexpectedExitAndBootTimeout(t *testing.T) {
 	h.waitTimers(1)
 	h.clock.Advance(vm.DefaultBootTimeout)
 	v = h.waitState(v.ID, vm.StateRunning)
-	assert.Contains(t, v.LastError, "no READY=1 within 2m0s")
+	assert.Contains(t, v.LastError, "no READY=1 within 4m0s")
 	v = h.ready(v.ID, v.CID)
 	assert.Empty(t, v.LastError, "a late READY clears the note")
 

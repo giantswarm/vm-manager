@@ -1,0 +1,54 @@
+# Initrd stage of vm-manager's attestation (docs/design.md "Boot flow" step
+# 5): `vm-agent attest --stage=initrd` fetches a nonce from the IMDS, quotes
+# PCRs 0-7 and 11 with the VM's attestation key and posts the quote. A
+# verified quote is what releases /user-data to ignition-fetch.service, so
+# this runs Before= it; it runs on every installed boot (initrd.target.wants/),
+# not only the first, because vm-manager gates user-data again on every boot.
+#
+# PCR 11 must still hold the phase path "enter-initrd" alone when the quote is
+# taken, which is what the image policy (policy.json pcr11) expects of this
+# stage: After=systemd-pcrphase-initrd.service, whose ExecStart extended
+# enter-initrd and whose ExecStop extends leave-initrd at the switch root,
+# which every unit of initrd.target precedes.
+#
+# Exit codes of the agent: 0 verified; 2 rejected by the verifier (its reason
+# is printed, e.g. a golden mismatch of PCR 0-7 or an unknown AK); 1 any other
+# error (no IMDS within --timeout, no TPM). 2 and 1 fail this unit, visibly on
+# the console and in the journal, but not the boot: no OnFailure=. With
+# require_attestation the IMDS keeps answering /user-data with 503, Ignition's
+# fetch stage retries until its 2-minute timeout and the boot lands in
+# emergency.target; without it user-data is already released and the boot
+# proceeds with the failed unit on record (get_vm_attestation shows the
+# verdict either way).
+[Unit]
+Description=Attest the initrd to vm-manager (TPM quote, releases user-data)
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/images/README.md
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+# Same gates as vm-kubernetes.service: the installer boot (vm.install-target
+# credential) has nothing to attest, systemd.imds=no means no IMDS. The
+# firmware condition is the SMBIOS vendor vm-manager sets (-smbios type=1,
+# manufacturer=GiantSwarm, the key of the IMDS hwdb record too): a boot of
+# the image elsewhere (make smoke-boot, mkosi vm) skips the unit instead of
+# waiting --timeout for an IMDS nobody serves.
+ConditionCredential=!vm.install-target
+ConditionKernelCommandLine=!systemd.imds=no
+ConditionFirmware=smbios-field(sys_vendor = GiantSwarm)
+After=basic.target
+Wants=network-online.target
+After=network-online.target systemd-imds-early-network.service systemd-imds-import.service
+After=tpm2.target systemd-tpm2-setup-early.service systemd-pcrphase-initrd.service
+Before=ignition-fetch.service ignition-complete.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The agent's log and the verifier's verdict reach the journal and the serial
+# console (get_vm_console).
+StandardOutput=journal+console
+# --timeout bounds the wait for the IMDS (retries with backoff); the request
+# itself is one nonce and one quote.
+ExecStart=/usr/bin/vm-agent attest --stage=initrd --timeout=90s
+TimeoutStartSec=2min

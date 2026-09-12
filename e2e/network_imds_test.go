@@ -95,7 +95,7 @@ func TestNetworkIMDS(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 
-	srv := startServer(ctx, t, dir, image.Dir)
+	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 
 	tools, err := m.c.ListTools(ctx, mcp.ListToolsRequest{})
@@ -295,7 +295,19 @@ type server struct {
 // startServer builds the binary, starts it on a free loopback port with a
 // state dir under dir and waits for /readyz. The process is killed on
 // cleanup if the test did not stop it; its log is quoted on failure.
-func startServer(ctx context.Context, t *testing.T, dir, imageDir string) *server {
+// flagLearnGolden is passed to every serve of the e2e except where a test
+// exercises the golden path itself (TestAttestation): the shared image
+// directory carries no golden values (make -C images verify writes pcr11 and
+// pcr13 only), and with the default --attestation=verify a quote of PCRs 0-7
+// without them is rejected, which fails the guest's vm-agent-attest units and
+// the no-failed-units assertions. In learn mode the verifier accepts and
+// records them instead.
+const flagLearnGolden = "--attestation-learn-golden"
+
+// startServer builds vm-manager and starts `serve` on a free loopback port
+// with the test's state and image directories plus flags, and waits for
+// /readyz.
+func startServer(ctx context.Context, t *testing.T, dir, imageDir string, flags ...string) *server {
 	t.Helper()
 	bin := filepath.Join(dir, "vm-manager")
 	build := exec.CommandContext(ctx, "go", "build", "-o", bin, ".") // #nosec G204 -- the go toolchain, output under the test's state dir
@@ -309,12 +321,13 @@ func startServer(ctx context.Context, t *testing.T, dir, imageDir string) *serve
 	require.NoError(t, err)
 	defer func() { _ = logFile.Close() }()
 
-	cmd := exec.Command(bin, "-v", "serve", // #nosec G204 -- the binary built above
+	args := append([]string{"-v", "serve",
 		"--listen", addr,
 		"--state-dir", filepath.Join(dir, "state"),
 		"--image-dir", imageDir,
 		"--stop-timeout", stopTimeout.String(),
-	)
+	}, flags...)
+	cmd := exec.Command(bin, args...) // #nosec G204 -- the binary built above
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	require.NoError(t, cmd.Start())
 	s := &server{t: t, cmd: cmd, URL: "http://" + addr, log: logPath, exited: make(chan struct{})}

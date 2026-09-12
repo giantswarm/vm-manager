@@ -36,12 +36,26 @@ const (
 	maxPCR = 23
 )
 
-// firmwarePCRs are PCRs 0-7, the firmware and Secure Boot measurements
-// that only the golden values recorded on a known-good boot can vouch for.
+// firmwarePCRs are PCRs 0-7, the firmware and Secure Boot measurements;
+// every quote covers them and they are recorded per stage.
 var firmwarePCRs = []int{0, 1, 2, 3, 4, 5, 6, 7}
 
-// GoldenIndexes are the PCRs `vm-manager image golden` records: 0-7 and 13.
-var GoldenIndexes = append(append([]int(nil), firmwarePCRs...), PCRSysext)
+// goldenFirmwarePCRs are the firmware PCRs a golden value recorded on one
+// known-good boot can vouch for on every VM of the same firmware and image:
+// 0 (firmware code), 2 and 3 (option ROMs), 4 (boot loader and UKI), 6
+// (nothing but the os-separator), 7 (Secure Boot policy). PCR 1 and 5 are
+// quoted and recorded but differ per VM by construction, so they are not
+// compared: EDK2 measures the SMBIOS tables into PCR 1, and vm-manager's type
+// 11 strings carry per-VM credentials (hostname, machine ID, SSH key, notify
+// socket), as does the Boot#### entry with the ESP's partition GUID; PCR 5
+// holds the GPT of the installed disk with its per-install partition UUIDs.
+// Both are in the firmware event log the agent posts (QuoteRequest.EventLog)
+// for a replay-based check per VM (docs/design.md, open points).
+var goldenFirmwarePCRs = []int{0, 2, 3, 4, 6, 7}
+
+// GoldenIndexes are the PCRs `vm-manager image golden` records and the
+// verifier compares against the policy's golden values: 0, 2-4, 6, 7 and 13.
+var GoldenIndexes = append(append([]int(nil), goldenFirmwarePCRs...), PCRSysext)
 
 // ErrNoPolicy is returned by a PolicyProvider when the VM's image has no
 // usable policy; the verifier rejects the quote with the reason instead of

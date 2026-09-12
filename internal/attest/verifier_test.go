@@ -195,9 +195,9 @@ func TestVerifierAcceptsInitrdAndReady(t *testing.T) {
 	require.NoError(t, json.Unmarshal(shape["pcrs"], &pcrs))
 	assert.Len(t, pcrs["11"], 64)
 	readyGolden := attest.GoldenFromPCRs(r.PCRs)
-	assert.Len(t, readyGolden, 9, "pcrs 0-7 and 13")
+	assert.Len(t, readyGolden, 7, "pcrs 0, 2-4, 6, 7 and 13")
 	delete(readyGolden, 13)
-	assert.Equal(t, attest.GoldenFromPCRs(results[imds.StageInitrd].PCRs), readyGolden, "pcrs 0-7 do not move between the stages")
+	assert.Equal(t, attest.GoldenFromPCRs(results[imds.StageInitrd].PCRs), readyGolden, "the golden firmware pcrs do not move between the stages")
 }
 
 func TestVerifierRejectsPolicyMismatch(t *testing.T) {
@@ -253,7 +253,7 @@ func TestVerifierLearnGolden(t *testing.T) {
 	assert.True(t, res.Verified, res.Message)
 	assert.Contains(t, res.Message, "accepted without golden value: 0="+golden[0])
 	r, _ := e.v.Result(vmID, imds.StageInitrd)
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7}, r.Learned)
+	assert.Equal(t, []int{0, 2, 3, 4, 6, 7}, r.Learned)
 	for i, want := range golden {
 		assert.Equal(t, want, r.PCRs[i], "pcr %d", i)
 	}
@@ -262,8 +262,8 @@ func TestVerifierLearnGolden(t *testing.T) {
 	res = e.submit(e.request(e.ak, imds.StageReady))
 	assert.True(t, res.Verified, res.Message)
 	r, _ = e.v.Result(vmID, imds.StageReady)
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 13}, r.Learned)
-	assert.Len(t, attest.GoldenFromPCRs(r.PCRs), 9, "everything image golden needs")
+	assert.Equal(t, []int{0, 2, 3, 4, 6, 7, 13}, r.Learned)
+	assert.Len(t, attest.GoldenFromPCRs(r.PCRs), len(attest.GoldenIndexes), "everything image golden needs")
 
 	// Learn mode does not excuse a wrong value.
 	e.policy.Golden = map[string]map[int]string{attest.Bank: {3: golden[0]}}

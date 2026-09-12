@@ -20,11 +20,13 @@
 //     first verified initrd quote enrolls it; a ready quote without an
 //     enrolled AK is rejected);
 //  6. PCR 11 equals the policy's value for the stage's phase path;
-//  7. PCRs 0-7 equal the golden values; a PCR without a golden value is
-//     accepted only in learn mode (Options.LearnGolden) and reported in
-//     Result.Learned; PCR 13 is compared at the ready stage against the
-//     policy's pcr13 entry for the VM's Kubernetes version, else against
-//     the golden value, and recorded when the policy has neither.
+//  7. PCRs 0, 2-4, 6 and 7 equal the golden values (PCR 1 and 5 differ per
+//     VM, see goldenFirmwarePCRs; they are quoted and recorded, not
+//     compared); a PCR without a golden value is accepted only in learn mode
+//     (Options.LearnGolden) and reported in Result.Learned; PCR 13 is
+//     compared at the ready stage against the policy's pcr13 entry for the
+//     VM's Kubernetes version, else against the golden value, and recorded
+//     when the policy has neither.
 //
 // Every verdict is kept per VM and stage (Results) for get_vm_attestation
 // and `vm-manager image golden`.
@@ -64,9 +66,9 @@ func (f PolicyProviderFunc) PolicyFor(ctx context.Context, vmID string) (Policy,
 // Options configure a Verifier; Policies is required.
 type Options struct {
 	Policies PolicyProvider
-	// LearnGolden accepts PCRs 0-7 without a golden value and records the
-	// observed values (Result.Learned); for bring-up of a new image or
-	// firmware, never for production.
+	// LearnGolden accepts golden PCRs (GoldenIndexes) without a golden value
+	// and records the observed values (Result.Learned); for bring-up of a
+	// new image or firmware, never for production.
 	LearnGolden bool
 	// Logger for verdicts and AK enrolment; nil uses slog.Default().
 	Logger *slog.Logger
@@ -207,7 +209,7 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 			sysext = kubernetes
 		}
 	}
-	for _, i := range firmwarePCRs {
+	for _, i := range goldenFirmwarePCRs {
 		compare(i)
 	}
 	if req.Stage == imds.StageReady {

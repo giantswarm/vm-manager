@@ -24,7 +24,6 @@ const (
 	ignitionNetwork = "e2e-ignition"
 	ignitionCIDR    = "192.168.141.0/24"
 	ignitionVMName  = "ignition-e2e"
-	ignitionGatedVM = "ignition-gated-e2e"
 )
 
 // What the user-data asks Ignition to do, and where the proof shows up.
@@ -44,17 +43,17 @@ const (
 	ignitionFetchPassed = "fetch passed"
 	ignitionFilesPassed = "files passed"
 	ignitionFinished    = "Ignition finished successfully"
+	// The fetch loop against a gated /user-data (503), what TestAttestation
+	// expects on the console of a rejected VM.
 	ignitionFetchRetry  = "GET http://169.254.169.254/giantswarm/v1/user-data: attempt #2"
 	ignitionGatedResult = "GET result: Service Unavailable"
 )
 
 // Ceilings on top of the ones in network_imds_test.go: a reboot is one
-// installed boot; the gated VM only has to reach the initrd's fetch loop.
+// installed boot.
 const (
 	ignitionTestTimeout = 15 * time.Minute
 	rebootReadyWithin   = 3 * time.Minute
-	gatedBootWithin     = 2 * time.Minute
-	gatedRetriesWithin  = 60 * time.Second
 )
 
 // ignitionConfig is the Ignition v3.4.0 user-data: one file with mode 0644 and
@@ -89,9 +88,9 @@ func ignitionConfig(t *testing.T) string {
 // first installed boot has the file, the unit (enabled, ran) and a clean
 // Ignition journal; a reboot_vm later shows Ignition idle, because
 // ignition.firstboot is on the kernel command line of the first installed
-// boot only. The gated subtest documents what a VM with require_attestation
-// true does today, without an initrd attestation agent: the IMDS answers 503
-// and Ignition's fetch stage retries until its own timeout.
+// boot only. The gate in front of /user-data (require_attestation true) is
+// TestAttestation's subject: released by a verified initrd quote, kept shut
+// on a rejected one.
 func TestIgnition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), ignitionTestTimeout)
 	defer cancel()
@@ -100,7 +99,7 @@ func TestIgnition(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 
-	srv := startServer(ctx, t, dir, image.Dir)
+	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 	m.call(ctx, api.ToolCreateNetwork, map[string]any{"name": ignitionNetwork, "cidr": ignitionCIDR}, nil)
 	userData := ignitionConfig(t)
@@ -134,48 +133,6 @@ func TestIgnition(t *testing.T) {
 		var deleted api.DeletedResponse
 		m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)
 		assert.True(t, deleted.Deleted)
-	})
-
-	t.Run("gated user-data keeps the fetch stage retrying (current behaviour)", func(t *testing.T) {
-		var v vm.VM
-		m.call(ctx, api.ToolCreateVM, map[string]any{
-			"name":                ignitionGatedVM,
-			"hostname":            ignitionGatedVM,
-			"network":             ignitionNetwork,
-			"user_data":           userData,
-			"require_attestation": true,
-			"wait_for":            string(vm.WaitInstalled),
-		}, &v)
-		require.NotNil(t, v.InstalledAt, "create_vm with wait_for installed: state %s lastError %q", v.State, v.LastError)
-		t.Cleanup(func() {
-			var deleted api.DeletedResponse
-			m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)
-			assert.True(t, deleted.Deleted)
-		})
-
-		v = waitFor(ctx, t, m, v.ID, gatedBootWithin, "installed boot started", func(v vm.VM) bool { return v.BootedAt != nil })
-		assert.True(t, v.Attestation.Required)
-		assert.False(t, v.Attestation.UserDataReleased, "get_vm must report user-data as not released")
-
-		// No initrd attestation agent posts a quote yet, so the IMDS keeps
-		// answering 503 and Ignition keeps retrying (internal/resource/http.go
-		// of v2.27.0 retries every status >= 500 with 200 ms..5 s backoff
-		// until --fetch-timeout, 2 minutes). The VM is deleted while still
-		// in that loop.
-		var console api.ConsoleResponse
-		deadline := time.Now().Add(gatedRetriesWithin)
-		for {
-			m.call(ctx, api.ToolGetVMConsole, map[string]any{"id": v.ID, "lines": 10000}, &console)
-			if strings.Contains(console.Console, ignitionFetchRetry) && strings.Contains(console.Console, ignitionGatedResult) {
-				break
-			}
-			require.False(t, time.Now().After(deadline), "no Ignition fetch retries on the console within %s; last lines:\n%s", gatedRetriesWithin, tail(console.Console, 30))
-			time.Sleep(pollEvery)
-		}
-		t.Logf("gated fetch loop on the console:\n%s", tail(console.Console, 12))
-		m.call(ctx, api.ToolGetVM, map[string]any{"id": v.ID}, &v)
-		assert.False(t, v.Attestation.UserDataReleased, "user-data stays gated without a verified initrd quote")
-		assert.Nil(t, v.ReadyAt, "the guest cannot reach READY=1 while its initrd waits for user-data")
 	})
 
 	var deleted api.DeletedResponse
