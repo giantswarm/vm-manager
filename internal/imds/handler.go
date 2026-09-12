@@ -310,8 +310,18 @@ func statusFor(err error) int {
 	}
 }
 
+// notFound answers 404 with an empty body. The body matters: systemd-imdsd
+// (261, src/imds/imdsd.c data_write_callback) aborts the transfer as soon as
+// a response with status >= 300 delivers body bytes, and that curl write
+// error wins over its own 404 handling, so the guest sees a generic
+// io.systemd.System error instead of io.systemd.InstanceMetadata.KeyNotFound.
+// Only the latter lets `systemd-imds --import` treat an absent /user-data as
+// "nothing to import"; with a body systemd-imds-import.service fails and the
+// guest boots degraded.
 func notFound(w http.ResponseWriter) {
-	writeText(w, http.StatusNotFound, "key not found")
+	w.Header().Set("Content-Type", textPlain)
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusNotFound)
 }
 
 // writeText answers with a plain-text body exactly as given: no trailing

@@ -1,6 +1,9 @@
 // Package e2e holds the T3 boot end-to-end tests of docs/design.md "Testing
-// strategy": real QEMU on KVM, swtpm, OVMF and the mkosi image from images/,
-// driven through internal/runtime/qemu and internal/tpm.
+// strategy": real QEMU on KVM, swtpm, OVMF and the mkosi image from images/.
+// TestInstallBoot drives them through internal/runtime/qemu and internal/tpm
+// with user networking; TestNetworkIMDS builds and starts vm-manager serve
+// and drives it through its MCP endpoint, so the guest gets a virtual network
+// with the IMDS.
 //
 // The tests are behind the e2e build tag so that go test ./... and go vet ./...
 // stay fast and hermetic:
