@@ -1,6 +1,8 @@
 # vm-manager
 
 [![test](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml)
+[![image](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml)
+[![e2e](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml)
 
 VM provisioning service for the Giant Swarm Agent Platform: the write surface for
 **virtual machines**, the sibling of [agent-manager](https://github.com/giantswarm/agent-manager)

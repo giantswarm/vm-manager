@@ -182,7 +182,7 @@ func requireUserManager(t *testing.T) {
 	if runtimeDir == "" {
 		t.Skip("XDG_RUNTIME_DIR unset: no user service manager for the systemd launcher")
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "systemd", "private")); err != nil {
+	if _, err := os.Stat(filepath.Join(runtimeDir, "systemd", "private")); err != nil { // #nosec G703 -- the user's own runtime directory, only stat'ed
 		t.Skipf("no user service manager: %v", err)
 	}
 	if _, err := exec.LookPath("systemd-run"); err != nil {

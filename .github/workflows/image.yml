@@ -1,0 +1,136 @@
+name: image
+
+# T2 of docs/design.md "Testing strategy": build the guest image and the
+# kubernetes sysext with mkosi and run the offline verification, then publish
+# images/build/ as the `guest-image` artifact that e2e.yml boots.
+#
+# The build runs inside an archlinux container: the image is Arch (mkosi 27,
+# systemd 261, erofs-utils, ukify, systemd-measure), the hosted Ubuntu runner
+# has none of that at the needed versions, and images/README.md documents
+# the Arch host. --privileged is what mkosi's sandbox needs for its mount
+# namespaces and the sysext's overlayfs; the mkosi workspace lives on the
+# runner's bind-mounted temp directory because overlayfs cannot stack on the
+# container's own overlay root.
+
+# Triggered only through e2e.yml (workflow_call, whenever a change touches the
+# image inputs) or by hand: a standalone pull_request/push trigger here would
+# build the same commit a second time next to the nested build.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Distinct from the caller's group (e2e.yml calls this workflow): a called
+# workflow sharing its caller's concurrency group would deadlock or cancel it.
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # What e2e.yml downloads. Keep in sync with e2e.yml.
+  ARTIFACT: guest-image
+
+jobs:
+  build:
+    name: mkosi build and verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Install the Arch build tools
+        # Everything images/README.md lists for the host: mkosi and systemd
+        # (repart, ukify, measure, dissect, hwdb), erofs-utils, dosfstools and
+        # mtools for the ESP, cpio for the initrd, Go and base-devel for
+        # vm-agent and Ignition (cgo), gnupg and openssl for the dev keys,
+        # python-pefile for ukify and scripts/verify, file for the static
+        # check of make agent. git and zstd are for actions/checkout and
+        # actions/cache.
+        run: |
+          pacman-key --init
+          pacman -Syu --noconfirm --needed \
+            base-devel git go mkosi systemd systemd-ukify erofs-utils dosfstools mtools cpio \
+            zstd openssl gnupg python-pefile python-cryptography util-linux file
+          mkosi --version
+          systemctl --version | head -1
+          go version
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Cache key
+        id: key
+        # Weekly stamp: mkosi's incremental cache freezes the Arch package set
+        # it was built from, so a fresh week starts from the current repos
+        # (restore-keys stay within the week on purpose).
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the mkosi caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            images/mkosi.cache
+            ~/.cache/mkosi
+          # Folded into one line (equal indentation): the hash of the mkosi
+          # configuration and scripts.
+          key: >-
+            mkosi-${{ steps.key.outputs.week }}-${{
+            hashFiles('images/Makefile', 'images/mkosi.conf', 'images/mkosi.version',
+            'images/mkosi.images/**', 'images/mkosi.initrd.conf/**',
+            'images/mkosi.repart/**', 'images/mkosi.profiles/**',
+            'images/scripts/**') }}
+          restore-keys: |
+            mkosi-${{ steps.key.outputs.week }}-
+
+      - name: Build keys, base image and every kubernetes sysext version; verify
+        # `make -C images` (all): keys, one mkosi run for base tree, disk
+        # image and the default sysext, the other KUBERNETES_VERSIONS, then
+        # verify-base and verify-kubernetes (which covers every published
+        # version). The bind-mounted checkout belongs to the runner user, the
+        # container runs as root: without safe.directory, git (Make's
+        # rev-parse, Go's VCS stamping of vm-agent) refuses it with "dubious
+        # ownership".
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git rev-parse --short HEAD
+          mkdir -p "$RUNNER_TEMP/mkosi"
+          make -C images MKOSI="mkosi --workspace-dir=$RUNNER_TEMP/mkosi" all
+
+      - name: Job summary (sizes, PCR 11)
+        run: |
+          {
+            echo "## guest-image"
+            echo
+            echo "mkosi $(mkosi --version | awk '{print $2}'), $(systemctl --version | head -1), $(go version | cut -d' ' -f3)"
+            echo
+            echo '```'
+            (cd images/build && ls -lh -- *.efi *.raw *.roothash policy.json && du -sh sysupdate/*)
+            echo '```'
+            echo
+            echo "### Expected PCR 11 (policy.json)"
+            echo
+            echo "| phase path | sha256 |"
+            echo "|---|---|"
+            python3 -c 'import json; [print(f"| `{k}` | `{v}` |") for k, v in json.load(open("images/build/policy.json"))["pcr11"].items()]'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the image artifact
+        # The build tree (base/), Ignition sources and the .initrd (inside the
+        # UKI) stay out; the rest is what vm-manager serve and the e2e tests
+        # read. Already compressed (erofs zstd), so no zip compression.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            images/build/*.efi
+            images/build/*.raw
+            images/build/*.roothash
+            images/build/*.repart.d/
+            images/build/policy.json
+            images/build/sysupdate/
+          if-no-files-found: error
+          compression-level: 0
+          # Long enough for e2e.yml to reuse main's image between merges.
+          retention-days: ${{ github.event_name == 'push' && 30 || 7 }}
