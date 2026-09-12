@@ -285,13 +285,19 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 
 	c.networks = network.NewManager(o.stateDir, log)
 
+	// The port is part of the state dir contract: guests carry it in their
+	// vmm.notify_socket credential from boot, so a restarted vm-manager
+	// must listen on the port the earlier one recorded.
 	var notifier vm.Notifier = noNotify{}
-	notify, err := qemu.ListenNotify(uint32(o.notifyPort), log) // #nosec G115 -- range checked in complete.
-	if err != nil {
+	notify, err := qemu.ListenNotifyPersistent(qemu.NotifyPortFile(o.stateDir), uint32(o.notifyPort), log) // #nosec G115 -- range checked in complete.
+	switch {
+	case errors.Is(err, qemu.ErrNotifyPortInUse):
+		return nil, err
+	case err != nil:
 		log.Warn("vsock notify listener unavailable: guests cannot report READY=1, VMs settle in state running instead of ready", "err", err)
-	} else {
+	default:
 		c.notify, notifier = notify, notify
-		log.Info("notify listener bound", "vsockPort", notify.Port())
+		log.Info("notify listener bound", "vsockPort", notify.Port(), "recordedIn", qemu.NotifyPortFile(o.stateDir))
 	}
 
 	c.images, err = images.Load(o.imageDir, log)

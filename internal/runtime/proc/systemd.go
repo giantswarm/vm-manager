@@ -63,11 +63,15 @@ func (f RunnerFunc) Output(ctx context.Context, name string, args ...string) (st
 	return f(ctx, name, args...)
 }
 
-// execRunner runs the command through os/exec; a failure carries stderr.
-type execRunner struct{}
+// execRunner runs the command through os/exec with extra environment; a
+// failure carries stderr.
+type execRunner struct{ env []string }
 
-func (execRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
+func (r execRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- systemd-run and systemctl with arguments built here
+	if len(r.env) > 0 {
+		cmd.Env = append(os.Environ(), r.env...)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -96,6 +100,10 @@ func (execRunner) Output(ctx context.Context, name string, args ...string) (stri
 type SystemdExec struct {
 	// Manager selects the service manager; ManagerSystem when empty.
 	Manager Manager
+	// RuntimeDir is the user manager's runtime dir (/run/user/<uid>),
+	// exported as XDG_RUNTIME_DIR to systemd-run and systemctl so they find
+	// it from a system service too; empty inherits the environment.
+	RuntimeDir string
 	// Slice is the slice the units are placed in; DefaultSlice when empty.
 	Slice string
 	// Runner runs systemd-run and systemctl; nil uses os/exec.
@@ -432,7 +440,11 @@ func (x *SystemdExec) run(ctx context.Context, name string, args ...string) (str
 	}
 	r := x.Runner
 	if r == nil {
-		r = execRunner{}
+		var env []string
+		if x.Manager == ManagerUser && x.RuntimeDir != "" {
+			env = []string{"XDG_RUNTIME_DIR=" + x.RuntimeDir}
+		}
+		r = execRunner{env: env}
 	}
 	return r.Output(ctx, name, args...)
 }

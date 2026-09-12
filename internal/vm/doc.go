@@ -110,5 +110,13 @@
 // as any exit; a record whose processes are gone, or that came from the
 // plain process launcher, becomes stopped with a note. Networks are
 // recreated from networks.json, so leases and MACs survive restarts, and
-// QEMU reconnects its netdev by itself.
+// QEMU reconnects its netdev by itself. The vsock notify port is recorded
+// in the state dir (qemu.ListenNotifyPersistent) because the guests carry
+// it in a credential from boot; the state dir itself is flock(2)ed
+// (lock.go) so no second vm-manager serves it.
+//
+// Known limitation: swtpm is reattached on the unit's word alone. A swtpm
+// whose unit cannot be queried (or is gone) while the process still lives
+// is treated as gone: the VM stays tracked and running, its swtpm is
+// neither stopped nor stopped later with the VM, and a warning is logged.
 package vm

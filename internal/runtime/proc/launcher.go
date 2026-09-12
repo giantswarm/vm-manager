@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 )
 
 // LauncherMode is how a Launcher was chosen or is requested.
@@ -66,35 +67,40 @@ func SelectLauncher(mode LauncherMode, log *slog.Logger) (Launcher, error) {
 	default:
 		return Launcher{}, fmt.Errorf("launcher %q is not one of %v", mode, LauncherModes)
 	}
-	manager, reason := detectManager()
+	manager, runtimeDir, reason := detectManager()
 	if manager == "" {
 		if mode == LauncherSystemd {
 			return Launcher{}, fmt.Errorf("systemd launcher unavailable: %s", reason)
 		}
 		return Launcher{Exec: OSExec{}, Reason: reason}, nil
 	}
-	return Launcher{Exec: &SystemdExec{Manager: manager, Logger: log}, Manager: manager, Reason: reason}, nil
+	return Launcher{Exec: &SystemdExec{Manager: manager, RuntimeDir: runtimeDir, Logger: log}, Manager: manager, Reason: reason}, nil
 }
 
-// detectManager finds a reachable service manager; the empty Manager says
-// why there is none.
-func detectManager() (Manager, string) {
+// userRuntimeDir is where the user manager of uid lives when
+// $XDG_RUNTIME_DIR is not set, as in a system service with User= whose
+// user has lingering enabled (loginctl enable-linger).
+func userRuntimeDir(uid int) string { return filepath.Join("/run/user", strconv.Itoa(uid)) }
+
+// detectManager finds a reachable service manager and, for the user
+// manager, its runtime dir; the empty Manager says why there is none.
+func detectManager() (manager Manager, runtimeDir, reason string) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
-		return "", "systemd-run is not on PATH"
+		return "", "", "systemd-run is not on PATH"
 	}
 	if os.Geteuid() == 0 {
 		if _, err := os.Stat(systemManagerDir); err == nil {
-			return ManagerSystem, "running as root with the system manager at " + systemManagerDir
+			return ManagerSystem, "", "running as root with the system manager at " + systemManagerDir
 		}
-		return "", "running as root but " + systemManagerDir + " does not exist"
+		return "", "", "running as root but " + systemManagerDir + " does not exist"
 	}
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	runtimeDir = os.Getenv("XDG_RUNTIME_DIR")
 	if runtimeDir == "" {
-		return "", "XDG_RUNTIME_DIR is not set, no user service manager"
+		runtimeDir = userRuntimeDir(os.Geteuid())
 	}
 	private := filepath.Join(runtimeDir, "systemd", "private")
-	if _, err := os.Stat(private); err != nil { // #nosec G703 -- $XDG_RUNTIME_DIR is the login session's runtime dir, only probed
-		return "", "no user service manager at " + private
+	if _, err := os.Stat(private); err != nil { // #nosec G703 -- the login session's runtime dir, only probed
+		return "", "", "no user service manager at " + private + " (for a service user: loginctl enable-linger)"
 	}
-	return ManagerUser, "user service manager at " + private
+	return ManagerUser, runtimeDir, "user service manager at " + private
 }

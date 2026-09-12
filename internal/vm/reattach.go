@@ -49,7 +49,9 @@ func (s *Service) reattach(ctx context.Context, e *entry) (err error) {
 	t, err := s.opts.TPM.Attach(ctx, tpmConfig(rec), rec.Processes.TPM)
 	if err != nil {
 		// QEMU runs on without its TPM; the guest sees a device that no
-		// longer answers. Track the VM regardless.
+		// longer answers. Track the VM regardless. Known limitation: a
+		// swtpm that is alive but whose unit could not be queried lands
+		// here too and is then never stopped by vm-manager.
 		s.log.Warn("swtpm not reattached", "id", rec.ID, "err", err)
 		t = missingTPM{socket: filepath.Join(rec.Paths.TPMState, tpm.DefaultSocketName)}
 	}

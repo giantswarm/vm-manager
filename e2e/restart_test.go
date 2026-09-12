@@ -60,7 +60,23 @@ func TestRestart(t *testing.T) {
 	m.call(ctx, api.ToolGetVMConsole, map[string]any{"id": v.ID, "lines": 10000}, &before)
 	require.Contains(t, before.Console, consoleMultiUser)
 
-	// SIGTERM: the server exits within its stop timeout and leaves the VM.
+	// A second VM is caught mid-boot: create_vm returns once its installer
+	// finished (wait_for installed), the restart happens during its
+	// installed boot, and its READY=1 must reach the next server through
+	// the notify port recorded in the state dir.
+	var booting vm.VM
+	m.call(ctx, api.ToolCreateVM, map[string]any{
+		"name":                restartVMName + "-2",
+		"network":             restartNetwork,
+		"ssh_authorized_keys": []string{testKey},
+		"require_attestation": false,
+		"wait_for":            string(vm.WaitInstalled),
+	}, &booting)
+	require.True(t, booting.State.Live(), "second vm: state %s lastError %q", booting.State, booting.LastError)
+	require.Nil(t, booting.ReadyAt, "the second vm is not ready yet")
+	restartAt := time.Now()
+
+	// SIGTERM: the server exits within its stop timeout and leaves the VMs.
 	srv.stop()
 	require.True(t, alive(qemuPID), "qemu died with the server")
 	require.Equal(t, "active", unitProperty(t, unit, "ActiveState"), "qemu unit after the server exited")
@@ -84,6 +100,17 @@ func TestRestart(t *testing.T) {
 	assert.Equal(t, qemuPID, after.Processes.QEMU.PID)
 	assert.Equal(t, unit, after.Processes.QEMU.Unit)
 	assert.Contains(t, srv2.logTail(), "vm reattached")
+
+	// The VM that was booting reaches ready under the new server: READY=1
+	// arrived on the reattached listener, after the restart.
+	var second vm.VM
+	require.Eventually(t, func() bool {
+		m2.call(ctx, api.ToolGetVM, map[string]any{"id": booting.ID}, &second)
+		return second.State == vm.StateReady
+	}, 2*apiBootCeiling, pollEvery, "second vm after the restart: state %s lastError %q\n%s", second.State, second.LastError, srv2.logTail())
+	require.NotNil(t, second.ReadyAt)
+	assert.True(t, second.ReadyAt.After(restartAt), "READY=1 at %s, restart at %s", second.ReadyAt, restartAt)
+	assert.Empty(t, second.LastError)
 
 	// The guest is the same instance, reachable as before, and the console
 	// file keeps growing where it left off.
@@ -128,6 +155,10 @@ func TestRestart(t *testing.T) {
 	assert.True(t, deleted.Deleted)
 	assertGone(t, secondRun, childrenGoneWithin, "delete_vm")
 	assert.Equal(t, "not-found", unitProperty(t, unit, "LoadState"))
+	secondProcs := vmProcesses(t, second)
+	m2.call(ctx, api.ToolDeleteVM, map[string]any{"id": booting.ID}, &deleted)
+	assert.True(t, deleted.Deleted)
+	assertGone(t, secondProcs, childrenGoneWithin, "delete_vm of the second vm")
 	m2.call(ctx, api.ToolDeleteNetwork, map[string]any{"name": restartNetwork}, &deleted)
 	assert.True(t, deleted.Deleted)
 	srv2.stop()

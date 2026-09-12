@@ -170,6 +170,8 @@ type Service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// lock is the state dir's flock, held until Close.
+	lock *os.File
 
 	// mu guards vms, every entry's record, imds, changed and closing.
 	mu      sync.Mutex
@@ -216,7 +218,8 @@ type imdsServer struct {
 	ln  io.Closer
 }
 
-// New returns a service; call Load before serving requests.
+// New returns a service holding the state dir's lock (ErrStateDirInUse when
+// another vm-manager serves it); call Load before serving requests.
 func New(opts Options) (*Service, error) {
 	if err := opts.defaults(); err != nil {
 		return nil, err
@@ -224,8 +227,13 @@ func New(opts Options) (*Service, error) {
 	if err := os.MkdirAll(filepath.Join(opts.StateDir, vmsDir), 0o700); err != nil {
 		return nil, fmt.Errorf("create state dir: %w", err)
 	}
+	lock, err := lockStateDir(opts.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
+		lock:    lock,
 		opts:    opts,
 		log:     opts.Logger,
 		clock:   opts.Clock,
@@ -350,6 +358,9 @@ func (s *Service) Close(ctx context.Context) error {
 		if err := srv.close(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("imds %s: %w", name, err))
 		}
+	}
+	if err := s.lock.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		errs = append(errs, fmt.Errorf("release state dir lock: %w", err))
 	}
 	return errors.Join(errs...)
 }
