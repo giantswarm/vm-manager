@@ -88,6 +88,18 @@ const virtioSerialMax = 20
 // up in udev symlinks and QEMU ids.
 var serialPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// MaxUnixSocketPath is the longest path a unix socket can be bound to
+// (sizeof(sun_path) - 1 on Linux). Longer state dirs fail late inside QEMU or
+// swtpm with an opaque bind error, so Spec.validate rejects them up front.
+const MaxUnixSocketPath = 107
+
+// driveFormats are the image formats a Drive may declare.
+var driveFormats = map[string]bool{"raw": true, "qcow2": true}
+
+// netdevBackendPattern requires the backend type as the first token; the
+// remaining options are the caller's, escaped with EscapeOption.
+var netdevBackendPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(,[A-Za-z0-9_.-]+=.*)?$`)
+
 // Spec is everything Command needs to build the argument list of one VM.
 type Spec struct {
 	// ID names the VM: the SMBIOS type 1 serial (unless SMBIOS.Serial is
@@ -149,7 +161,7 @@ type Drive struct {
 	// Serial identifies the disk to the guest (virtio-<Serial>) and is the
 	// QEMU drive id; 1-20 characters of [A-Za-z0-9._-], unique per VM.
 	Serial string
-	// Format is the image format; empty is raw.
+	// Format is the image format, "raw" (default when empty) or "qcow2".
 	Format string
 	// ReadOnly attaches the disk read-only.
 	ReadOnly bool
@@ -171,7 +183,9 @@ type Netdev struct {
 	// ID is the netdev id shared by -netdev and the device; [A-Za-z0-9._-].
 	ID string
 	// Backend is the -netdev value without id, type first ("user",
-	// "stream,addr.type=unix,...").
+	// "stream,addr.type=unix,addr.path=..."). Callers must run every embedded
+	// value (paths in particular) through EscapeOption, because a bare comma
+	// starts a new QEMU option.
 	Backend string
 	// MAC is the guest's Ethernet address, what the DHCP lease is keyed by.
 	MAC string
@@ -317,7 +331,12 @@ func printable(v string) bool {
 }
 
 // escape doubles commas, which is how QEMU option values carry them.
-func escape(v string) string { return strings.ReplaceAll(v, ",", ",,") }
+// EscapeOption escapes a value for use inside a comma-separated QEMU option
+// string: QEMU reads ",," as a literal comma. Netdev.Backend builders must
+// apply it to every embedded value.
+func EscapeOption(v string) string { return strings.ReplaceAll(v, ",", ",,") }
+
+func escape(v string) string { return EscapeOption(v) }
 
 func invalid(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", apierr.ErrInvalid, fmt.Sprintf(format, a...))
@@ -347,6 +366,10 @@ func (s Spec) validate() error {
 		return invalid("serial log path is required")
 	case s.QMPSocket == "":
 		return invalid("QMP socket path is required")
+	case len(s.QMPSocket) > MaxUnixSocketPath:
+		return invalid("QMP socket path exceeds %d bytes; use a shorter state dir", MaxUnixSocketPath)
+	case len(s.TPMSocket) > MaxUnixSocketPath:
+		return invalid("TPM socket path exceeds %d bytes; use a shorter state dir", MaxUnixSocketPath)
 	}
 	serials := map[string]bool{SerialTarget: true}
 	if s.Phase == PhaseInstall {
@@ -378,6 +401,8 @@ func validateDrive(d Drive, seen map[string]bool) error {
 	switch {
 	case d.Path == "":
 		return invalid("drive %q has no path", d.Serial)
+	case d.Format != "" && !driveFormats[d.Format]:
+		return invalid("drive %q format %q must be raw or qcow2", d.Serial, d.Format)
 	case d.Serial == "" || len(d.Serial) > virtioSerialMax || !serialPattern.MatchString(d.Serial):
 		return invalid("drive serial %q must be 1-%d characters of [A-Za-z0-9._-]", d.Serial, virtioSerialMax)
 	case seen[d.Serial]:
@@ -395,6 +420,8 @@ func validateNetdev(n Netdev, seen map[string]bool) error {
 		return invalid("netdev id %q is used twice", n.ID)
 	case n.Backend == "" || strings.Contains(n.Backend, "id="):
 		return invalid("netdev %q backend must be set and carry no id", n.ID)
+	case !netdevBackendPattern.MatchString(n.Backend):
+		return invalid("netdev %q backend %q must start with the backend type, e.g. \"user\" or \"stream,addr.type=unix,...\"", n.ID, n.Backend)
 	}
 	if mac, err := net.ParseMAC(n.MAC); err != nil || len(mac) != 6 {
 		return invalid("netdev %q mac %q is not a 48-bit address", n.ID, n.MAC)

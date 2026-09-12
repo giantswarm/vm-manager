@@ -208,6 +208,11 @@ func TestCommandErrors(t *testing.T) {
 		{name: "netdev duplicate", mutate: func(s *Spec) { s.Netdevs = append(s.Netdevs, s.Netdevs[0]) }, want: `netdev id "net0" is used twice`},
 		{name: "netdev backend with id", mutate: func(s *Spec) { s.Netdevs[0].Backend = "user,id=net0" }, want: "carry no id"},
 		{name: "netdev empty backend", mutate: func(s *Spec) { s.Netdevs[0].Backend = "" }, want: "backend must be set"},
+		{name: "netdev backend injects option", mutate: func(s *Spec) { s.Netdevs[0].Backend = ",addr.path=/x" }, want: "must start with the backend type"},
+		{name: "netdev backend spaces", mutate: func(s *Spec) { s.Netdevs[0].Backend = "stream x" }, want: "must start with the backend type"},
+		{name: "drive format injects option", mutate: func(s *Spec) { s.ExtraDrives = []Drive{{Path: "/x", Serial: "d", Format: "raw,file=/etc/shadow"}} }, want: `format "raw,file=/etc/shadow" must be raw or qcow2`},
+		{name: "qmp socket too long", mutate: func(s *Spec) { s.QMPSocket = "/" + strings.Repeat("q", MaxUnixSocketPath) }, want: "QMP socket path exceeds 107 bytes"},
+		{name: "tpm socket too long", mutate: func(s *Spec) { s.TPMSocket = "/" + strings.Repeat("t", MaxUnixSocketPath) }, want: "TPM socket path exceeds 107 bytes"},
 		{name: "netdev bad mac", mutate: func(s *Spec) { s.Netdevs[0].MAC = "52:54:00" }, want: "is not a 48-bit address"},
 		{name: "netdev 64-bit mac", mutate: func(s *Spec) { s.Netdevs[0].MAC = "01:02:03:04:05:06:07:08" }, want: "is not a 48-bit address"},
 		{name: "credential empty name", mutate: func(s *Spec) { s.Credentials[""] = "x" }, want: `credential name "" must be 1-255`},
@@ -229,4 +234,12 @@ func TestCommandErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestNetdevBackendAcceptsEscapedValues(t *testing.T) {
+	s := bootSpec()
+	s.Netdevs[0].Backend = "stream,addr.type=unix,addr.path=" + EscapeOption("/run/a,b/qemu.sock") + ",reconnect-ms=500"
+	args, err := Command(s)
+	require.NoError(t, err)
+	assert.Contains(t, args, "stream,addr.type=unix,addr.path=/run/a,,b/qemu.sock,reconnect-ms=500,id=net0")
 }
