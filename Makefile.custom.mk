@@ -63,3 +63,15 @@ agent: ## Build the static guest binary bin/vm-agent (attest, pcrs, version).
 .PHONY: e2e
 e2e: ## Run the KVM boot end-to-end tests (go test -tags e2e ./e2e/...).
 	go test -tags e2e -count=1 -timeout 45m -v ./e2e/...
+
+# go vet ./... and golangci-lint ./... skip files behind the e2e build tag,
+# which let the package break unnoticed twice. These two compile and lint it
+# without a KVM host; .github/workflows/test.yml runs them on every PR.
+
+.PHONY: vet-e2e
+vet-e2e: ## Compile-check the e2e-tagged package without running it (go vet -tags e2e ./e2e/...).
+	go vet -tags e2e ./e2e/...
+
+.PHONY: lint-e2e
+lint-e2e: ## golangci-lint of the e2e-tagged package with the linters of make lint.
+	golangci-lint run -E gosec -E goconst --build-tags e2e --timeout=15m ./e2e/...

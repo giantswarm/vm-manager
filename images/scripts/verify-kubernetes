@@ -253,7 +253,10 @@ assert r["cni"]["bin_dirs"][:2] == ["/opt/cni/bin", "/usr/lib/cni"], r["cni"]["b
                         test -x "$root/usr/bin/kubeadm"
                         test -s "$root/usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf"
                         test -s "$root/usr/lib/systemd/system/systemd-networkd.service"
-                        systemd-analyze --root="$root" verify containerd.service kubelet.service multi-user.target
+                        # --man=no: the check is the unit graph, not whether
+                        # the host has man(1) for the Documentation= pages
+                        # (CI containers do not).
+                        systemd-analyze --root="$root" --man=no verify containerd.service kubelet.service multi-user.target
                 ' -- "$tmp/root" "$base" "$ext" "$name" >| "$tmp/merge.txt" 2>&1 || fail "merge onto the base tree failed: $(tail -3 "$tmp/merge.txt" | tr '\n' ' ')"
                 ok "systemd-sysext merged $name onto the base tree ($(/usr/bin/grep -m1 '^/usr' "$tmp/merge.txt" | tr -s ' ')); systemd-analyze verify is clean"
         else

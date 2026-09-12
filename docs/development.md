@@ -285,8 +285,50 @@ token from this server's own OAuth flow. `vm-manager image golden --token` (or
 
 ## CI
 
-`.github/workflows/test.yml` runs `make test` and `make lint` on every pull request and
-push to `main`; the devctl-generated workflows add pre-commit, gitleaks, semantic PR titles
-and the release automation. The image build and the KVM e2e job are wave 4 work
-([plan.md](plan.md)); until then `make image-verify` and `make e2e` run on a developer's
-KVM host before a merge that touches `images/` or the boot path.
+GitHub Actions, `.github/workflows/`. The devctl-generated `zz_generated.*` workflows add
+pre-commit, gitleaks, semantic PR titles and the release automation (`.circleci/` is not
+enabled). The tiers are those of [design.md](design.md) "Testing strategy".
+
+| Workflow | Runs on | When | What |
+|---|---|---|---|
+| `test.yml` | `ubuntu-latest` | every PR, push to main | `make test vet-e2e` (T0/T1, plus `go vet -tags e2e ./e2e/...` so the e2e package cannot rot unnoticed) and `make lint lint-e2e` |
+| `image.yml` | `archlinux:latest` container (`--privileged`) on `ubuntu-24.04` | PRs touching `images/**`, `cmd/vm-agent/**`, `internal/agent/**` or the workflow; push to main with the same paths; manual; called by `e2e.yml` | `make -C images` (all: keys, base image, every Kubernetes sysext of `KUBERNETES_VERSIONS`, verify; T2), sizes and the expected PCR 11 values in the job summary, `images/build/` (UKI, disk image, split partitions, `sysupdate/`, `policy.json`; not `base/`) as the **`guest-image`** artifact, 7 days (30 on main) |
+| `e2e.yml` | `ubuntu-24.04` (nested KVM) | every PR, push to main: **fast** subset; nightly 02:17 UTC and manual: **full** suite | T3: `go test -tags e2e` against the artifact, consoles and logs as the **`e2e-logs-<suite>`** artifact |
+
+The image build runs in an Arch container because the image is Arch (mkosi 27, systemd 261,
+erofs-utils, ukify, systemd-measure) and the hosted Ubuntu runner has none of that at the needed
+versions. `--privileged` gives mkosi's sandbox its mount namespaces; the mkosi workspace is
+placed on the runner's bind-mounted temp directory because the sysext's overlayfs cannot stack on
+the container's overlay root. `images/mkosi.cache` (incremental trees) and `~/.cache/mkosi`
+(pacman packages) are cached with `actions/cache`, keyed on the hash of the mkosi configuration
+and scripts plus an ISO-week stamp: within a week the cache is reused (a warm build takes about a
+minute, a cold one three to five), a new week starts from the current Arch repositories.
+
+`e2e.yml` has three jobs. `plan` decides the suite and where the image comes from: a PR or push
+that touches the image inputs builds it in this run (`image.yml` via `workflow_call`); otherwise
+the newest unexpired `guest-image` of a green `image.yml` or `e2e.yml` run on `main` is reused
+(and if there is none, it builds). Nightly and manual runs always build; the `image_run_id` input
+of a manual run reuses that run's artifact instead. `test` enables `/dev/kvm` (udev rule
+`99-kvm4all.rules`, mode 0666) and `vhost_vsock` (`modprobe`, chmod), installs `qemu-system-x86`
+and `ovmf` from apt and `swtpm` from `ppa:stefanberger/swtpm-noble` (noble's swtpm 0.7.3 rejects
+the `terminate` ctrl option of swtpm 0.8+ that `internal/tpm` passes) and unloads Ubuntu's
+AppArmor profile for swtpm, which denies sockets and state outside its allowed paths (the
+per-test directories under `/mnt/e2e` are; the runner's systemd 255
+has no `systemd-ssh-proxy` and no storage provider: the harness dials ssh over AF_VSOCK from Go
+and vm-manager falls back to file-backed volumes), downloads the artifact to `/mnt/e2e/image` and
+runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short socket paths) and
+`VM_MANAGER_E2E_KEEP=1`.
+
+Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestNetworkIMDS`,
+`TestPersistentEtc`, `TestKubernetesSysext`. Full suite (nightly, 60 minutes): those plus
+`TestIgnition`, `TestKubernetesVersions` (one VM per published sysext version),
+`TestAttestation` (the tamper case uses Ubuntu's `OVMF_CODE_4M.secboot.fd`) and
+`TestKubernetesCluster` (needs the runner's `kubectl` and internet access from the VMs). The job
+summary lists the results and the `*_seconds=` budget lines.
+
+Rerun: `gh run rerun <id> --failed`, or `gh workflow run e2e.yml --ref <branch> -f suite=fast`
+(`-f image_run_id=<id>` to reuse a specific image) and `gh workflow run image.yml --ref <branch>`.
+Failures: `gh run view <id> --log-failed`, then the `e2e-logs-<suite>` artifact (`gh run download
+<id> -n e2e-logs-fast`) for the serial consoles (`<phase>.log`, `vms/<id>/console.log`) and the
+server logs of the failed test's `vmm-e2e-*` directory. A PR that conflicts with `main` gets no
+`pull_request` runs at all (GitHub cannot create its merge commit): rebase first.

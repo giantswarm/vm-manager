@@ -1,0 +1,286 @@
+name: e2e
+
+# T3 of docs/design.md "Testing strategy": the KVM boot tests of e2e/ on a
+# hosted ubuntu-24.04 runner (nested virtualization: /dev/kvm is there, the
+# udev rule below opens it; vhost_vsock is a module).
+#
+#   pull_request, push main   fast subset (~10 min): TestInstallBoot,
+#                             TestNetworkIMDS, TestPersistentEtc,
+#                             TestKubernetesSysext
+#   schedule (nightly)        full suite: also TestIgnition, TestKubernetesVersions
+#                             (one VM per sysext version), TestAttestation (three
+#                             servers, ~2 min) and TestKubernetesCluster (two
+#                             nodes, pulls from registry.k8s.io, ~3 min)
+#   workflow_dispatch         full by default, `suite: fast` for the subset
+#
+# The image comes from image.yml: built in this run when the PR touches the
+# image inputs (images/, vm-agent, the workflows), otherwise the newest
+# `guest-image` artifact of a green run on main is downloaded. Nightly and
+# manual runs always build (that also exercises the image build against the
+# current Arch repos); `image_run_id` reuses a specific run's artifact.
+#
+# The fast subset is the four quickest tests that together cover install,
+# reboot, IMDS, the persistent /etc and the sysext; TestIgnition (45 s on the
+# development host) joins them nightly to hold the 40-minute PR budget on the
+# slower hosted runner.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # 02:17 UTC nightly, off the full hour.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which tests to run
+        type: choice
+        options:
+          - full
+          - fast
+        default: full
+      image_run_id:
+        description: Reuse the guest-image artifact of this workflow run id instead of building
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # gh run list / artifact download of earlier runs.
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The artifact image.yml uploads. Keep in sync with image.yml.
+  ARTIFACT: guest-image
+  # Everything the image build depends on; a PR touching none of it reuses
+  # main's image.
+  IMAGE_PATHS: '^(images/|cmd/vm-agent/|internal/agent/|\.github/workflows/(image|e2e)\.yml$)'
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      suite: ${{ steps.plan.outputs.suite }}
+      build: ${{ steps.plan.outputs.build }}
+      run_id: ${{ steps.plan.outputs.run_id }}
+    steps:
+      - name: Decide suite and image source
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          INPUT_SUITE: ${{ inputs.suite }}
+          INPUT_RUN_ID: ${{ inputs.image_run_id }}
+        run: |
+          set -euo pipefail
+          suite=fast build=false run_id=""
+          case "$EVENT" in
+            schedule)
+              suite=full build=true ;;
+            workflow_dispatch)
+              suite="$INPUT_SUITE" build=true
+              if [ -n "$INPUT_RUN_ID" ]; then
+                [[ "$INPUT_RUN_ID" =~ ^[0-9]+$ ]] || { echo "image_run_id must be numeric"; exit 1; }
+                build=false run_id="$INPUT_RUN_ID"
+              fi ;;
+            pull_request)
+              changed="$(gh pr diff "$PR" --name-only)" ;;
+            push)
+              changed="$(gh api "repos/$GH_REPO/compare/$BEFORE...$AFTER" --paginate --jq '.files[].filename')" ;;
+          esac
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
+            if hits="$(printf '%s\n' "$changed" | grep -E "$IMAGE_PATHS")"; then
+              echo "image inputs changed, building:"; echo "$hits"
+              build=true
+            fi
+          fi
+          if [ "$build" = false ] && [ -z "$run_id" ]; then
+            # Newest green run on main (image.yml or an e2e.yml that built)
+            # whose artifact has not expired.
+            for wf in image.yml e2e.yml; do
+              for id in $(gh run list --workflow "$wf" --branch main --status success --limit 10 --json databaseId --jq '.[].databaseId'); do
+                if gh api "repos/$GH_REPO/actions/runs/$id/artifacts" \
+                     --jq ".artifacts[] | select(.name == \"$ARTIFACT\" and .expired == false) | .id" | grep -q .; then
+                  run_id="$id"; break 2
+                fi
+              done
+            done
+            if [ -z "$run_id" ]; then
+              echo "no usable $ARTIFACT artifact on main, building"
+              build=true
+            fi
+          fi
+          echo "suite=$suite build=$build run_id=$run_id"
+          {
+            echo "suite=$suite"
+            echo "build=$build"
+            echo "run_id=$run_id"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: image
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    uses: ./.github/workflows/image.yml
+    permissions:
+      contents: read
+
+  test:
+    # needs.* is not available in a job name; the suite is in the summary.
+    name: e2e
+    needs:
+      - plan
+      - build
+    # build is skipped when main's image is reused.
+    if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ needs.plan.outputs.suite == 'full' && 60 || 40 }}
+    env:
+      SUITE: ${{ needs.plan.outputs.suite }}
+      # Short (unix socket paths) and on the runner's large data disk: each
+      # test installs onto its own sparse 8 GiB target.
+      E2E_ROOT: /mnt/e2e
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Enable KVM and vhost-vsock for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock
+          sudo chmod 0666 /dev/kvm /dev/vhost-vsock
+          ls -l /dev/kvm /dev/vhost-vsock
+          test -w /dev/kvm && test -w /dev/vhost-vsock
+          echo "cpus: $(nproc), kvm-capable: $(grep -c -E 'vmx|svm' /proc/cpuinfo)"
+          free -h
+
+      - name: Install QEMU, swtpm and OVMF
+        # swtpm from the upstream maintainer's PPA: noble's 0.7.3 predates
+        # the `terminate` ctrl option (0.8+) that internal/tpm passes so an
+        # emulator ends with the QEMU it served.
+        run: |
+          sudo add-apt-repository -y ppa:stefanberger/swtpm-noble
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf
+          # Ubuntu confines swtpm with AppArmor (usr.bin.swtpm): sockets and
+          # state outside its allowed paths, like the per-test directories
+          # under /mnt/e2e, fail with "Could not open UnixIO socket:
+          # Permission denied". Unload the profile.
+          if [ -e /etc/apparmor.d/usr.bin.swtpm ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/usr.bin.swtpm
+            sudo ln -sf /etc/apparmor.d/usr.bin.swtpm /etc/apparmor.d/disable/
+          fi
+          sudo aa-status 2>/dev/null | grep -c swtpm || echo "swtpm: no AppArmor profile loaded"
+          qemu-system-x86_64 --version | head -1
+          swtpm --version
+          systemctl --version | head -1
+          ls -l /usr/share/OVMF/
+          if [ "$SUITE" = full ]; then kubectl version --client; fi
+
+      - name: Scratch space on the data disk
+        run: |
+          sudo mkdir -p "$E2E_ROOT"
+          sudo chown "$(id -u):$(id -g)" "$E2E_ROOT"
+          df -h / "$E2E_ROOT"
+
+      - name: Download the image built in this run
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.E2E_ROOT }}/image
+
+      - name: Download the image of run ${{ needs.plan.outputs.run_id }} on main
+        if: needs.build.result == 'skipped'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.E2E_ROOT }}/image
+          run-id: ${{ needs.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Locate the image
+        id: image
+        run: |
+          uki="$(find "$E2E_ROOT/image" -name 'giantswarm-vm-base_*.efi' | head -1)"
+          test -n "$uki" || { echo "no UKI in the artifact"; find "$E2E_ROOT/image" | head; exit 1; }
+          dir="$(dirname "$uki")"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          ls -l "$dir" "$dir/sysupdate"/*
+          du -sh "$dir"
+
+      - name: Run the e2e tests
+        # shell: bash adds -o pipefail (a plain run: is bash -e only), so
+        # go test's status survives the tee.
+        shell: bash
+        env:
+          VM_MANAGER_E2E_IMAGE_DIR: ${{ steps.image.outputs.dir }}
+          # Keep every state directory (consoles, server logs) for the
+          # artifact below, not only the failed ones.
+          VM_MANAGER_E2E_KEEP: "1"
+          TMPDIR: ${{ env.E2E_ROOT }}
+        run: |
+          args=(-tags e2e -count=1 -timeout 35m -v)
+          if [ "$SUITE" = fast ]; then
+            args+=(-run 'TestInstallBoot|TestNetworkIMDS|TestPersistentEtc|TestKubernetesSysext')
+          fi
+          go test "${args[@]}" ./e2e/... 2>&1 | tee "$E2E_ROOT/e2e.log"
+
+      - name: Job summary (results, boot-time budgets)
+        if: always()
+        run: |
+          {
+            echo "## e2e ($SUITE)"
+            echo
+            echo '```'
+            grep -E '^(--- |=== RUN|ok |FAIL|PASS)' "$E2E_ROOT/e2e.log" | grep -v '=== RUN' || true
+            echo '```'
+            echo
+            echo "### Timings"
+            echo
+            echo '```'
+            grep -oE '[a-z_]+_seconds=[0-9.]+' "$E2E_ROOT/e2e.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect consoles and logs
+        if: always()
+        run: |
+          mkdir -p "$E2E_ROOT/logs"
+          cp "$E2E_ROOT/e2e.log" "$E2E_ROOT/logs/" 2>/dev/null || true
+          # Serial consoles, server and journal logs, JSON records; not the
+          # target disks, TPM state or firmware variables.
+          for d in "$E2E_ROOT"/vmm-e2e-*; do
+            [ -d "$d" ] || continue
+            rsync -a --prune-empty-dirs \
+              --include='*/' --include='*.log' --include='*.json' --include='*.txt' --exclude='*' \
+              "$d" "$E2E_ROOT/logs/"
+          done
+          du -sh "$E2E_ROOT/logs"
+          df -h "$E2E_ROOT"
+
+      - name: Upload consoles and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs-${{ needs.plan.outputs.suite }}
+          path: ${{ env.E2E_ROOT }}/logs
+          if-no-files-found: warn
+          retention-days: 7
