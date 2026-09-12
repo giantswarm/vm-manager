@@ -118,7 +118,16 @@ type ImageCatalog interface {
 // Clock is the time source; tests inject a fake to drive timeouts.
 type Clock interface {
 	Now() time.Time
-	After(d time.Duration) <-chan time.Time
+	// NewTimer fires once after d unless stopped before.
+	NewTimer(d time.Duration) Timer
+}
+
+// Timer is one pending timeout; its holder stops it once the wait is over.
+type Timer interface {
+	// C delivers the time the timer fired at.
+	C() <-chan time.Time
+	// Stop disarms the timer and reports whether that kept it from firing.
+	Stop() bool
 }
 
 // Metrics receives what the service observes: guest report uploads (after

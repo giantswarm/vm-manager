@@ -168,15 +168,25 @@ func (h *harness) create(name string) *vm.VM {
 	return v
 }
 
+// waitState polls until the VM is in state want. A plain loop rather than
+// Eventually so the failure can name the state it last saw: Eventually's
+// message arguments are evaluated before the wait.
 func (h *harness) waitState(id string, want vm.State) *vm.VM {
 	h.t.Helper()
-	var v *vm.VM
-	require.Eventually(h.t, func() bool {
-		var err error
-		v, err = h.svc.Get(id)
-		return err == nil && v.State == want
-	}, waitAtMost, waitEvery, "vm %s did not reach %s (last: %+v)", id, want, v)
-	return v
+	deadline := time.Now().Add(waitAtMost)
+	for {
+		v, err := h.svc.Get(id)
+		if err == nil && v.State == want {
+			return v
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				h.t.Fatalf("vm %s did not reach %s: %v", id, want, err)
+			}
+			h.t.Fatalf("vm %s did not reach %s: state %s, last error %q", id, want, v.State, v.LastError)
+		}
+		time.Sleep(waitEvery)
+	}
 }
 
 func (h *harness) waitInstances(n int) *vmtest.Instance {
@@ -185,6 +195,8 @@ func (h *harness) waitInstances(n int) *vmtest.Instance {
 	return h.rt.At(n - 1)
 }
 
+// waitTimers blocks until n timers are armed on the fake clock, so that an
+// Advance past a timeout reaches the supervisor that set it up.
 func (h *harness) waitTimers(n int) {
 	h.t.Helper()
 	require.Eventually(h.t, func() bool { return h.clock.Timers() >= n }, waitAtMost, waitEvery, "waiting for %d timers", n)
