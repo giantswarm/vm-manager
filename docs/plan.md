@@ -5,11 +5,14 @@ spawned; each row is one agent with one deliverable and a context budget of abou
 tokens. Agents never poll: waits on CI or boots are bounded (interval + max attempts) and
 return control to the parent.
 
-## Status (2026-09-12)
+## Status (2026-09-12, evening)
 
-Merged: #1 scaffold, #2 base image, #3 platform files, #4/#10 docs, #5 runtime, #6 IMDS,
-#7 storage, #8 network, #9 Kubernetes sysext. In progress: row 6 (install-boot e2e) and
-row 10a (VM service). Every PR gets an automated review before an admin merge.
+Wave 1 complete: #1 scaffold, #2 base image, #3 platform files, #5 runtime, #9 Kubernetes
+sysext, #12 install-boot e2e (install 10.9 s, boot to READY 10.6 s on the dev host).
+Wave 2: #6 IMDS, #7 storage, #8 network, #11 VM service, #13 lifecycle hardening, #14 MCP/REST
+tools + `cmd/serve` wiring merged; the API smoke created a VM end to end (installed at 21 s,
+ready at 36 s). Row 11 (network + IMDS e2e through the MCP API) is in progress. Every PR got
+an automated review before its admin merge; docs PRs #4 and #10 recorded findings.
 
 ## Wave 1: repo, scaffold, image, first boot
 
