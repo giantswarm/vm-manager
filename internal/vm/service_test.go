@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -155,6 +156,43 @@ func (h *harness) lan() *fakeNetwork {
 	n, err := h.nets.Get(testNetwork)
 	require.NoError(h.t, err)
 	return n.(*fakeNetwork)
+}
+
+func (h *harness) entry(id string) *entry {
+	h.t.Helper()
+	e, err := h.svc.entry(id)
+	require.NoError(h.t, err)
+	return e
+}
+
+// closeAsync starts Close and returns once it has begun (the closing flag is
+// set); the result arrives on the returned channel.
+func (h *harness) closeAsync() <-chan error {
+	h.t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- h.svc.Close(h.ctx) }()
+	require.Eventually(h.t, func() bool {
+		h.svc.mu.Lock()
+		defer h.svc.mu.Unlock()
+		return h.svc.closing
+	}, waitAtMost, waitEvery, "Close did not begin")
+	return done
+}
+
+// awaitClose fails when Close does not return in time. Close waits for every
+// supervisor, so its return proves no goroutine is left behind.
+func (h *harness) awaitClose(done <-chan error) {
+	h.t.Helper()
+	select {
+	case err := <-done:
+		require.NoError(h.t, err)
+	case <-time.After(waitAtMost):
+		// End whatever escaped so the Cleanup Close cannot hang as well.
+		for i := 0; i < h.rt.count(); i++ {
+			h.rt.at(i).Exit(0)
+		}
+		h.t.Fatalf("Close did not return within %s: a process escaped it", waitAtMost)
+	}
 }
 
 func TestCreateValidation(t *testing.T) {
@@ -391,6 +429,115 @@ func TestInstallTimeoutKillsAndKeepsConsole(t *testing.T) {
 	assert.Empty(t, h.store.names())
 }
 
+// TestDeleteDuringInstall deletes a VM while its installer runs: the process
+// is stopped and its exit awaited before anything else is released, no
+// installed boot follows, and nothing of the VM remains.
+func TestDeleteDuringInstall(t *testing.T) {
+	h := newHarness(t)
+	v := h.create("half-installed")
+	h.waitInstances(1)
+	h.waitTimers(1)
+	require.Equal(t, 1, h.tpm.running())
+	h.ev.reset()
+
+	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
+
+	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.list(),
+		"installer stopped and gone (swtpm stopped by its supervisor) before lease, volume and disk are released")
+	assert.Equal(t, 1, h.rt.count(), "the installer's exit did not start phase B")
+	assert.Zero(t, h.tpm.running())
+	assert.Empty(t, h.store.names())
+	assert.Empty(t, h.lan().Leases())
+	assert.NoDirExists(t, v.Paths.Dir)
+	assert.Empty(t, h.svc.List())
+	_, err := h.svc.Get(v.ID)
+	require.ErrorIs(t, err, apierr.ErrNotFound)
+
+	// The install timeout fires into nothing: no supervisor is left.
+	h.clock.Advance(DefaultInstallTimeout)
+	h.awaitClose(h.closeAsync())
+	assert.Equal(t, 1, h.rt.count())
+	assert.NotContains(t, h.ev.list(), "qemu.kill")
+}
+
+// TestCloseDuringInstallHandoff drives Close into the install-to-boot
+// handoff. Once Close has begun, phase B is not started (pending handoff) or
+// is stopped by Close like any other process (start already in flight), and
+// Close returns.
+func TestCloseDuringInstallHandoff(t *testing.T) {
+	t.Run("handoff pending", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("pending")
+		inst := h.waitInstances(1)
+		// Hold the handoff's lock: the installer's exit settles (installed,
+		// no process) but boot() cannot start phase B before we let go.
+		e := h.entry(v.ID)
+		e.opMu.Lock()
+		inst.Exit(0)
+		require.Eventually(t, func() bool {
+			v, err := h.svc.Get(v.ID)
+			return err == nil && v.InstalledAt != nil
+		}, waitAtMost, waitEvery, "installer exit not settled")
+		assert.Zero(t, h.tpm.running())
+
+		done := h.closeAsync()
+		e.opMu.Unlock()
+		h.awaitClose(done)
+
+		assert.Equal(t, 1, h.rt.count(), "phase B was not started once Close had begun")
+		v, err := h.svc.Get(v.ID)
+		require.NoError(t, err)
+		assert.Equal(t, StateStopped, v.State)
+		assert.NotNil(t, v.InstalledAt, "the record stays startable")
+		assert.Contains(t, v.LastError, "shut down before the installed boot started")
+		_, err = h.svc.Start(h.ctx, v.ID)
+		require.ErrorIs(t, err, apierr.ErrConflict, "no start after Close")
+		_, err = h.svc.Create(h.ctx, h.spec("late"))
+		require.ErrorIs(t, err, apierr.ErrConflict, "no create after Close")
+	})
+
+	t.Run("handoff in flight", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("inflight")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		h.rt.setHold(func(spec qemu.Spec) {
+			if spec.Phase == qemu.PhaseBoot {
+				once.Do(func() { close(entered) })
+				<-release
+			}
+		})
+		h.waitInstances(1).Exit(0)
+		select {
+		case <-entered:
+		case <-time.After(waitAtMost):
+			t.Fatal("phase B start not reached")
+		}
+
+		done := h.closeAsync()
+		close(release)
+		h.awaitClose(done)
+
+		assert.Equal(t, 2, h.rt.count(), "the start in flight completed")
+		ev := h.ev.list()
+		assert.Greater(t, lastIndex(ev, "qemu.stop"), lastIndex(ev, "qemu.start:boot"), "Close stopped the phase B it let start")
+		v, err := h.svc.Get(v.ID)
+		require.NoError(t, err)
+		assert.Equal(t, StateStopped, v.State)
+		assert.Zero(t, h.tpm.running())
+		assert.False(t, h.notify.subscribed(v.CID))
+	})
+}
+
+func lastIndex(list []string, s string) int {
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i] == s {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestQEMUStartFailureLeavesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.rt.setFailOn(func(qemu.Spec) error { return errors.New("qemu: no kvm") })
@@ -506,6 +653,17 @@ func TestAttestationGating(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(body)
 	}
+	quote := func(stage imds.Stage, nonce string) (int, imds.QuoteResult) {
+		body, err := json.Marshal(imds.QuoteRequest{Stage: stage, Nonce: nonce, AKPub: []byte("ak"), Quote: []byte("q"),
+			Signature: []byte("s"), PCRs: map[string]map[string]string{"sha256": {"11": "00"}}})
+		require.NoError(t, err)
+		resp, err := client.Post("http://"+h.lan().imdsAddr+imds.BasePath+"/attest/quote", "application/json", bytes.NewReader(body))
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		var res imds.QuoteResult
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&res))
+		return resp.StatusCode, res
+	}
 	code, body := get("/hostname")
 	assert.Equal(t, http.StatusOK, code)
 	assert.Equal(t, "attested", body)
@@ -519,8 +677,8 @@ func TestAttestationGating(t *testing.T) {
 	assert.NotNil(t, v.Attestation.NonceIssuedAt)
 
 	// A ready-stage quote never releases user-data.
-	res, err := att.SubmitQuote(h.ctx, v.ID, imds.QuoteRequest{Stage: imds.StageReady, Nonce: nonce})
-	require.NoError(t, err)
+	code, res := quote(imds.StageReady, nonce)
+	assert.Equal(t, http.StatusOK, code)
 	assert.True(t, res.Verified)
 	assert.False(t, res.UserDataReleased)
 	a, err := h.svc.Attestation(v.ID)
@@ -531,10 +689,10 @@ func TestAttestationGating(t *testing.T) {
 
 	nonce, err = att.Nonce(h.ctx, v.ID)
 	require.NoError(t, err)
-	res, err = att.SubmitQuote(h.ctx, v.ID, imds.QuoteRequest{Stage: imds.StageInitrd, Nonce: nonce})
-	require.NoError(t, err)
+	code, res = quote(imds.StageInitrd, nonce)
+	assert.Equal(t, http.StatusOK, code)
 	assert.True(t, res.Verified)
-	assert.True(t, res.UserDataReleased)
+	assert.True(t, res.UserDataReleased, "the handler applies imds.ReleasesUserData")
 	a, _ = h.svc.Attestation(v.ID)
 	assert.True(t, a.UserDataReleased)
 	require.NotNil(t, a.Initrd)

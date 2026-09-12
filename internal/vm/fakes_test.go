@@ -100,9 +100,18 @@ type fakeRuntime struct {
 	insts []*fakeInstance
 	// failOn makes Start fail for matching specs.
 	failOn func(qemu.Spec) error
+	// hold runs before Start does anything; a test blocks in it to freeze a
+	// start mid-flight.
+	hold func(qemu.Spec)
 }
 
 func (r *fakeRuntime) Start(_ context.Context, spec qemu.Spec) (Instance, error) {
+	r.mu.Lock()
+	hold := r.hold
+	r.mu.Unlock()
+	if hold != nil {
+		hold(spec)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.ev.add("qemu.start:" + string(spec.Phase))
@@ -132,6 +141,12 @@ func (r *fakeRuntime) setFailOn(f func(qemu.Spec) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failOn = f
+}
+
+func (r *fakeRuntime) setHold(f func(qemu.Spec)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hold = f
 }
 
 type fakeInstance struct {

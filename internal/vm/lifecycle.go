@@ -29,6 +29,9 @@ const (
 	machineIDBytes = 16
 )
 
+// errShuttingDown refuses a process start once Close has begun.
+var errShuttingDown = fmt.Errorf("%w: vm-manager is shutting down", apierr.ErrConflict)
+
 // Create validates the spec, allocates the VM (id, vsock CID, ssh key, OVMF
 // variable store, target volume, network lease), starts the installer boot
 // and returns. With WaitFor set it blocks until the milestone, a failure,
@@ -125,9 +128,15 @@ func (s *Service) resolveImage(spec *Spec) (images.Image, error) {
 }
 
 // allocate reserves the id, CID and directory and writes the first record.
+// Under s.mu, which Close also holds to set closing and collect the VMs it
+// stops: an entry allocated before that is stopped by Close, one after it
+// is never created.
 func (s *Service) allocate(spec Spec) (*entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errShuttingDown
+	}
 	for _, e := range s.vms {
 		if e.rec.Name == spec.Name {
 			return nil, fmt.Errorf("%w: vm name %q is in use by %s", apierr.ErrConflict, spec.Name, e.rec.ID)
@@ -491,11 +500,21 @@ func (s *Service) failureMessage(e *entry, what string, exit proc.ExitStatus, ti
 }
 
 // boot is the install-to-boot handoff, run by the installer's supervisor.
+// Delete moves the record out of installing under opMu before it runs;
+// Close sets closing, so an installed VM whose boot it overtook is left
+// stopped and startable.
 func (s *Service) boot(e *entry) {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 	s.mu.Lock()
 	ok := e.rec.State == StateInstalling && e.proc == nil
+	if ok && s.closing {
+		ok = false
+		e.rec.State = StateStopped
+		e.rec.LastError = "vm-manager shut down before the installed boot started; start the VM"
+		s.save(e)
+		s.broadcastLocked()
+	}
 	s.mu.Unlock()
 	if !ok {
 		return
@@ -558,6 +577,8 @@ func (s *Service) Start(ctx context.Context, id string) (*VM, error) {
 
 	s.mu.Lock()
 	switch {
+	case s.closing:
+		err = errShuttingDown
 	case e.rec.State == StateDeleting:
 		err = fmt.Errorf("%w: vm %s is being deleted", apierr.ErrConflict, id)
 	case e.proc != nil:
