@@ -5,14 +5,26 @@ spawned; each row is one agent with one deliverable and a context budget of abou
 tokens. Agents never poll: waits on CI or boots are bounded (interval + max attempts) and
 return control to the parent.
 
-## Status (2026-09-12, evening)
+## Status (2026-09-12, night)
 
-Wave 1 complete: #1 scaffold, #2 base image, #3 platform files, #5 runtime, #9 Kubernetes
-sysext, #12 install-boot e2e (install 10.9 s, boot to READY 10.6 s on the dev host).
-Wave 2: #6 IMDS, #7 storage, #8 network, #11 VM service, #13 lifecycle hardening, #14 MCP/REST
-tools + `cmd/serve` wiring merged; the API smoke created a VM end to end (installed at 21 s,
-ready at 36 s). Row 11 (network + IMDS e2e through the MCP API) is in progress. Every PR got
-an automated review before its admin merge; docs PRs #4 and #10 recorded findings.
+Waves 1 and 2 complete (PRs #1-#19, incl. three CI flake fixes #17-#19 for real races).
+Wave 3 merged so far: #20 attestation agent, #21 metrics + Prometheus, #22 quote verifier,
+#23 Ignition in the initrd (gated user-data is a retryable 503, `/user-data` left the hwdb
+table), #24 shared nonce store/AK template, #25 persistent `/etc` (reboot to ready 9-12 s),
+#26 ssh host-key error precedence, #27 Kubernetes sysext pulled at boot (1.6 s) and measured
+into PCR 13, #28 vsock CID collisions between vm-managers on one host. In progress: row 15b
+(attestation units in the image, `--attestation=verify` default, gating e2e) and row 16
+(kubeadm init/join e2e). Every PR got an automated review before its admin merge.
+
+Follow-ups recorded by reviews and agents, not yet scheduled:
+- `images/scripts/publish-sysupdate` keeps only the last published Kubernetes version;
+  multi-version fleets need it to accumulate versions.
+- CI does not compile the `e2e` build tag (`go vet -tags e2e ./e2e/` broke twice unnoticed);
+  add it to `make test` or the workflow (wave 4, row 18).
+- var is not unmounted cleanly at power-off (the `/etc` overlay pins it; journal replay on
+  the next boot, data is synced).
+- VMs still die with vm-manager; transient systemd units are the planned fix.
+- e2e `go test` timeout is 45 m for seven sequential tests; parallelise or split when it grows.
 
 ## Wave 1: repo, scaffold, image, first boot
 
