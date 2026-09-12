@@ -180,13 +180,13 @@ func newNetwork(ctx context.Context, dir string, spec Spec, leases map[string]st
 	}
 	n.wg.Add(1)
 	go n.serve(serveCtx)
-	n.log.Info("network up", "cidr", l.prefix, "gateway", l.gateway, "host", l.host, "socket", socket, "imds", spec.EnableIMDS)
+	n.log.Info("network up", "cidr", l.prefix, "gateway", l.gateway, "host", l.host, "socket", socket, "imds", spec.EnableIMDS, "hostAlias", spec.EnableHostAlias)
 	return n, nil
 }
 
 // configuration builds the gvisor-tap-vsock configuration: the gateway with
-// its virtual IPs, NAT of the host alias to loopback and the complete static
-// lease table.
+// its virtual IPs, the opt-in NAT of the host alias to loopback and the
+// complete static lease table.
 func configuration(spec Spec, l layout) *types.Configuration {
 	static := make(map[string]string, l.poolSize()+2)
 	l.eachPool(func(ip netip.Addr) bool {
@@ -206,10 +206,12 @@ func configuration(spec Spec, l layout) *types.Configuration {
 		Subnet:            l.prefix.String(),
 		GatewayIP:         l.gateway.String(),
 		GatewayMacAddress: macFor(spec.Name, l.gateway).String(),
-		NAT:               map[string]string{l.host.String(): loopback},
 		GatewayVirtualIPs: virtualIPs,
 		DHCPStaticLeases:  static,
 		Protocol:          types.QemuProtocol,
+	}
+	if spec.EnableHostAlias {
+		cfg.NAT = map[string]string{l.host.String(): loopback}
 	}
 	if spec.DNSSearchDomain != "" {
 		cfg.DNSSearchDomains = []string{spec.DNSSearchDomain}

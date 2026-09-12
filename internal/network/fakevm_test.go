@@ -246,7 +246,7 @@ func TestFakeVM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	m := newTestManager(t)
-	n, err := m.Create(ctx, Spec{Name: "lab", CIDR: "10.77.0.0/24", DNSSearchDomain: "lab.internal", EnableIMDS: true})
+	n, err := m.Create(ctx, Spec{Name: "lab", CIDR: "10.77.0.0/24", DNSSearchDomain: "lab.internal", EnableIMDS: true, EnableHostAlias: true})
 	require.NoError(t, err)
 
 	att1, err := n.Attach(ctx, "vm-1")

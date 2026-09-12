@@ -46,6 +46,11 @@ type Spec struct {
 	// EnableIMDS makes 169.254.169.254 reachable from guests and allows
 	// ListenIMDS; without it, connections to the IMDS address are refused.
 	EnableIMDS bool `json:"enableIMDS"`
+	// EnableHostAlias translates the host alias address (HostIP) to the
+	// host's loopback, exposing every service bound to 127.0.0.1 on the host
+	// to every guest, vm-manager's own API included. Off by default; the
+	// address stays reserved either way.
+	EnableHostAlias bool `json:"enableHostAlias"`
 }
 
 // layout is the resolved addressing of a Spec.

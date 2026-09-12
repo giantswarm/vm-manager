@@ -265,3 +265,14 @@ func TestNetworkDirPermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm()&0o750)
 }
+
+func TestHostAliasNATIsOptIn(t *testing.T) {
+	spec := Spec{Name: "dev", CIDR: "10.42.0.0/24"}
+	l, err := resolve(spec)
+	require.NoError(t, err)
+
+	assert.Empty(t, configuration(spec, l).NAT, "loopback is not exposed unless asked for")
+
+	spec.EnableHostAlias = true
+	assert.Equal(t, map[string]string{l.host.String(): loopback}, configuration(spec, l).NAT)
+}

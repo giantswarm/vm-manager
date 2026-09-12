@@ -24,7 +24,7 @@
 //	a.b.c.0     network address
 //	a.b.c.1     gateway: default route, DHCP server, DNS forwarder (Spec.GatewayIP overrides)
 //	a.b.c.2-253 pool handed to VMs by Attach, lowest free address first
-//	a.b.c.254   host alias: the VM reaches services bound to the host's loopback here
+//	a.b.c.254   host alias: with Spec.EnableHostAlias the VM reaches the host's loopback here
 //	a.b.c.255   broadcast
 //
 // The IMDS address 169.254.169.254 is a virtual IP of the gateway: the
@@ -63,9 +63,10 @@
 // # Host access
 //
 // Outbound traffic from a VM is dialed from the host process, so the VM can
-// reach whatever the host can reach (NAT). The host alias address is
-// translated to 127.0.0.1 so a VM can also use services bound to the host's
-// loopback. In the other direction [Network.Dial] opens a TCP connection into
+// reach whatever the host can reach (NAT). With [Spec.EnableHostAlias] the
+// host alias address is translated to 127.0.0.1 so a VM can also use services
+// bound to the host's loopback; it is off by default because that includes
+// vm-manager's own API. In the other direction [Network.Dial] opens a TCP connection into
 // the network from the host (ssh, kube-apiserver readiness) and
 // [Network.Forward] exposes a VM port on a host address with a plain
 // accept-and-proxy loop.
