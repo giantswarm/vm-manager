@@ -244,7 +244,9 @@ closed it; the two without it are open and scheduled in [plan.md](plan.md).
   enabled units and whatever Ignition writes to `/etc` survive reboots, and var is unmounted
   cleanly at shutdown: systemd-shutdown's exitrd (`tmpfiles.d/vm-manager-exitrd.conf`,
   `run-initramfs-{root,usr}.mount`) releases the `/etc` overlay and the Kubernetes sysext's
-  `/usr` overlay, both pinned by PID 1's own mappings, which keep var's superblock alive
+  `/usr` overlay, both pinned by PID 1's own mappings, which keep var's superblock alive,
+  and its `system-shutdown/vm-manager-var` hook waits for the kernel's asynchronous
+  tear-down of the sysext's loop device, which is what finally puts the superblock
   (`e2e/persistent_etc_test.go`; details in `images/README.md`, "Persistent state").
 - **Ignition and `/var`.** Implemented by the same change (#25, `e2e/ignition_test.go`):
   the var partition is mounted on

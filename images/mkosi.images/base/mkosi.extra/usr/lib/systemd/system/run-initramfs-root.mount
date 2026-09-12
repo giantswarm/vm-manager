@@ -1,4 +1,5 @@
-# Exitrd, part 1 (the rest is tmpfiles.d/vm-manager-exitrd.conf): the root
+# Exitrd, part 1 (parts 2 and 3: tmpfiles.d/vm-manager-exitrd.conf and
+# system-shutdown/vm-manager-var): the root
 # file system as it is below every mount stacked on it, a private,
 # non-recursive bind of /. run-initramfs-usr.mount binds its usr/ to
 # /run/initramfs/usr, the /usr the exitrd's systemd-shutdown runs from. It

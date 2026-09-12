@@ -108,8 +108,9 @@ cache, `make images verify` (everything, warm) ~30 s.
   `/var/log/journal` on it; the rest comes from systemd's own tmpfiles catalog.
 - `tmpfiles.d/vm-manager-exitrd.conf`, `run-initramfs-root.mount` and `run-initramfs-usr.mount`
   populate `/run/initramfs` with the exitrd that lets systemd-shutdown(8) release the `/etc`
-  and `/usr` overlays and unmount var cleanly at power-off, see
-  [Persistent state](#persistent-state).
+  and `/usr` overlays at power-off; `system-shutdown/vm-manager-var` then waits for the
+  kernel's asynchronous tear-down of the sysext's loop device to put var's superblock, so
+  that var is unmounted cleanly, see [Persistent state](#persistent-state).
 - `vm-sysinstall.service` (enabled, `ConditionCredential=vm.install-target`,
   `ImportCredential=vm.* firstboot.* ssh.* system.*`) runs `/usr/lib/vm-manager/sysinstall`:
   reads the target from `$CREDENTIALS_DIRECTORY/vm.install-target`, finds the booted
@@ -342,8 +343,7 @@ fills for `systemd.volatile=`.
   `usr/` as the exitrd's `/usr`, so that the exitrd runs the image's own binaries, not the
   sysext overlay's. systemd-shutdown pivots into it after its own unmount loop gave up; the
   fresh instance has no `/etc/ld.so.cache` to map and nothing from the `/usr` overlay, so
-  nothing pins the overlays any more: its unmount loop releases them, detaches the verity
-  and loop devices, and var's superblock is put cleanly before power-off. Mounts below
+  nothing pins the overlays any more: its unmount loop releases them. Mounts below
   `/run/initramfs` are extrinsic to the manager and skipped by systemd-shutdown's first
   instance (`nonunmountable_path`), so the exitrd survives until the pivot.
   `e2e/persistent_etc_test.go` asserts that the rebooted system's fsck output has no
@@ -352,6 +352,29 @@ fills for `systemd.volatile=`.
   kernel threads; `jbd2/vda8-8` still alive), and reproduced on the host: an `mmap` through
   an overlayfs whose fd is closed makes `umount` of the overlay EBUSY, a mapping reached
   through a symlink to a file outside the overlay does not.
+- Shutdown, the asynchronous rest (`system-shutdown/vm-manager-var`, exitrd part 3): the
+  exitrd's unmount loop releasing the `/usr` overlay is not what puts var's superblock. The
+  overlay was the last user of the Kubernetes image's dm-verity device (deferred removal)
+  and loop device (autoclear); the kernel tears both down on workqueues, and only that
+  closes the image file on var, by then the last reference to var's superblock: `/var`
+  itself is unmounted by the service manager at `umount.target` (the loop device was set up
+  in systemd-sysext's own mount namespace and never pinned the mount), `/root` and `/opt`
+  too. systemd-shutdown does not wait for work it did not start: it logs `All loop devices
+  detached`, syncs and calls reboot(2) a few milliseconds later, and when `ext4_put_super`
+  has not run by then var's journal stays marked dirty. Measured with a `system-shutdown/`
+  hook: right after the loop `/sys/fs/ext4/vda8` still exists and the `jbd2` thread is
+  alive, 10-20 ms later both are gone; with the manager's debug log on the console the
+  window never showed, which is why PR #30's run passed. `vm-manager-var` is that wait:
+  systemd-shutdown runs `system-shutdown/` after its loop and before the sync, in both
+  instances, and in the exitrd one (`/etc/initrd-release`) the hook polls for
+  `/sys/fs/ext4/<var device>` to disappear (10 ms steps, 5 s bound, a console line when it
+  does not). Boots after the first do not need it for the sysext: `/var/lib/extensions/` is
+  populated at sysinit, `systemd-sysext.service` merges and its `ExecStop=systemd-sysext
+  unmerge` (ordered after everything `After=sysinit.target`) releases the sysext during the
+  manager's shutdown; on the first boot `vm-kubernetes.service` merged with `systemd-sysext
+  refresh` and the unit is inactive, and on a node with pods the shims exec'd from the
+  overlay live until systemd-shutdown kills them, so the exitrd tear-down is the general
+  path.
 
 ## Kubernetes sysext
 

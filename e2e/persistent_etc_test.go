@@ -191,7 +191,9 @@ func assertEtcPersisted(ctx context.Context, t *testing.T, g *guest, before, aft
 	// before it was mounted: e2fsck always ends with the "clean" summary line.
 	// A dirty ext4 additionally logs "recovering journal" first, which must
 	// not happen: systemd-shutdown's exitrd (tmpfiles.d/vm-manager-exitrd.conf)
-	// releases the /etc overlay that pins var; see images/README.md,
+	// releases the /etc and /usr overlays that pin var, and its
+	// system-shutdown/vm-manager-var hook waits for the kernel to put var's
+	// superblock once the sysext's loop device is gone; see images/README.md,
 	// "Persistent state".
 	setup := g.sh(ctx, "journalctl -b -o cat --no-pager -u "+etcSetupUnit)
 	t.Logf("%s on the new boot (fsck of var):\n%s", etcSetupUnit, setup)
