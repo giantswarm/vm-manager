@@ -146,9 +146,10 @@ Phase B, installed boot (every boot from now on):
    disks/files stages, which write CAPI's files and systemd units (kubeadm config, the
    kubeadm unit), then the initrd switches root.
 7. Real system: systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
-   `systemd-sysupdate --component=kubernetes update` pulls the requested version (the IMDS
-   directory view lists only the version this VM was created with), `systemd-sysext merge`
-   measures it into PCR 13, then CAPI's unit runs `kubeadm init|join` and writes
+   the guest reads `/kubernetes-version` from IMDS and runs
+   `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
+   the artifact directory is served unfiltered because its `SHA256SUMS` is signed at build
+   time), `systemd-sysext merge` measures it into PCR 13, then CAPI's unit runs `kubeadm init|join` and writes
    `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready` posts a
    second quote covering PCR 13 and the full phase path for `get_vm_attestation`.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
@@ -172,7 +173,7 @@ hwdb record at image build time.
 | `/instance-id`, `/kubernetes-version`, `/metadata/<k>` | extra | plain values |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |
-| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts |
+| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` |
 
 Attestation protocol: `GET /attest/nonce` returns 32 hex bytes valid 5 minutes.
 `POST /attest/quote` with JSON `{stage, nonce, ak_pub, ek_pub, quote, signature,
