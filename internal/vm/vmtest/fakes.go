@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -53,14 +54,17 @@ func (ev *Events) Reset() {
 	ev.log = nil
 }
 
-// Clock fires After channels on Advance.
+// Clock fires its timers on Advance. Timers counts those still armed, so a
+// test can wait for a timeout to be set up before it advances past it.
 type Clock struct {
 	mu      sync.Mutex
 	now     time.Time
-	waiters []timer
+	waiters []*Timer
 }
 
-type timer struct {
+// Timer is a Clock's pending timeout.
+type Timer struct {
+	c  *Clock
 	at time.Time
 	ch chan time.Time
 }
@@ -71,33 +75,48 @@ func (c *Clock) Now() time.Time {
 	return c.now
 }
 
-func (c *Clock) After(d time.Duration) <-chan time.Time {
+// NewTimer implements vm.Clock.
+func (c *Clock) NewTimer(d time.Duration) vm.Timer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ch := make(chan time.Time, 1)
-	c.waiters = append(c.waiters, timer{at: c.now.Add(d), ch: ch})
-	return ch
+	t := &Timer{c: c, at: c.now.Add(d), ch: make(chan time.Time, 1)}
+	c.waiters = append(c.waiters, t)
+	return t
 }
 
+// Advance moves the clock and fires every timer due by then.
 func (c *Clock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
-	var keep []timer
-	for _, w := range c.waiters {
-		if !w.at.After(c.now) {
-			w.ch <- c.now
+	var keep []*Timer
+	for _, t := range c.waiters {
+		if !t.at.After(c.now) {
+			t.ch <- c.now
 			continue
 		}
-		keep = append(keep, w)
+		keep = append(keep, t)
 	}
 	c.waiters = keep
 }
 
+// Timers is the number of armed timers: set up and neither fired nor
+// stopped.
 func (c *Clock) Timers() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.waiters)
+}
+
+func (t *Timer) C() <-chan time.Time { return t.ch }
+
+// Stop disarms the timer; false when it fired or was stopped already.
+func (t *Timer) Stop() bool {
+	t.c.mu.Lock()
+	defer t.c.mu.Unlock()
+	n := len(t.c.waiters)
+	t.c.waiters = slices.DeleteFunc(t.c.waiters, func(w *Timer) bool { return w == t })
+	return len(t.c.waiters) < n
 }
 
 // Runtime hands out fakeInstances the test ends by hand.

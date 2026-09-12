@@ -73,16 +73,23 @@ func (f *fakeSystemd) systemdRun(args []string) error {
 	if _, dup := f.units[unit]; dup {
 		return fmt.Errorf("Unit %s was already loaded or has a fragment file", unit)
 	}
-	argv := args[sep+1:]
+	f.spawn(unit, args[sep+1:]...)
+	return nil
+}
+
+// spawn starts argv as the process of unit the way systemd-run would and
+// returns its PID. The caller holds f.mu or is alone with the fake.
+func (f *fakeSystemd) spawn(unit string, argv ...string) int {
 	cmd := exec.Command(argv[0], argv[1:]...) // #nosec G204 -- the test's own command
 	require.NoError(f.t, cmd.Start())
+	f.t.Cleanup(func() { _ = cmd.Process.Kill() })
 	u := &fakeUnit{cmd: cmd, exited: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
 		close(u.exited)
 	}()
 	f.units[unit] = u
-	return nil
+	return cmd.Process.Pid
 }
 
 func (f *fakeSystemd) systemctl(args []string) (string, error) {
@@ -199,7 +206,6 @@ func TestSystemdExecStart(t *testing.T) {
 
 	p, err := x.Start(ctx, Cmd{Path: "sleep", Args: []string{"60"}, Unit: UnitName("abcd1234", "qemu"), Log: log, Dir: "/", Env: []string{"A=1"}})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Kill() })
 
 	runs := f.calledWith("systemd-run", "")
 	require.Len(t, runs, 1)
@@ -258,7 +264,6 @@ func TestSystemdExecStartReleasesStaleUnit(t *testing.T) {
 	x := newSystemdExec(f)
 	p, err := x.Start(context.Background(), Cmd{Path: "sleep", Args: []string{"60"}, Unit: "vm-manager-aa-swtpm"})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Kill() })
 	assert.Len(t, f.calledWith("systemctl", "stop"), 1, "the leftover unit was stopped before the start")
 	assert.Positive(t, p.PID())
 }
@@ -266,12 +271,56 @@ func TestSystemdExecStartReleasesStaleUnit(t *testing.T) {
 func TestSystemdExecAttach(t *testing.T) {
 	f := newFakeSystemd(t)
 	ctx := context.Background()
+	x := newSystemdExec(f)
+
+	// The unit of a predecessor whose process still runs and which, that
+	// vm-manager being gone, nobody watches.
+	pid := f.spawn(beefUnit, "sleep", "60")
+	p, err := x.Attach(ctx, Handle{Unit: UnitName("beef", "qemu"), PID: pid})
+	require.NoError(t, err)
+	assert.Equal(t, pid, p.PID())
+	assert.Equal(t, Handle{Unit: beefUnit, PID: pid}, p.Handle())
+
+	require.NoError(t, p.Kill())
+	kills := f.calledWith("systemctl", "kill")
+	require.Len(t, kills, 1)
+	assert.Equal(t, []string{"systemctl", "--user", "kill", "--signal=SIGKILL", beefUnit}, kills[0])
+	st := exitOf(t, p)
+	assert.Equal(t, -1, st.Code)
+	assert.EqualError(t, st.Err, "signal: killed")
+	assert.False(t, f.loaded(beefUnit), "unit released after the exit")
+
+	// Gone: nothing to attach to. A handle without a unit never had one.
+	_, err = x.Attach(ctx, p.Handle())
+	assert.ErrorIs(t, err, ErrGone)
+	_, err = x.Attach(ctx, Handle{PID: 4711})
+	assert.ErrorIs(t, err, ErrGone)
+
+	// A unit whose process ended while nobody watched still tells how.
+	f.units["vm-manager-dead-qemu.service"] = &fakeUnit{state: unitState{LoadState: "loaded", ActiveState: "failed", SubState: "failed", ExecMainCode: cldExited, ExecMainStatus: 3}}
+	p3, err := x.Attach(ctx, Handle{Unit: "vm-manager-dead-qemu", PID: 99999})
+	require.NoError(t, err)
+	st = exitOf(t, p3)
+	assert.Equal(t, 3, st.Code)
+	assert.EqualError(t, st.Err, "exit status 3")
+	assert.False(t, f.loaded("vm-manager-dead-qemu.service"))
+}
+
+// beefUnit is the unit the Attach tests share.
+const beefUnit = "vm-manager-beef-qemu.service"
+
+// TestSystemdExecAttachWhileWatched has the launcher that started a unit
+// still watching it when a second one attaches, as when a test keeps the
+// predecessor alive. Both watchers see the exit; which of them settles
+// first, and so reads the status and releases the unit, is up to the
+// scheduler.
+func TestSystemdExecAttachWhileWatched(t *testing.T) {
+	f := newFakeSystemd(t)
+	ctx := context.Background()
 	first := newSystemdExec(f)
 	p1, err := first.Start(ctx, Cmd{Path: "sleep", Args: []string{"60"}, Unit: UnitName("beef", "qemu")})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = p1.Kill() })
 
-	// A later vm-manager: a fresh launcher against the same systemd.
 	second := newSystemdExec(f)
 	p2, err := second.Attach(ctx, p1.Handle())
 	require.NoError(t, err)
@@ -279,30 +328,27 @@ func TestSystemdExecAttach(t *testing.T) {
 	assert.Equal(t, p1.Handle(), p2.Handle())
 
 	require.NoError(t, p2.Kill())
-	kills := f.calledWith("systemctl", "kill")
-	require.Len(t, kills, 1)
-	assert.Equal(t, []string{"systemctl", "--user", "kill", "--signal=SIGKILL", "vm-manager-beef-qemu.service"}, kills[0])
-	st := exitOf(t, p2)
-	assert.Equal(t, -1, st.Code)
-	assert.EqualError(t, st.Err, "signal: killed")
-	// The predecessor's watcher sees the exit too; whichever settles first
-	// releases the unit, so the other may only learn that it is gone.
-	assert.Equal(t, -1, exitOf(t, p1).Code)
+	assertWatchersSettled(t, exitOf(t, p1), exitOf(t, p2), "signal: killed", beefUnit)
+	assert.False(t, f.loaded(beefUnit), "unit released after the exit")
+	assert.ErrorIs(t, p1.Kill(), os.ErrProcessDone)
+}
 
-	// Gone: nothing to attach to. A handle without a unit never had one.
-	_, err = second.Attach(ctx, p1.Handle())
-	assert.ErrorIs(t, err, ErrGone)
-	_, err = second.Attach(ctx, Handle{PID: 4711})
-	assert.ErrorIs(t, err, ErrGone)
-
-	// A unit whose process ended while nobody watched still tells how.
-	f.units["vm-manager-dead-qemu.service"] = &fakeUnit{state: unitState{LoadState: "loaded", ActiveState: "failed", SubState: "failed", ExecMainCode: cldExited, ExecMainStatus: 3}}
-	p3, err := second.Attach(ctx, Handle{Unit: "vm-manager-dead-qemu", PID: 99999})
-	require.NoError(t, err)
-	st = exitOf(t, p3)
-	assert.Equal(t, 3, st.Code)
-	assert.EqualError(t, st.Err, "exit status 3")
-	assert.False(t, f.loaded("vm-manager-dead-qemu.service"))
+// assertWatchersSettled checks what two watchers of one unit report once
+// its process died of signal: both codes are -1, the watcher that released
+// the unit read the signal, and the other read the same or, coming after
+// the release, only that the unit is gone.
+func assertWatchersSettled(t *testing.T, a, b ExitStatus, signal, unit string) {
+	t.Helper()
+	assert.Equal(t, -1, a.Code)
+	assert.Equal(t, -1, b.Code)
+	require.Error(t, a.Err)
+	require.Error(t, b.Err)
+	got := []string{a.Err.Error(), b.Err.Error()}
+	assert.Contains(t, got, signal, "the watcher that released the unit read its status first")
+	gone := fmt.Sprintf("exit status unknown: unit %s is gone", unit)
+	for _, e := range got {
+		assert.Contains(t, []string{signal, gone}, e)
+	}
 }
 
 func TestUnitStateExit(t *testing.T) {
