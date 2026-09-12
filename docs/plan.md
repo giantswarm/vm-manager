@@ -11,9 +11,10 @@ Waves 1-3 complete. Wave 4: #33 README/design doc, install guide and systemd uni
 var unmount with the sysext merged (exitrd waits for the ext4 superblock); #36 multi-version
 Kubernetes sysexts (1.36.4 and 1.35.4 from the Arch archive); #37 VMs survive vm-manager
 restarts (transient systemd services, persisted notify port, state-dir lock, reattach in
-0.2 s). Row 18 (GitHub Actions image build + KVM e2e) is PR #34, in progress on the hosted
-runners. Final verification on `main` after #37: all nine e2e tests green in 593 s on the
-dev host (install 14 s, boot to READY 11-15 s, reboot 11 s, sysext pull 2 s, control plane
+0.2 s); #34 GitHub Actions: `vet-e2e` on every PR, image build in an Arch container with
+caches (4 min on a cache hit), the fast KVM e2e subset on hosted runners on every PR (about
+10 min), the full suite nightly; #40/#41 made the last two intermittent tests deterministic.
+Final verification on `main` after #37: all nine e2e tests green in 593 s on the dev host (install 14 s, boot to READY 11-15 s, reboot 11 s, sysext pull 2 s, control plane
 Ready 83 s, worker join 45 s, attestation learn/golden/tamper 110 s, reattach 0.2 s).
 
 Follow-ups recorded by reviews and agents, not yet scheduled:
@@ -83,7 +84,7 @@ Order: (12 ∥ 12b ∥ 13 ∥ 14) -> 13b -> 15 -> (16 ∥ 17).
 
 Order: (18 ∥ 19 ∥ 20 ∥ 21); 20 and 21 touch different packages than 19 (docs only).
 
-## Wave 5 (proposed, not approved)
+## Wave 5 (proposed, awaiting approval)
 
 | # | Deliverable | Inputs | Est. | Returns |
 |---|---|---|---|---|
