@@ -1,10 +1,12 @@
 package varlink_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/giantswarm/vm-manager/internal/varlink"
 	"github.com/giantswarm/vm-manager/internal/varlink/varlinktest"
@@ -268,4 +271,75 @@ func closeAll(files []*os.File) {
 	for _, f := range files {
 		_ = f.Close()
 	}
+}
+
+// Linux glues descriptor-less messages queued before a descriptor-carrying
+// one into the same recvmsg(2); the descriptors still belong to the message
+// that ends the chunk. A raw server reproduces that deterministically by
+// sending reply 1 and reply 2 in one sendmsg(2) with the rights attached.
+func TestCoalescedChunkAttributesFilesToLastMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.WriteFile(path, []byte("second"), 0o600))
+	sock := filepath.Join(t.TempDir(), "raw.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	served := make(chan error, 1)
+	go func() {
+		served <- func() error {
+			c, err := ln.AcceptUnix()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = c.Close() }()
+			buf := make([]byte, 4096)
+			for { // read the request up to its NUL
+				n, err := c.Read(buf)
+				if err != nil {
+					return err
+				}
+				if bytes.IndexByte(buf[:n], 0) >= 0 {
+					break
+				}
+			}
+			f, err := os.Open(path) // #nosec G304 -- test fixture path
+			if err != nil {
+				return err
+			}
+			defer func() { _ = f.Close() }()
+			glued := []byte(`{"parameters":{"n":1},"continues":true}` + "\x00" + `{"parameters":{"n":2},"continues":true}` + "\x00")
+			if _, _, err := c.WriteMsgUnix(glued, unix.UnixRights(int(f.Fd())), nil); err != nil {
+				return err
+			}
+			_, err = c.Write([]byte(`{"parameters":{"n":3}}` + "\x00"))
+			return err
+		}()
+	}()
+
+	conn, err := varlink.Dial(context.Background(), sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	var seen []int
+	err = conn.CallMoreWithFiles(context.Background(), testIface+".Stream", nil, func(raw json.RawMessage, files []*os.File) error {
+		var p struct {
+			N int `json:"n"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &p))
+		seen = append(seen, p.N)
+		if p.N == 2 {
+			require.Len(t, files, 1, "the glued chunk's descriptor belongs to reply 2")
+			data, err := io.ReadAll(files[0])
+			require.NoError(t, err)
+			assert.Equal(t, "second", string(data))
+		} else {
+			assert.Empty(t, files, "reply %d carries no descriptor", p.N)
+		}
+		closeAll(files)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, <-served)
+	assert.Equal(t, []int{1, 2, 3}, seen)
 }
