@@ -1,0 +1,96 @@
+// Package vm is the VM service: the lifecycle state machine, its persistence
+// and the orchestration of storage, swtpm, the virtual network, the two QEMU
+// boot phases and the metadata service (docs/design.md "Host architecture",
+// "Boot flow"). internal/api exposes the Service methods as MCP tools and
+// REST; nothing in here knows about transports.
+//
+// # States
+//
+//	State       Meaning                                                    Process
+//	creating    id, CID, key, volume and lease being allocated             none
+//	installing  installer boot (phase A): sysinstall copies the OS         QEMU -kernel UKI, -no-reboot
+//	booting     installed boot (phase B) started, guest not yet ready      QEMU from the target disk
+//	attesting   attestation required and the guest asked for a nonce       same
+//	ready       guest sent READY=1 over vsock                              same
+//	running     process up, READY=1 not received within BootTimeout        same
+//	stopping    Stop/Reboot/Delete asked the guest to power down           exiting
+//	stopped     no process; the disk is installed and can be started       none
+//	failed      no process; LastError says why                             none
+//	deleting    Delete in progress                                         none or exiting
+//
+// Transitions:
+//
+//	creating    -> installing   Create: resources allocated, installer started
+//	creating    -> (gone)       Create failed before the installer was up; nothing is kept
+//	installing  -> booting      installer exited 0 (sysinstall rebooted, -no-reboot ended QEMU)
+//	installing  -> failed       installer exited non-zero, or InstallTimeout (killed); console tail in LastError
+//	booting     -> attesting    RequireAttestation and the guest fetched its first nonce
+//	booting     -> ready        READY=1
+//	attesting   -> ready        READY=1 (user-data was released by a verified initrd quote before)
+//	booting|attesting -> running   BootTimeout without READY=1; LastError notes it, the guest keeps running
+//	running     -> ready        a late READY=1
+//	<live>      -> stopping     Stop, Reboot, Delete
+//	stopping    -> stopped      process exited
+//	<live>      -> stopped      process exited 0 on its own (guest poweroff)
+//	<live>      -> failed       process exited non-zero on its own, or phase B failed to start
+//	stopped|failed -> booting   Start (phase B only; a VM that never installed cannot be started)
+//	<any>       -> deleting     Delete; the record disappears when it is done
+//
+// <live> is installing, booting, attesting, ready or running. A reboot from
+// inside the guest is invisible here: only phase A runs with -no-reboot, phase
+// B lets QEMU reset internally and the next READY=1 keeps the VM ready.
+//
+// # Milestones Create can wait for
+//
+// Spec.WaitFor blocks Create until installed (InstalledAt set), attested
+// (Attestation.UserDataReleased, which is immediate on phase B start when
+// attestation is not required) or ready (ReadyAt set). A failure returns the
+// record with ErrFailed, an overrun ErrTimeout while the VM continues.
+//
+// # Attestation
+//
+// The service implements imds.Resolver (lease IP -> instance snapshot),
+// imds.ReportSink (last systemd-report upload, report.json) and wraps the
+// configured imds.Attestor so that a verified initrd quote sets
+// Attestation.UserDataReleased (imds.ReleasesUserData); the ready-stage quote
+// is recorded for get_vm_attestation. Attestation is reset on every installed
+// boot, so user-data is gated again after Start. Without RequireAttestation
+// user-data is released as soon as phase B starts.
+//
+// # State directory
+//
+//	<state>/networks.json          []network.State: specs and leases, restored before VMs
+//	<state>/vms/<id>/vm.json       the VM record, written atomically on every transition
+//	<state>/vms/<id>/user-data     Ignition JSON, served as /user-data
+//	<state>/vms/<id>/ssh_key       vm-manager's per-VM ed25519 key (Exec)
+//	<state>/vms/<id>/ssh_host_key  the guest's host key, pinned on first Exec
+//	<state>/vms/<id>/ovmf_vars.fd  per-VM copy of the OVMF variable store
+//	<state>/vms/<id>/tpm/          swtpm state, shared by both phases
+//	<state>/vms/<id>/console.log   serial console
+//	<state>/vms/<id>/qmp.sock      QMP socket of the running QEMU
+//	<state>/vms/<id>/report.json   last guest report
+//
+// The target disk is the storage volume vm-<id>. Keep <state> short: unix
+// socket paths below it are limited to qemu.MaxUnixSocketPath bytes.
+//
+// # Startup sequence for the command wiring
+//
+//  1. storage.Detect(ctx, log, fallbackDir) -> Options.Storage
+//  2. network.NewManager(stateDir, log) -> Options.Networks = Networks(m)
+//  3. qemu.ListenNotify(port, log) -> Options.Notify
+//  4. tpm.New(...) -> Options.TPM = TPM(m); qemu.New(...) -> Options.Runtime = QEMURuntime(r)
+//  5. images.Load(dir, log) -> Options.Images
+//  6. svc, _ := New(opts); svc.Load(ctx): restores the networks with their
+//     leases, starts one IMDS server per network (ServeIMDS) and loads the VM
+//     records. VMs recorded with a live process become stopped with a note.
+//  7. serve the API; on shutdown svc.Close(ctx) stops every VM gracefully.
+//
+// # Known limitations
+//
+// vm-manager does not reattach to QEMU processes across its own restarts:
+// Load marks such VMs stopped and Close stops them before exiting, because a
+// QEMU nobody supervises would collide with a later Start on the same disk.
+// The planned fix runs each VM as a transient systemd unit and re-dials its
+// QMP socket on startup. Networks are recreated from networks.json, so leases
+// and MACs survive restarts.
+package vm
