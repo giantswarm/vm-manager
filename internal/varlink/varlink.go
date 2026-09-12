@@ -313,6 +313,15 @@ func (c *Conn) do(ctx context.Context, fn func() error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		// The only deadline ever set on the socket mirrors the context's, and
+		// the poller can fire a hair before the context's own timer. Wait for
+		// the context so the caller sees its error, not an I/O timeout.
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
