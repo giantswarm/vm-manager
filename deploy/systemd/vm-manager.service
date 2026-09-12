@@ -1,0 +1,81 @@
+[Unit]
+Description=vm-manager - systemd-native VM provisioner (REST + MCP)
+Documentation=https://github.com/giantswarm/vm-manager
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/docs/install.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=vm-manager
+Group=vm-manager
+# /dev/kvm and /dev/vhost-vsock are root:kvm 0660 on most distributions
+# (see docs/install.md for the vhost-vsock udev rule).
+SupplementaryGroups=kvm
+
+# Every serve flag has a VM_MANAGER_* environment fallback; put overrides
+# (OAuth, timeouts, the listen address) into /etc/vm-manager/env. Flags on
+# the command line win over the environment.
+EnvironmentFile=-/etc/vm-manager/env
+ExecStart=/usr/local/bin/vm-manager serve \
+    --state-dir=/var/lib/vm-manager \
+    --image-dir=/var/lib/vm-manager/images \
+    --listen=127.0.0.1:8080
+
+# Restarts. vm-manager does not reattach to QEMU across its own restarts:
+# every VM is powered down gracefully when the service stops (ACPI, then
+# SIGTERM/SIGKILL after --stop-timeout, 30 s by default) and comes back
+# `stopped` after the restart; start_vm boots it again. Running VMs as
+# transient units is the planned fix (docs/plan.md, wave 4).
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=90s
+# SIGTERM to vm-manager only: it stops its QEMU and swtpm children itself and
+# they must outlive the signal long enough for the guests to power down.
+KillMode=mixed
+
+# Directories. StateDirectory= is the --state-dir above (VM records, disks
+# when no storage provider is present, consoles, vTPM state, unix sockets);
+# RuntimeDirectory= is free for sockets a reverse proxy may want.
+StateDirectory=vm-manager
+StateDirectoryMode=0750
+RuntimeDirectory=vm-manager
+RuntimeDirectoryMode=0750
+UMask=0027
+LimitNOFILE=65536
+
+# Hardening. QEMU and swtpm run as children of this service and need the
+# three devices below, AF_VSOCK for the guests' READY=1, unix sockets under
+# the state directory, and to connect to the systemd storage provider's
+# socket under /run/systemd/io.systemd.StorageProvider/ (a connect() to a
+# unix socket works on the read-only view ProtectSystem=strict leaves).
+# Not set on purpose: MemoryDenyWriteExecute= (QEMU), ProcSubset=pid
+# (get_host reads /proc/meminfo, the metrics read the QEMU processes),
+# PrivateDevices= and PrivateNetwork= (the devices and the vsock transport).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/vhost-vsock rw
+DeviceAllow=/dev/net/tun rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_VSOCK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target

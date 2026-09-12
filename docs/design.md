@@ -1,8 +1,10 @@
 # vm-manager design
 
-Status: prototype design, decided in a grill session on 2026-09-12. This document is the
-source of truth for architecture decisions; the roadmap and agent plan live in
-[plan.md](plan.md).
+Status: prototype design, decided in a grill session on 2026-09-12 and brought in line
+with `main` after wave 3 (the same day): open points that were closed carry an
+**Implemented** note, statements that no longer matched the code were corrected. This
+document is the source of truth for architecture decisions; the roadmap and agent plan
+live in [plan.md](plan.md), the user-facing description in the [README](../README.md).
 
 ## What it is
 
@@ -16,8 +18,8 @@ cluster-manager to bootstrap workload clusters.
 Everything is systemd-native: images are built with mkosi, installed with
 systemd-sysinstall onto volumes from the systemd storage provider, configured with
 systemd-firstboot and system credentials, fed metadata by systemd-imdsd, layered with
-systemd-sysext delivered by systemd-sysupdate, measured with systemd-measure/pcrlock, and
-observed through the io.systemd.Metrics Varlink interface and systemd-report.
+systemd-sysext delivered by systemd-sysupdate, measured with systemd-measure (PCR 11) and
+systemd-pcrextend (PCR 13), and observed through the guest's systemd-report uploads.
 
 ## Decisions
 
@@ -51,17 +53,20 @@ observed through the io.systemd.Metrics Varlink interface and systemd-report.
                   169.254.169.254) sysupdate dir)
 ```
 
-Packages (sibling layering, see `docs/development.md` once it exists):
+Packages (sibling layering, see [development.md](development.md) "Layout"):
 
-- `internal/vm`: VM lifecycle state machine `creating -> installing -> booting -> attesting
-  -> ready -> running | stopped | failed`, persisted as one JSON file per VM under the state
-  dir (`/var/lib/vm-manager` or `$XDG_STATE_HOME/vm-manager`). Each VM runs as a transient
-  systemd unit so vm-manager restarts do not kill VMs; QEMU reconnects its netdev with
-  `reconnect-ms`.
+- `internal/vm`: VM lifecycle state machine `creating -> installing -> booting ->
+  attesting -> ready` with `running` (no `READY=1` within the boot timeout), `stopping`,
+  `stopped`, `failed` and `deleting`, persisted as one JSON file per VM under the state dir
+  (`$XDG_STATE_HOME/vm-manager`, `~/.local/state/vm-manager` or `/var/lib/vm-manager`).
+  Implemented as child processes: a vm-manager restart stops the VMs and marks them
+  `stopped`; running each VM as a transient systemd unit so that restarts do not kill VMs
+  (QEMU already reconnects its netdev with `reconnect-ms`) is wave 4, see the open point.
 - `internal/runtime/qemu`: builds the QEMU command for phase A (installer) and phase B
-  (installed), manages the per-VM swtpm process and OVMF vars copy, talks QMP
-  (status, powerdown, events), captures the serial console to a file, listens on AF_VSOCK
-  for `READY=1` from the guest (`vmm.notify_socket` credential).
+  (installed), seeds the per-VM OVMF vars copy, talks QMP (status, powerdown, events),
+  captures the serial console to a file, listens on AF_VSOCK for `READY=1` from the guest
+  (`vmm.notify_socket` credential). `internal/tpm` runs the per-VM swtpm process,
+  `internal/runtime/proc` supervises both.
 - `internal/network`: one gvisor-tap-vsock `VirtualNetwork` per network (subnet, gateway,
   DHCP static leases keyed by the VM MAC, DNS, NAT to host, `GatewayVirtualIPs` including
   169.254.169.254). QEMU attaches with `-netdev stream,addr.type=unix`. `Listen` serves IMDS
@@ -69,8 +74,10 @@ Packages (sibling layering, see `docs/development.md` once it exists):
 - `internal/imds`: HTTP handler for the Giant Swarm provider, VM identified by source IP.
 - `internal/storage` + `internal/varlink`: minimal JSON-over-AF_UNIX Varlink client;
   `io.systemd.StorageProvider.Acquire` on the `fs` provider creates per-VM target volumes
-  (`create=new,size=`), attached as virtio-blk with `serial=target`.
-- `internal/attest`: quote verification with go-tpm, expected PCR policy per image.
+  (`create=new,size=`), attached as virtio-blk with `serial=target`; plain files below
+  `<state-dir>/volumes` when no provider socket answers (`storage.Detect`).
+- `internal/attest` + `internal/tpmquote`: quote parsing and verification, expected PCR
+  policy per image (`policy.json`), AK pinning per VM, learn mode for golden values.
 - `internal/images`: catalog of base DDIs, UKIs, PCR policies and Kubernetes sysext versions.
 - `internal/metrics`: host stats per VM plus the last guest `systemd-report` upload, exposed
   as Prometheus families and through `get_vm_metrics`.
@@ -78,29 +85,38 @@ Packages (sibling layering, see `docs/development.md` once it exists):
 
 ## Guest image (`images/`)
 
-mkosi project with two images:
+mkosi project with two images (`images/mkosi.images/base` is the OS tree, the main image
+in `images/mkosi.conf` is the disk built from it, `images/mkosi.images/kubernetes` the
+sysext; [images/README.md](../images/README.md) is the reference):
 
-- `images/base`: Arch, systemd 261, `Bootable=yes` UKI signed for PCR 11 (`ukify` with the
+- `base`: Arch, systemd 261, `Bootable=yes` UKI signed for PCR 11 (`ukify` with the
   build's PCR key), erofs root with `Verity=data/hash/signature`, ESP. Ships:
   - `/usr/lib/udev/hwdb.d/45-imds-giantswarm.hwdb` matching `dmi:*:svnGiantSwarm:*` with
     `IMDS_DATA_URL=http://169.254.169.254/giantswarm/v1` and the key table below; kernel
     cmdline carries `systemd.imds.import=yes` so credentials are imported outside the initrd too.
   - `/usr/lib/repart.sysinstall.d/`: esp, root A/root-verity A/root-verity-sig A with
     `CopyBlocks=auto`, empty B slots (`Label=_empty`) for A/B updates, var.
-  - `/usr/lib/repart.d/`: first-boot growth of var.
+  - `/usr/lib/repart.d/`: on the first installed boot creates the B slots sysinstall
+    deferred and grows var.
   - `vm-sysinstall.service`: `ConditionCredential=vm.install-target`, runs
     `systemd-sysinstall $TARGET --erase=yes --confirm=no --welcome=no --chrome=no
-    --variables=yes --reboot=yes --kernel=<UKI on the installer ESP>` and forwards
-    `firstboot.hostname`, `ssh.authorized_keys.root` and any `firstboot.*` credential it
-    finds in `$CREDENTIALS_DIRECTORY` with `--load-credential=`. The stock interactive
-    `systemd-sysinstall.service` stays disabled.
+    --variables=yes --reboot=no --kernel=<UKI on the installer ESP>` and forwards
+    `firstboot.hostname`, `ssh.authorized_keys.root`, `system.machine_id` and any
+    `firstboot.*` credential it finds in `$CREDENTIALS_DIRECTORY` with
+    `--load-credential=`, then reboots with `systemctl reboot` itself (sysinstall's own
+    reboot needs logind, which the read-only installer root cannot start). The stock
+    interactive `systemd-sysinstall.service` is masked.
   - sshd with `systemd-ssh-generator` (AF_VSOCK port 22) and networkd DHCP.
   - `/usr/lib/sysupdate.kubernetes.d/*.transfer`: url-file source
     `http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes` into
     `/var/lib/extensions/kubernetes_@v.raw`; `/usr/lib/sysupdate.d/` for OS A/B updates from
     `.../sysupdate/base`; `/etc/systemd/import-pubring.pgp` holds the build key.
   - `vm-agent` (attestation only) with `vm-agent-attest.service` in the initrd and the
-    real system, and `systemd-report-upload.timer` posting to `.../report`.
+    real system, and `vm-report-upload.timer` (every 15 s) posting `systemd-report upload`
+    to `.../report`.
+  - `persistent-etc.service` in the initrd: var partition, `/etc` overlay with its upper
+    directory on var, `/root` and `/opt` bind mounts, before `initrd-root-fs.target`; an
+    exitrd so that `systemd-shutdown` can release the overlays and unmount var cleanly.
   - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
     Ignition with its `ignition-*` units ported from upstream's `dracut/30ignition`
     (`ignition-fetch`, `-disks`, `-mount`, `-files` required by `ignition-complete.target`,
@@ -112,14 +128,19 @@ mkosi project with two images:
     only on the first installed boot. Ignition comes from a pinned upstream tag
     (`images/Makefile` `IGNITION_VERSION`, `scripts/build-ignition`); Arch has no official
     package. The initrd-stage attestation unit must be ordered `Before=ignition-fetch.service`.
-- `images/kubernetes`: sysext DDI with kubeadm, kubelet, containerd, runc, crictl,
-  cni-plugins and their units; `extension-release.kubernetes` matching the base.
+- `kubernetes`: sysext DDI with kubeadm, kubelet, kubectl, containerd, runc, crictl,
+  cni-plugins and their units (started through `Upholds=` on `multi-user.target`, since
+  presets cannot enable units of a layer merged during boot);
+  `extension-release.kubernetes_<kv>` matching the base.
 
-Build outputs per version: `base_<v>.raw`, `base_<v>.efi`, `base_<v>.root.raw` +
-`.verity.raw` (split for sysupdate), `kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg`,
-`policy.json` (expected PCRs). Signing keys (PGP for SHA256SUMS, PCR key for the UKI) are
-generated per build in CI and kept in a git-ignored local dir for developers; vm-manager
-only serves signed artifacts and never holds private keys.
+Build outputs per version (`images/build/`): `giantswarm-vm-base_<v>.raw`,
+`giantswarm-vm-base_<v>.efi`, `sysupdate/base/` (split root, verity and signature
+partitions plus the UKI, `SHA256SUMS`, `SHA256SUMS.gpg`), `kubernetes_<kv>.raw` and
+`sysupdate/kubernetes/` (`kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg`),
+`policy.json` (expected PCR 11 per phase path, PCR 13 per Kubernetes version, golden
+firmware PCRs once recorded). Signing keys (verity certificate, PCR key for the UKI, PGP
+for SHA256SUMS) are generated per build and kept in the git-ignored `images/keys/`;
+vm-manager only serves signed artifacts and never holds private keys.
 
 ## Boot flow
 
@@ -132,17 +153,21 @@ Phase A, installer boot (no persistent disk yet):
    `tpm-crb`, `-smbios type=1,manufacturer=GiantSwarm,product=vm-manager,serial=<vm-id>`,
    and SMBIOS type 11 credentials: `vm.install-target=/dev/disk/by-id/virtio-target`,
    `firstboot.hostname`, `ssh.authorized_keys.root`, `system.machine_id`,
-   `vmm.notify_socket=vsock:2:<port>`.
+   `vmm.notify_socket=vsock-stream:2:<port>`.
 3. `vm-sysinstall.service` installs the booted OS onto the target: repart copies the
-   root/verity/sig partitions bit-identically, creates ESP + B slots + var, `bootctl link`
-   installs the UKI plus TPM-encrypted credential files, `bootctl install` adds systemd-boot,
-   then reboots. QEMU runs with `-no-reboot`; vm-manager sees the exit and starts phase B.
+   root/verity/sig partitions bit-identically, creates the ESP and var (the B slots are
+   deferred to the first installed boot), `bootctl link` installs the UKI plus
+   TPM-encrypted credential files, `bootctl install` adds systemd-boot, then the unit
+   reboots. QEMU runs with `-no-reboot`; vm-manager sees the exit and starts phase B.
+   Measured: 12 s.
 
 Phase B, installed boot (every boot from now on):
 
 4. OVMF -> systemd-boot -> UKI (measured into PCR 11 with `.pcrsig`), credentials from the
-   ESP. In the initrd: verity root, repart grows var, systemd-imdsd early network brings up
-   DHCP from the virtual network, imds import (hostname, ssh key -> `/run/credstore`).
+   ESP. In the initrd: verity root, repart creates the B slots and grows var, systemd-imdsd
+   early network brings up DHCP from the virtual network, imds import (hostname, ssh key
+   -> `/run/credstore`), `persistent-etc.service` mounts var, the `/etc` overlay, `/root`
+   and `/opt` under `/sysroot`.
 5. Still in the initrd (implemented: `images/mkosi.initrd.conf`), `vm-agent-attest.service`
    (wanted by `initrd.target`, `After=systemd-pcrphase-initrd.service` so PCR 11 carries
    exactly `enter-initrd`, after the IMDS early network, `Before=ignition-fetch.service`
@@ -182,14 +207,20 @@ Phase B, installed boot (every boot from now on):
    `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
    quote; the e2e measures 14 s from the installed boot to ready with a 2 s download.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
+   Measured: 11 to 15 s from the installed boot to `READY=1` for the bare image, 11 s for a
+   reboot to ready.
 
 Fast path for later: pre-install on the host with `systemd-repart` from the same
 `repart.sysinstall.d` definitions against the base DDI (needs root or `io.systemd.Repart`),
 skipping phase A when TPM-bound install credentials are not needed.
 
-### Open points found while building waves 1 and 2
+### Open points found while building waves 1 to 3
 
-- **PCR 13 and sysexts (resolved).** systemd 261 measures only stub-loaded extensions
+Each point that is closed starts with **Implemented** and names the PR or test that
+closed it; the two without it are open and scheduled in [plan.md](plan.md).
+
+- **PCR 13 and sysexts.** Implemented (#27, `e2e/kubernetes_sysext_test.go`). systemd
+  261 measures only stub-loaded extensions
   (`<uki>.efi.extra.d/*.sysext.raw` on the ESP) into PCR 13, and those extend the initrd
   (`/.extra/sysext/` is searched only there), not the installed root; the measured object
   is the stub's cpio archive, which a host cannot predict from the artifact alone, and the
@@ -204,7 +235,8 @@ skipping phase A when TPM-bound install credentials are not needed.
   alone). Verified end to end by `e2e/kubernetes_sysext_test.go` against the vTPM.
   `vm-manager image golden` still records golden 13 from whatever VM it is pointed at;
   point it at a VM without a Kubernetes version when the fallback should mean "no sysext".
-- **Volatile `/etc`.** Solved: the image no longer boots with `systemd.volatile=overlay`.
+- **Volatile `/etc`.** Implemented (#25, #30, `e2e/persistent_etc_test.go`): the image no
+  longer boots with `systemd.volatile=overlay`.
   `persistent-etc.service` in the initrd mounts the var partition on `/sysroot/var` and an
   overlay on `/sysroot/etc` whose upper and work directories are `/var/lib/etc-overlay/`,
   plus `/root` and `/opt` as bind mounts from var, before `initrd-root-fs.target`; the root
@@ -214,22 +246,25 @@ skipping phase A when TPM-bound install credentials are not needed.
   `run-initramfs-{root,usr}.mount`) releases the `/etc` overlay and the Kubernetes sysext's
   `/usr` overlay, both pinned by PID 1's own mappings, which keep var's superblock alive
   (`e2e/persistent_etc_test.go`; details in `images/README.md`, "Persistent state").
-- **Ignition and `/var`.** Solved by the same change: the var partition is mounted on
+- **Ignition and `/var`.** Implemented by the same change (#25, `e2e/ignition_test.go`):
+  the var partition is mounted on
   `/sysroot/var` before `initrd-root-fs.target`, and `ignition-files.service` runs after
   it (`After=initrd-root-fs.target sysroot-var.mount`), so what user-data writes below
-  `/var`, `/etc`, `/root` or `/opt` lands on the partition. Without an initrd attestation
-  agent, a VM with `require_attestation: true` and user-data sits in Ignition's fetch loop
-  until its 2-minute fetch timeout and then in `emergency.target` (documented by the
-  e2e's gated subtest).
-- **Host loopback alias.** The virtual network can translate `HostIP()` to the host's
+  `/var`, `/etc`, `/root` or `/opt` lands on the partition. A VM with
+  `require_attestation: true` whose quote is rejected sits in Ignition's fetch loop until
+  its 2-minute fetch timeout and then in `emergency.target` (the tamper subtest of
+  `e2e/attestation_test.go`).
+- **Host loopback alias.** Implemented (`internal/network`, `Spec.EnableHostAlias`). The
+  virtual network can translate the host alias address (`.254`) to the host's
   `127.0.0.1`, which would expose vm-manager's own API to unattested guests. It is opt-in
-  per network (`EnableHostAlias`) and off for VM networks.
-- **Sysext file lifecycle (resolved).** systemd-sysext merges every `kubernetes_*.raw` it
+  per network and off for every network the API creates.
+- **Sysext file lifecycle.** Implemented (#27). systemd-sysext merges every `kubernetes_*.raw` it
   finds and sysupdate.d(5) rejects `InstancesMax=` below 2, so `vm-kubernetes.service`
   deletes every `kubernetes_*.raw` other than the requested version before it refreshes;
   exactly one file, one merged extension, one PCR 13 measurement per boot. A changed
   `/kubernetes-version` takes effect on the next boot (no live switch of a running node).
-- **PCR 1 and 5 are per VM (resolved by exclusion).** The first golden-path boot showed
+- **PCR 1 and 5 are per VM.** Implemented by exclusion (#32, `attest.GoldenIndexes`). The
+  first golden-path boot showed
   them differing between two VMs on the same firmware and image: EDK2 measures the SMBIOS
   tables into PCR 1 (`SmbiosMeasurementDxe`, type 11 OEM strings are not filtered), and
   vm-manager's type 11 strings are per-VM credentials (hostname, machine ID, SSH key,
@@ -241,15 +276,17 @@ skipping phase A when TPM-bound install credentials are not needed.
   13 (sysext). A per-VM prediction of 1 and 5 by replaying the firmware event log the
   agent already posts (`event_log`) against what vm-manager itself passed as SMBIOS and
   what sysinstall wrote as GPT is the follow-up if they are wanted.
-- **PCR 12 is not in the policy.** systemd-stub measures the kernel command line
+- **PCR 12 is not in the policy (open).** systemd-stub measures the kernel command line
   additions (`io.systemd.stub.kernel-cmdline-extra`, i.e. `ignition.firstboot`) and
   credentials into PCR 12, not 11, so the policy's PCR 11 does not cover them and the
   command line is no tamper case for it; the agent does not quote PCR 12 yet. A
   predicted PCR 12 (the stub's measurements are documented and vm-manager knows what
-  it passed) would close this.
-- **VM processes and vm-manager restarts.** v1 runs QEMU and swtpm as child processes;
-  a vm-manager restart marks VMs stopped. Running each VM as a transient systemd unit
-  (`systemd-run --scope`) is the planned fix.
+  it passed) would close this. Follow-up, not scheduled.
+- **VM processes and vm-manager restarts (open).** `main` runs QEMU and swtpm as child
+  processes; a vm-manager restart stops the VMs and marks them `stopped`, and the
+  system service unit inherits that (stopping the service stops the VMs). Running each
+  VM as a transient systemd unit and re-dialing its QMP socket on startup is wave 4,
+  row 20 of [plan.md](plan.md).
 
 ## IMDS contract (Giant Swarm provider)
 
@@ -327,7 +364,7 @@ vm-manager:
 5. `READY=1` is sent when the boot transaction is complete, and the kubeadm unit is part
    of it: a VM with user-data reaches `ready` only after `kubeadm init|join` succeeded,
    which makes `get_vm` state `ready` the bootstrap signal. The server's `--boot-timeout`
-   (default 2 min) must cover kubeadm init with its image pulls, or the VM is reported
+   (default 4 min) must cover kubeadm init with its image pulls, or the VM is reported
    `running` with a `lastError` although nothing failed; the caller should either raise it
    or use `wait_for: installed` and poll.
 6. Remediation is delete + recreate. A thin CAPI infrastructure provider (or cluster-manager
@@ -348,8 +385,8 @@ giantswarm-vm://cp-1}]`), `ClusterConfiguration` (`kubernetesVersion`, `networki
 the worker `JoinConfiguration` with `discovery.bootstrapToken` (`apiServerEndpoint:
 <cp ip>:6443`, the token and `caCertHashes` from `kubeadm token create
 --print-join-command` on the control plane) and the same `nodeRegistration`. Measured on
-the development host (two runs): the control plane is Ready with flannel and every pod
-running 87 to 115 s after its `create_vm` (kubeadm init about 55 s of that, image pulls
+the development host (several runs): the control plane is Ready with flannel and every pod
+running 85 to 115 s after its `create_vm` (kubeadm init about 55 s of that, image pulls
 included; installed boot to `READY=1` 69 s); the worker is Ready 46 to 52 s after its
 `create_vm` (kubeadm join 1.2 s); the whole test takes 2.5 to 3 min.
 
@@ -372,12 +409,20 @@ require_attestation, wait_for none|installed|attested|ready), `start_vm`, `stop_
 | T0 unit | every package with fakes (fake runtime, fake storage, httptest IMDS, CAPI Ignition fixtures, go-tpm simulator) | < 30 s | every PR |
 | T1 contract | in-process MCP client over httptest against the fake runtime; REST parity via `statusFor` | < 10 s | every PR |
 | T2 image | mkosi build + `image-verify`: `systemd-dissect`, `ukify inspect`, `systemd-measure calculate` | minutes, cached | every PR touching images/ |
-| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM: install + reboot + READY, IMDS + firstboot, attestation pass and tampered fail, Ignition files + units applied, sysext merged, single-node kubeadm, 1 CP + 1 worker | < 90 s per test | every PR on a KVM runner, nightly full |
+| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM (`e2e/`, seven tests): install + reboot + READY, IMDS + firstboot, Ignition files + units applied, persistent `/etc`, sysext merged and measured, attestation learn / golden / tamper, 1 CP + 1 worker from CAPI-shaped Ignition | < 90 s per test except the cluster (2.5 to 3 min) and attestation (111 s for three servers); about 6 min for the suite, 45 m `go test` ceiling | on a developer's KVM host before merge until the KVM runner job of wave 4 exists |
 
-Boot-time budgets are asserted in T3 and exported as metrics: installer phase to reboot
-< 60 s, installed boot to READY < 10 s.
+Boot-time budgets were set at installer phase to reboot < 60 s and installed boot to READY
+< 10 s; measured on the development host: install 12 s, installed boot to `READY=1` 11 to
+15 s (the sysext pull and the ready-stage quote are inside that), reboot to ready 11 s.
+The e2e tests print these as `install_seconds=`, `boot_to_ready_seconds=`,
+`reboot_to_ready_seconds=` and enforce generous ceilings; the metrics export them per VM
+(`vm_manager_vm_install_seconds`, `vm_manager_vm_boot_to_ready_seconds`).
 
 ## Host prerequisites
 
-qemu (present), edk2-ovmf (present), swtpm, mkosi >= 27, erofs-utils, /dev/kvm and
-/dev/vhost-vsock accessible (world-writable on the dev host), Go 1.26+.
+For `vm-manager serve`: qemu-system-x86_64, an OVMF build (edk2-ovmf), swtpm, systemd
+(`systemd-ssh-proxy` for `exec_vm`), `/dev/kvm` and `/dev/vhost-vsock` accessible by the
+service user, optionally systemd 261's `io.systemd.StorageProvider` (plain files
+otherwise). For the image build: mkosi >= 27, erofs-utils, pefile, gnupg, util-linux
+(sfdisk), Go 1.26+. For the cluster e2e additionally kubectl and internet access from
+the VMs. [install.md](install.md) has the packages and the device permissions.

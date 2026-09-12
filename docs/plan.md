@@ -5,24 +5,39 @@ spawned; each row is one agent with one deliverable and a context budget of abou
 tokens. Agents never poll: waits on CI or boots are bounded (interval + max attempts) and
 return control to the parent.
 
-## Status (2026-09-12, night)
+## Status (2026-09-12, end of wave 3)
 
-Waves 1 and 2 complete (PRs #1-#19, incl. three CI flake fixes #17-#19 for real races).
-Wave 3 merged so far: #20 attestation agent, #21 metrics + Prometheus, #22 quote verifier,
+Waves 1 to 3 are merged: #1-#19 (waves 1 and 2, incl. three CI flake fixes #17-#19 for
+real races), then #20 attestation agent, #21 metrics + Prometheus, #22 quote verifier,
 #23 Ignition in the initrd (gated user-data is a retryable 503, `/user-data` left the hwdb
-table), #24 shared nonce store/AK template, #25 persistent `/etc` (reboot to ready 9-12 s),
-#26 ssh host-key error precedence, #27 Kubernetes sysext pulled at boot (1.6 s) and measured
-into PCR 13, #28 vsock CID collisions between vm-managers on one host. In progress: row 15b
-(attestation units in the image, `--attestation=verify` default, gating e2e) and row 16
-(kubeadm init/join e2e). Every PR got an automated review before its admin merge.
+table), #24 shared nonce store/AK template, #25 persistent `/etc`, #26 ssh host-key error
+precedence, #27 Kubernetes sysext pulled at boot and measured into PCR 13, #28 vsock CID
+collisions between vm-managers on one host, #29 plan status, #30 clean shutdown of the
+`/etc` overlay via an exitrd, #32 attestation end to end (units in both stages,
+`--attestation=verify` default, `image golden`, learn / golden / tamper e2e), #31 the
+Kubernetes cluster e2e from CAPI-shaped Ignition. Every PR got an automated review before
+its admin merge.
 
-Follow-ups recorded by reviews and agents, not yet scheduled:
+Last full `make e2e` on the development host (seven tests, about 6 min): install 12 s,
+installed boot to `READY=1` 11-15 s, reboot to ready 11 s, Kubernetes sysext pull 2 s,
+control plane Ready 85 s after its `create_vm`, worker joined 46 s after its own,
+attestation learn / golden / tamper 111 s in total. Pending: the var-unmount fix
+(`TestPersistentEtc` asserts that the rebooted system's fsck logs no `recovering journal`;
+#30 introduced the exitrd for it and the assertion has to stay green with the Kubernetes
+sysext merged).
+
+Wave 4 is scheduled below (rows 18-21). Follow-ups recorded by reviews and agents:
 - `images/scripts/publish-sysupdate` keeps only the last published Kubernetes version;
-  multi-version fleets need it to accumulate versions.
+  multi-version fleets need it to accumulate versions (row 21).
 - CI does not compile the `e2e` build tag (`go vet -tags e2e ./e2e/` broke twice unnoticed);
-  add it to `make test` or the workflow (wave 4, row 18).
-- VMs still die with vm-manager; transient systemd units are the planned fix.
+  add it to `make test` or the workflow (row 18).
+- VMs still die with vm-manager; transient systemd units are the fix (row 20). The system
+  service unit of row 19 documents the consequence (stopping the service stops the VMs).
 - e2e `go test` timeout is 45 m for seven sequential tests; parallelise or split when it grows.
+- PCR 12 (stub measurements of the extra command line and credentials) is neither quoted
+  nor predicted; a predicted value would put `ignition.firstboot` under the policy.
+- The muster `MCPServer` wiring for a service outside the cluster and the caller identity
+  on VM records (`requestedBy`) are not done.
 
 ## Wave 1: repo, scaffold, image, first boot
 
@@ -55,7 +70,7 @@ Order: (7 ∥ 8 ∥ 9) -> 10a -> 10b -> 11.
 
 | # | Deliverable | Inputs | Est. | Returns |
 |---|---|---|---|---|
-| 12 | `cmd/vm-agent`: `attest --stage=initrd|ready` (nonce, AK, quote, event logs, POST); tests with the go-tpm simulator | attestation protocol | ~60k | PR link |
+| 12 | `cmd/vm-agent`: `attest --stage=initrd\|ready` (nonce, AK, quote, event logs, POST); tests with the go-tpm simulator | attestation protocol | ~60k | PR link |
 | 13 | Ignition in the mkosi initrd: binary from a pinned upstream release, `ignition-*` units for the systemd initrd, cmdline (`platform.id=metal`, `config.url`), first-boot flag via stub cmdline-extra from vm-manager; e2e: files + a unit from an Ignition config applied | rows 3, 5 merged, design.md image section | ~80k | PR link, Ignition version, e2e output |
 | 14 | `internal/attest` verifier, `systemd-measure` PCR 11 computation, `vm-manager image golden`, user-data gating per stage | attestation protocol | ~70k | PR link |
 | 15 | Image integration: agent units in initrd + system, report timer, kubernetes sysupdate component; e2e: attestation pass, tampered cmdline fails, sysext merged | rows 4, 12, 13, 14 merged | ~70k | PR link, PCR values |
@@ -66,13 +81,18 @@ Order: (7 ∥ 8 ∥ 9) -> 10a -> 10b -> 11.
 
 Order: (12 ∥ 12b ∥ 13 ∥ 14) -> 13b -> 15 -> (16 ∥ 17).
 
-## Wave 4: CI and docs
+## Wave 4: CI, docs, transient units, publishing
 
 | # | Deliverable | Inputs | Est. | Returns |
 |---|---|---|---|---|
-| 18 | GitHub Actions: unit/lint, image build in an archlinux container with caches and artifacts, KVM e2e job, nightly full run; bounded waits | repo, Makefile targets | ~60k | workflow run links |
-| 19 | README as design doc (sibling structure), `docs/development.md` local loops, `vm-manager.service` unit and install guide | all merged work | ~40k | PR link |
+| 18 | GitHub Actions: unit/lint with the `e2e` tag compiled, image build in an archlinux container with caches and artifacts, KVM e2e job, nightly full run; bounded waits | repo, Makefile targets | ~60k | workflow run links |
+| 19 | README as the design doc (sibling structure), `docs/development.md` refreshed to `main`, `deploy/systemd/vm-manager.service` + sysusers and `docs/install.md`, design.md and this plan brought up to date | all merged work, the e2e numbers above | ~90k | PR link |
+| 20 | Each VM as a transient systemd unit (`systemd-run` scope or service per VM with QEMU and swtpm), vm-manager re-dials the QMP socket and the notify stream on startup, `Load` reattaches instead of marking `stopped`; e2e: VMs survive a `vm-manager` restart | `internal/vm` invariants (`doc.go`), `internal/runtime/proc` | ~90k | PR link, restart e2e output |
+| 21 | Multi-version publishing: `images/scripts/publish-sysupdate` accumulates `kubernetes_<kv>.raw` entries in one signed `SHA256SUMS`; the catalog and `get_image` list every version; e2e: two VMs on two Kubernetes versions from one image directory | images/README.md "Kubernetes sysext", `internal/images` | ~60k | PR link |
+
+Order: (18 ∥ 19 ∥ 20 ∥ 21); 20 and 21 touch different packages than 19 (docs only).
 
 Follow-ups outside the prototype: CAPI infrastructure provider / cluster-manager glue,
-agent-platform wiring (muster MCPServer CR pointing at the host), tap/bridge network
-backend, host-side pre-install fast path, EK-certified attestation keys, secure boot.
+agent-platform wiring (muster MCPServer CR pointing at the host), a predicted PCR 12,
+tap/bridge network backend, host-side pre-install fast path, EK-certified attestation
+keys, secure boot, multi control plane endpoint (kube-vip).
