@@ -986,13 +986,25 @@ func sshServer(t *testing.T, authorized string, hostKey ssh.Signer, run func(cmd
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = ln.Close() }()
+		// Close the listener only once the connection has been accepted:
+		// closing it while the dial still sits in the backlog resets that
+		// connection and the client's handshake fails at random.
+		accepted := make(chan struct{})
 		go func() {
-			if c, err := ln.Accept(); err == nil {
+			c, err := ln.Accept()
+			close(accepted)
+			if err == nil {
 				serve(c)
 			}
 		}()
-		return net.Dial("tcp", ln.Addr().String())
+		conn, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			_ = ln.Close()
+			return nil, err
+		}
+		<-accepted
+		_ = ln.Close()
+		return conn, nil
 	}
 }
 
