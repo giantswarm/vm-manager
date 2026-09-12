@@ -468,13 +468,18 @@ func (s *Service) run(e *entry, p *process) {
 	if p.phase == qemu.PhaseBoot {
 		timeout = s.opts.BootTimeout
 	}
-	timer := s.clock.After(timeout)
+	timer := s.clock.NewTimer(timeout)
+	due := timer.C()
 	for {
 		select {
 		case <-s.ctx.Done():
 			// Close is detaching: the process lives on, unsupervised here.
+			timer.Stop()
 			return
 		case exit := <-p.wait:
+			// Stopped before onExit, which may hand over to the next
+			// phase's supervisor: only that one's timer is armed then.
+			timer.Stop()
 			s.onExit(e, p, exit, timeout)
 			return
 		case n, ok := <-p.notify:
@@ -483,8 +488,8 @@ func (s *Service) run(e *entry, p *process) {
 				continue
 			}
 			s.onNotify(e, n)
-		case <-timer:
-			timer = nil
+		case <-due:
+			due = nil
 			s.onTimeout(e, p, timeout)
 		}
 	}
@@ -827,7 +832,8 @@ func (s *Service) waitFor(ctx context.Context, e *entry, w WaitFor) (*VM, error)
 	if w != WaitInstalled {
 		timeout += s.opts.BootTimeout
 	}
-	deadline := s.clock.After(timeout)
+	deadline := s.clock.NewTimer(timeout)
+	defer deadline.Stop()
 	for {
 		s.mu.Lock()
 		rec := e.rec.clone()
@@ -838,7 +844,7 @@ func (s *Service) waitFor(ctx context.Context, e *entry, w WaitFor) (*VM, error)
 		}
 		select {
 		case <-ch:
-		case <-deadline:
+		case <-deadline.C():
 			return rec, fmt.Errorf("%w: vm %s did not reach %s within %s (state %s)", ErrTimeout, rec.ID, w, timeout, rec.State)
 		case <-ctx.Done():
 			return rec, ctx.Err()
