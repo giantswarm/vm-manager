@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/imds"
 )
 
@@ -67,6 +68,40 @@ func (s *Service) StoreReport(ctx context.Context, vmID string, report json.RawM
 	return nil
 }
 
+// PolicyFor implements attest.PolicyProvider: the policy of the image the
+// VM was created from. Errors wrap attest.ErrNoPolicy when the image or its
+// policy is missing or invalid, apierr.ErrNotFound for an unknown VM.
+func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, error) {
+	v, err := s.Get(vmID)
+	if err != nil {
+		return attest.Policy{}, err
+	}
+	img, err := s.opts.Images.Get(v.Image)
+	if err != nil {
+		return attest.Policy{}, fmt.Errorf("%w: image %s of vm %s: %v", attest.ErrNoPolicy, v.Image, vmID, err)
+	}
+	if img.Policy == nil {
+		return attest.Policy{}, fmt.Errorf("%w: image %s has no policy.json", attest.ErrNoPolicy, img.Ref())
+	}
+	p, err := attest.ParsePolicy(img.Policy)
+	if err != nil {
+		return attest.Policy{}, fmt.Errorf("%w: image %s: %v", attest.ErrNoPolicy, img.Ref(), err)
+	}
+	return p, nil
+}
+
+// ResultSource is implemented by attestors that keep more than the verdict
+// of a quote (attest.Verifier); the record copies the details.
+type ResultSource interface {
+	Result(vmID string, stage imds.Stage) (attest.Result, bool)
+}
+
+// Forgetter is implemented by attestors that hold per-VM state
+// (attest.Verifier: the pinned key, verdicts, nonces); Delete calls it.
+type Forgetter interface {
+	Forget(vmID string)
+}
+
 // recordingAttestor wraps the configured Attestor and writes its verdicts
 // into the VM record: the first nonce moves a booting VM to attesting, a
 // verified initrd quote releases user-data (imds.ReleasesUserData). The
@@ -90,7 +125,13 @@ func (a recordingAttestor) SubmitQuote(ctx context.Context, vmID string, req imd
 	if err != nil {
 		return res, err
 	}
-	a.s.recordQuote(vmID, req.Stage, res)
+	q := &Quote{Verified: res.Verified, Message: res.Message, At: a.s.clock.Now()}
+	if src, ok := a.inner.(ResultSource); ok {
+		if r, ok := src.Result(vmID, req.Stage); ok {
+			q.AKFingerprint, q.PCRs, q.Learned = r.AKFingerprint, r.PCRs, r.Learned
+		}
+	}
+	a.s.recordQuote(vmID, req.Stage, q)
 	return res, nil
 }
 
@@ -112,26 +153,25 @@ func (s *Service) onNonce(vmID string) {
 }
 
 // recordQuote stores the verdict and releases user-data when it applies.
-func (s *Service) recordQuote(vmID string, stage imds.Stage, res imds.QuoteResult) {
+func (s *Service) recordQuote(vmID string, stage imds.Stage, q *Quote) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, err := s.lookup(vmID)
 	if err != nil {
 		return
 	}
-	q := &Quote{Verified: res.Verified, Message: res.Message, At: s.clock.Now()}
 	switch stage {
 	case imds.StageInitrd:
 		e.rec.Attestation.Initrd = q
 	case imds.StageReady:
 		e.rec.Attestation.Ready = q
 	}
-	if imds.ReleasesUserData(stage, res.Verified) {
+	if imds.ReleasesUserData(stage, q.Verified) {
 		e.rec.Attestation.UserDataReleased = true
 	}
 	s.save(e)
 	s.broadcastLocked()
-	s.log.Info("attestation quote", "id", vmID, "stage", stage, "verified", res.Verified, "userDataReleased", e.rec.Attestation.UserDataReleased)
+	s.log.Info("attestation quote", "id", vmID, "stage", stage, "verified", q.Verified, "ak", q.AKFingerprint, "userDataReleased", e.rec.Attestation.UserDataReleased)
 }
 
 // IMDSDeps is the imds.Handler wiring of this service: resolver, recording

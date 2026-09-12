@@ -17,8 +17,10 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/apierr"
+	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/imds"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
@@ -42,6 +44,16 @@ const (
 // every VM gets its graceful stop, then the escalation must finish too.
 const closeGrace = 10 * time.Second
 
+// Values of --attestation.
+const (
+	// attestationNoop accepts every quote that echoes a nonce; nothing about
+	// the TPM is checked and user-data gating is not enforced.
+	attestationNoop = "noop"
+	// attestationVerify verifies quotes against the image policy
+	// (internal/attest).
+	attestationVerify = "verify"
+)
+
 type serveOptions struct {
 	listen  string
 	mcpPath string
@@ -56,6 +68,8 @@ type serveOptions struct {
 	ovmfCode       string
 	ovmfVars       string
 	notifyPort     int
+	attestation    string
+	learnGolden    bool
 
 	metricsEnabled          bool
 	metricsGuestSeriesLimit int
@@ -102,6 +116,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.IntVar(&o.notifyPort, "notify-port", envInt("VM_MANAGER_NOTIFY_PORT", 0), "vsock port guests send sd_notify messages (READY=1, STATUS=) to; 0 lets the kernel pick one (VM_MANAGER_NOTIFY_PORT)")
 	f.BoolVar(&o.metricsEnabled, "metrics-enabled", envBool("VM_MANAGER_METRICS_ENABLED", true), "Serve the Prometheus exposition at GET /metrics, outside the OAuth guard like /healthz: per-VM host metrics and the guests' systemd-report families (VM_MANAGER_METRICS_ENABLED)")
 	f.IntVar(&o.metricsGuestSeriesLimit, "metrics-guest-series-limit", envInt("VM_MANAGER_METRICS_GUEST_SERIES_LIMIT", metrics.DefaultMaxGuestSeries), "Series kept per VM from one systemd-report upload; the rest are counted in vm_guest_report_series_dropped_total (VM_MANAGER_METRICS_GUEST_SERIES_LIMIT)")
+	f.StringVar(&o.attestation, "attestation", envOr("VM_MANAGER_ATTESTATION", attestationNoop), "How guest TPM quotes are judged: verify checks signature, nonce, PCR digest, PCR 11 against the image's policy.json and PCRs 0-7 (13 at ready) against its golden values, pinning the attestation key per VM; noop accepts any quote with a valid nonce and does not enforce user-data gating (VM_MANAGER_ATTESTATION)")
+	f.BoolVar(&o.learnGolden, "attestation-learn-golden", envBool("VM_MANAGER_ATTESTATION_LEARN_GOLDEN", false), "With --attestation=verify, accept PCRs 0-7 that have no golden value in the image policy and record the observed values on the VM's attestation for `vm-manager image golden`; bring-up only (VM_MANAGER_ATTESTATION_LEARN_GOLDEN)")
 	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("VM_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API, validated against the platform IdP (mcp-oauth); the caller's identity travels with every request (VM_MANAGER_OAUTH_ENABLED)")
 	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("VM_MANAGER_OAUTH_BASE_URL", ""), "Public base URL of this server: the issuer of its OAuth metadata, https or loopback http (VM_MANAGER_OAUTH_BASE_URL)")
 	f.StringVar(&o.oauthProvider, "oauth-provider", envOr("VM_MANAGER_OAUTH_PROVIDER", server.ProviderDex), "Identity provider: dex or google (VM_MANAGER_OAUTH_PROVIDER)")
@@ -151,6 +167,15 @@ func (o *serveOptions) complete() error {
 	}
 	if o.metricsGuestSeriesLimit < 1 {
 		return fmt.Errorf("--metrics-guest-series-limit: %d must be at least 1", o.metricsGuestSeriesLimit)
+	}
+	if o.attestation == "" {
+		o.attestation = attestationNoop
+	}
+	if o.attestation != attestationNoop && o.attestation != attestationVerify {
+		return fmt.Errorf("--attestation: %q is not %s or %s", o.attestation, attestationNoop, attestationVerify)
+	}
+	if o.learnGolden && o.attestation != attestationVerify {
+		return fmt.Errorf("--attestation-learn-golden needs --attestation=%s", attestationVerify)
 	}
 	for _, dir := range []string{o.stateDir, o.imageDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -206,7 +231,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return errors.Join(err, c.close(log))
 	}
 	log.Info("vm-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath,
-		"stateDir", o.stateDir, "imageDir", o.imageDir, "oauth", o.oauthEnabled, "metrics", o.metricsEnabled)
+		"stateDir", o.stateDir, "imageDir", o.imageDir, "oauth", o.oauthEnabled, "metrics", o.metricsEnabled, "attestation", o.attestation)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -263,6 +288,10 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 		log.Info("image catalog loaded", "imageDir", o.imageDir, "images", n)
 	}
 
+	attestor, err := c.attestor(o, log)
+	if err != nil {
+		return nil, err
+	}
 	c.vm, err = vm.New(vm.Options{
 		StateDir:         o.stateDir,
 		Images:           c.images,
@@ -271,6 +300,7 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 		Runtime:          vm.QEMURuntime(qemu.New(qemu.Options{Logger: log, OVMFVarsTemplate: o.ovmfVars})),
 		Networks:         vm.Networks(c.networks),
 		Notify:           notifier,
+		Attestor:         attestor,
 		OVMFCode:         o.ovmfCode,
 		OVMFVarsTemplate: o.ovmfVars,
 		InstallTimeout:   o.installTimeout,
@@ -289,6 +319,27 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 		return nil, err
 	}
 	return c, nil
+}
+
+// attestor builds the imds.Attestor for --attestation. The verifier reads
+// each VM's image policy from the VM service, which is built after it, so
+// the provider resolves c.vm at call time (quotes only arrive once a VM
+// boots, long after both exist).
+func (c *components) attestor(o *serveOptions, log *slog.Logger) (imds.Attestor, error) {
+	if o.attestation != attestationVerify {
+		log.Warn("attestation=noop: guest quotes are not verified and user-data gating is not enforced; run with --attestation=verify")
+		return &imds.NoopAttestor{}, nil
+	}
+	if o.learnGolden {
+		log.Warn("attestation-learn-golden: PCRs 0-7 without a golden value are accepted and recorded; disable once `vm-manager image golden` ran")
+	}
+	return attest.New(attest.Options{
+		Policies: attest.PolicyProviderFunc(func(ctx context.Context, vmID string) (attest.Policy, error) {
+			return c.vm.PolicyFor(ctx, vmID)
+		}),
+		LearnGolden: o.learnGolden,
+		Logger:      log,
+	})
 }
 
 // ensureDefaultNetwork creates the default network unless the state dir

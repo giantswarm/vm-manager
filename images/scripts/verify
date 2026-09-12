@@ -142,7 +142,8 @@ GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$key
 (cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
 ok "sysupdate/base: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifacts"
 
-# 8. policy.json
+# 8. policy.json. The golden PCR values `vm-manager image golden` recorded
+#    into an existing policy.json for this image version survive a re-run.
 python3 - "$policy" "$id" "$version" "$roothash" "$tmp/pcr11.json" "$tmp/partitions.json" "$uki" <<'EOF'
 import json, os, sys
 policy, image_id, version, roothash, pcr11, partitions, uki = sys.argv[1:]
@@ -155,6 +156,13 @@ out = {
     "partitions": parts,
     "pcr11": {e["phase"]: e["hash"] for e in json.load(open(pcr11))["sha256"]},
 }
+try:
+    prev = json.load(open(policy))
+except (OSError, ValueError):
+    prev = {}
+if prev.get("image_id") == image_id and prev.get("image_version") == version and isinstance(prev.get("golden"), dict):
+    out["golden"] = prev["golden"]
+    print("verify: kept golden PCR values from the previous policy.json")
 json.dump(out, open(policy, "w"), indent=2)
 open(policy, "a").write("\n")
 print(f"verify: wrote {policy}")

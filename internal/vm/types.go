@@ -112,11 +112,18 @@ type Spec struct {
 	WaitFor WaitFor `json:"-"`
 }
 
-// Quote is the recorded outcome of one attestation stage.
+// Quote is the recorded outcome of one attestation stage. AKFingerprint,
+// PCRs and Learned are filled when the configured Attestor is the verifier
+// (internal/attest): the sha256 fingerprint of the key that signed the
+// quote, the quoted sha256 PCR values by index, and the PCRs accepted
+// without a golden value in the image policy.
 type Quote struct {
-	Verified bool      `json:"verified"`
-	Message  string    `json:"message,omitempty"`
-	At       time.Time `json:"at"`
+	Verified      bool           `json:"verified"`
+	Message       string         `json:"message,omitempty"`
+	At            time.Time      `json:"at"`
+	AKFingerprint string         `json:"akFingerprint,omitempty"`
+	PCRs          map[int]string `json:"pcrs,omitempty"`
+	Learned       []int          `json:"learned,omitempty"`
 }
 
 // Attestation summarizes the current boot's attestation; it is reset on every
