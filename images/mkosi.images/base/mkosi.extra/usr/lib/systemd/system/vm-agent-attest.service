@@ -1,0 +1,35 @@
+# Ready stage of vm-manager's attestation (docs/design.md "Boot flow" step 7):
+# `vm-agent attest --stage=ready` quotes PCRs 0-7, 11 and 13 once the system
+# is up and posts the quote for get_vm_attestation. PCR 11 then carries the
+# full phase path enter-initrd:leave-initrd:sysinit:ready (policy.json pcr11),
+# hence After=systemd-pcrphase.service; PCR 13 carries the Kubernetes sysext
+# measurement of vm-kubernetes.service (policy.json pcr13.<version>), hence
+# After= it. Before=multi-user.target: the service manager's READY=1 to
+# vm-manager (wait_for ready) follows the quote.
+#
+# Exit codes of the agent: 0 verified; 2 rejected by the verifier (reason
+# printed); 1 any other error. Both fail this unit, visibly (systemctl
+# --failed, journal, console), but nothing depends on it: the initrd stage
+# already decided about user-data, the ready quote is a record. No OnFailure=.
+[Unit]
+Description=Attest the running system to vm-manager (TPM quote incl. PCR 13)
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/images/README.md
+# Same gates as vm-kubernetes.service and the initrd stage: no installer boot,
+# no boot with systemd.imds=no, only a VM vm-manager started (SMBIOS vendor).
+ConditionCredential=!vm.install-target
+ConditionKernelCommandLine=!systemd.imds=no
+ConditionFirmware=smbios-field(sys_vendor = GiantSwarm)
+Wants=network-online.target
+After=network-online.target systemd-imds-import.service systemd-tpm2-setup.service
+After=vm-kubernetes.service systemd-pcrphase.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+ExecStart=/usr/bin/vm-agent attest --stage=ready --timeout=90s
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

@@ -159,6 +159,32 @@ done
 ! /usr/bin/grep -q 'ignition.firstboot' "$tmp/ukify.txt" || fail "UKI cmdline must not carry ignition.firstboot (vm-manager adds it on the first installed boot only)"
 ok "initrd: ignition $("$tmp/initrd/usr/bin/ignition" --version 2>/dev/null | awk '{print $2}') with fetch/disks/mount/files units, libraries and cmdline present"
 
+# 6c. Attestation agent (make agent, static) in the initrd and the root:
+# usr/bin/vm-agent, the initrd-stage unit wanted by initrd.target and ordered
+# before ignition-fetch.service (its drop-in), the ready-stage unit enabled
+# in the root by the preset, and the same binary in both (the root erofs is
+# not extracted file by file: dump.erofs reports the inode size).
+for f in usr/bin/vm-agent usr/lib/systemd/system/vm-agent-attest.service \
+         usr/lib/systemd/system/initrd.target.wants/vm-agent-attest.service \
+         usr/lib/systemd/system/ignition-fetch.service.d/10-vm-agent-attest.conf \
+         usr/lib/systemd/system/initrd.target.wants/systemd-pcrphase-initrd.service; do
+        /usr/bin/grep -qx "$f" "$tmp/initrd.lst" || fail "initrd lacks $f"
+done
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/bin/vm-agent usr/lib/systemd/system/vm-agent-attest.service 'usr/lib/systemd/system/ignition-fetch.service.d/*' 2>/dev/null) || true
+[[ -x "$tmp/initrd/usr/bin/vm-agent" ]] || fail "could not extract usr/bin/vm-agent from the initrd"
+file "$tmp/initrd/usr/bin/vm-agent" | /usr/bin/grep -q 'statically linked' || fail "initrd usr/bin/vm-agent is not statically linked"
+/usr/bin/grep -q '^ExecStart=/usr/bin/vm-agent attest --stage=initrd' "$tmp/initrd/usr/lib/systemd/system/vm-agent-attest.service" || fail "initrd vm-agent-attest.service does not run the initrd stage"
+/usr/bin/grep -q '^Before=.*ignition-fetch.service' "$tmp/initrd/usr/lib/systemd/system/vm-agent-attest.service" || fail "initrd vm-agent-attest.service is not Before=ignition-fetch.service"
+/usr/bin/grep -q '^After=.*systemd-pcrphase-initrd.service' "$tmp/initrd/usr/lib/systemd/system/vm-agent-attest.service" || fail "initrd vm-agent-attest.service is not After=systemd-pcrphase-initrd.service (PCR 11 must carry enter-initrd)"
+/usr/bin/grep -q '^After=vm-agent-attest.service' "$tmp/initrd/usr/lib/systemd/system/ignition-fetch.service.d/10-vm-agent-attest.conf" || fail "ignition-fetch.service drop-in does not order after vm-agent-attest.service"
+[[ "$(is_enabled vm-agent-attest.service)" == enabled ]] || fail "vm-agent-attest.service (ready stage) is not enabled in the root"
+/usr/bin/grep -q '^ExecStart=/usr/bin/vm-agent attest --stage=ready' "$tmp/root/usr/lib/systemd/system/vm-agent-attest.service" || fail "root vm-agent-attest.service does not run the ready stage"
+/usr/bin/grep -q '^After=.*systemd-pcrphase.service' "$tmp/root/usr/lib/systemd/system/vm-agent-attest.service" || fail "root vm-agent-attest.service is not After=systemd-pcrphase.service (PCR 11 must carry ready)"
+agent_size="$(stat -c %s "$tmp/initrd/usr/bin/vm-agent")"
+root_agent_size="$(dump.erofs --path=/usr/bin/vm-agent "$rootfs" 2>/dev/null | awk '/^Size:/ {print $2}')"
+[[ "$root_agent_size" == "$agent_size" ]] || fail "root /usr/bin/vm-agent size ${root_agent_size:-missing} differs from the initrd's $agent_size"
+ok "vm-agent $("$tmp/initrd/usr/bin/vm-agent" version 2>/dev/null | awk '{print $3}') (static, $agent_size bytes) in initrd and root; attest units wired (initrd: initrd.target, before ignition-fetch; root: enabled)"
+
 # 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
 #    --keyring file it opens (leaving import-pubring.pgp~ behind), which would
 #    make the next build bake a pubring that differs from the one in this
