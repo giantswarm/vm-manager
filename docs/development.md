@@ -24,9 +24,10 @@ changed agent changes the initrd and with it PCR 11.
 `make e2e` runs seven tests sequentially on the host's KVM against `images/build`
 (`VM_MANAGER_E2E_IMAGE_DIR` points elsewhere); the whole suite takes about 6 min on the
 development host and `go test` gets a 45 m ceiling. A host without `/dev/kvm`,
-`/dev/vhost-vsock`, `qemu-system-x86_64`, `swtpm`, OVMF, `sfdisk`, `ssh` with
-`systemd-ssh-proxy` or the artifacts skips with a message naming what is missing
-(`e2e/doc.go`). Every test prints its timings as `<name>_seconds=` lines; the numbers
+`/dev/vhost-vsock`, `qemu-system-x86_64`, `swtpm` 0.8+, OVMF (Arch `edk2-ovmf` or Ubuntu
+`ovmf`), `sfdisk` or the artifacts skips with a message naming what is missing
+(`e2e/doc.go`); ssh into the guests is dialed over AF_VSOCK from Go, so no ssh client or
+`systemd-ssh-proxy` is needed. Every test prints its timings as `<name>_seconds=` lines; the numbers
 below are the last full run on the development host.
 
 | Test | Drives | Proves | Measured |
