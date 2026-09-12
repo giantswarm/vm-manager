@@ -335,6 +335,21 @@ Every flag has an environment fallback named in `vm-manager serve --help`; flags
 | `--enable-oauth`, `--oauth-base-url`, `--oauth-provider`, `--oauth-trusted-audiences`, `--sso-allow-private-ips`, `--allow-public-client-registration` | `VM_MANAGER_OAUTH_ENABLED`, `VM_MANAGER_OAUTH_BASE_URL`, `VM_MANAGER_OAUTH_PROVIDER`, `OAUTH_TRUSTED_AUDIENCES`, `SSO_ALLOW_PRIVATE_IPS`, `VM_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION` | off, —, `dex`, —, `false`, `false` | see [Identity](#identity) |
 | `--dex-issuer-url`, `--dex-client-id`, `--dex-client-secret`, `--dex-ca-file`, `--allow-private-oauth-urls` | `DEX_ISSUER_URL`, `DEX_CLIENT_ID`, `DEX_CLIENT_SECRET`, `DEX_CA_FILE`, `VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS` | — | the Dex provider |
 | `--google-client-id`, `--google-client-secret` | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | — | the Google provider |
+| `--launcher` | `VM_MANAGER_LAUNCHER` | `auto` | `systemd` (transient services under the user or system manager), `process` (plain children), or `auto` |
+| `--detach-vms-on-exit` | `VM_MANAGER_DETACH_VMS_ON_EXIT` | `true` | with the systemd launcher, leave VMs running on shutdown and reattach on the next start |
+
+VMs survive vm-manager restarts. QEMU and swtpm run as transient systemd
+services (`vm-manager-<id>-qemu`, `vm-manager-<id>-swtpm`, grouped in
+`vm-manager.slice`) under the user's service manager when vm-manager is
+unprivileged and under the system manager when it is root; on shutdown the
+VMs are left running (`--detach-vms-on-exit`, default on) and the next
+`serve` on the same `--state-dir` reattaches to them, exit status included.
+The state dir is the contract: `vms/<id>/vm.json` names the units and PIDs,
+and the sockets, console and logs below it are where the running processes
+expect them, so do not move it while VMs run. vm-manager's own systemd unit
+needs no cgroup delegation; without a reachable service manager (`--launcher
+process`, or no `$XDG_RUNTIME_DIR/systemd` for an unprivileged run) the VMs
+are plain child processes and end with vm-manager, which logs a warning.
 
 The state directory holds `networks.json`, `networks/<name>/qemu.sock`, one `vms/<id>/`
 per VM (`vm.json`, `console.log`, `user-data`, `ssh_key` and the pinned `ssh_host_key`,

@@ -22,16 +22,22 @@ ExecStart=/usr/local/bin/vm-manager serve \
     --image-dir=/var/lib/vm-manager/images \
     --listen=127.0.0.1:8080
 
-# Restarts. vm-manager does not reattach to QEMU across its own restarts:
-# every VM is powered down gracefully when the service stops (ACPI, then
-# SIGTERM/SIGKILL after --stop-timeout, 30 s by default) and comes back
-# `stopped` after the restart; start_vm boots it again. Running VMs as
-# transient units is the planned fix (docs/plan.md, wave 4).
+# Restarts. VMs survive them: QEMU and swtpm run as transient units of the
+# vm-manager user's own service manager (vm-manager-<id>-qemu/-swtpm in
+# vm-manager.slice under user@<uid>.service), not in this unit's cgroup.
+# On stop vm-manager detaches (--detach-vms-on-exit, default) and the next
+# start reattaches through the records in the state dir. That user manager
+# exists only with lingering enabled: `loginctl enable-linger vm-manager`
+# (docs/install.md). Without it vm-manager falls back to plain child
+# processes, logs a warning, and then every VM is powered down when the
+# service stops (ACPI, then SIGTERM/SIGKILL after --stop-timeout) and comes
+# back `stopped`; start_vm boots it again.
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=90s
-# SIGTERM to vm-manager only: it stops its QEMU and swtpm children itself and
-# they must outlive the signal long enough for the guests to power down.
+# SIGTERM to vm-manager only. Matters for the child-process fallback: the
+# children must outlive the signal long enough for the guests to power
+# down. With the launcher the VMs are not in this cgroup at all.
 KillMode=mixed
 
 # Directories. StateDirectory= is the --state-dir above (VM records, disks
@@ -44,11 +50,17 @@ RuntimeDirectoryMode=0750
 UMask=0027
 LimitNOFILE=65536
 
-# Hardening. QEMU and swtpm run as children of this service and need the
-# three devices below, AF_VSOCK for the guests' READY=1, unix sockets under
-# the state directory, and to connect to the systemd storage provider's
-# socket under /run/systemd/io.systemd.StorageProvider/ (a connect() to a
-# unix socket works on the read-only view ProtectSystem=strict leaves).
+# Hardening. vm-manager itself needs AF_VSOCK for the guests' READY=1,
+# AF_UNIX for its sockets under the state directory, systemd-run/systemctl
+# against the user manager at /run/user/<uid> (reachable: ProtectHome= does
+# not cover /run/user, and the launcher sets XDG_RUNTIME_DIR itself), and to
+# connect to the systemd storage provider's socket under
+# /run/systemd/io.systemd.StorageProvider/ (a connect() to a unix socket
+# works on the read-only view ProtectSystem=strict leaves). QEMU and swtpm
+# run outside this sandbox under the user manager, so they get /dev/kvm and
+# /dev/vhost-vsock through the vm-manager user's kvm group membership
+# (sysusers.d); the DeviceAllow= lines below serve the child-process
+# fallback only.
 # Not set on purpose: MemoryDenyWriteExecute= (QEMU), ProcSubset=pid
 # (get_host reads /proc/meminfo, the metrics read the QEMU processes),
 # PrivateDevices= and PrivateNetwork= (the devices and the vsock transport).

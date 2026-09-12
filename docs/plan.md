@@ -30,9 +30,12 @@ Wave 4 is scheduled below (rows 18-21). Follow-ups recorded by reviews and agent
 - `images/scripts/publish-sysupdate` keeps only the last published Kubernetes version;
   multi-version fleets need it to accumulate versions (row 21).
 - CI does not compile the `e2e` build tag (`go vet -tags e2e ./e2e/` broke twice unnoticed);
-  add it to `make test` or the workflow (row 18).
-- VMs still die with vm-manager; transient systemd units are the fix (row 20). The system
-  service unit of row 19 documents the consequence (stopping the service stops the VMs).
+  add it to `make test` or the workflow (wave 4, row 18).
+- ~~VMs still die with vm-manager; transient systemd units are the planned fix.~~ Done:
+  QEMU and swtpm are transient systemd services, `serve` detaches on exit and reattaches
+  on start (`e2e/restart_test.go`). Open: a system-service deployment that runs vm-manager
+  as an unprivileged user needs a user manager for that user (`loginctl enable-linger`),
+  else the launcher falls back to child processes.
 - e2e `go test` timeout is 45 m for seven sequential tests; parallelise or split when it grows.
 - PCR 12 (stub measurements of the extra command line and credentials) is neither quoted
   nor predicted; a predicted value would put `ignition.firstboot` under the policy.

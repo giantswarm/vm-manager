@@ -6,6 +6,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/network"
+	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/storage"
 	"github.com/giantswarm/vm-manager/internal/tpm"
@@ -38,6 +39,14 @@ func (q qemuRuntime) Start(ctx context.Context, spec qemu.Spec) (Instance, error
 	return inst, nil
 }
 
+func (q qemuRuntime) Attach(ctx context.Context, spec qemu.Spec, h proc.Handle) (Instance, error) {
+	inst, err := q.r.Attach(ctx, spec, h)
+	if err != nil {
+		return nil, err
+	}
+	return inst, nil
+}
+
 // TPM adapts tpm.Manager.
 func TPM(m *tpm.Manager) TPMManager { return tpmManager{m} }
 
@@ -45,6 +54,14 @@ type tpmManager struct{ m *tpm.Manager }
 
 func (t tpmManager) Start(ctx context.Context, cfg tpm.Config) (TPMInstance, error) {
 	inst, err := t.m.Start(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return inst, nil
+}
+
+func (t tpmManager) Attach(ctx context.Context, cfg tpm.Config, h proc.Handle) (TPMInstance, error) {
+	inst, err := t.m.Attach(ctx, cfg, h)
 	if err != nil {
 		return nil, err
 	}

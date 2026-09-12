@@ -59,9 +59,9 @@ Packages (sibling layering, see [development.md](development.md) "Layout"):
   attesting -> ready` with `running` (no `READY=1` within the boot timeout), `stopping`,
   `stopped`, `failed` and `deleting`, persisted as one JSON file per VM under the state dir
   (`$XDG_STATE_HOME/vm-manager`, `~/.local/state/vm-manager` or `/var/lib/vm-manager`).
-  Implemented as child processes: a vm-manager restart stops the VMs and marks them
-  `stopped`; running each VM as a transient systemd unit so that restarts do not kill VMs
-  (QEMU already reconnects its netdev with `reconnect-ms`) is wave 4, see the open point.
+  Each VM's QEMU and swtpm run as transient systemd services (`internal/runtime/proc`) so
+  vm-manager restarts do not kill VMs: `vm.json` records their unit names and PIDs, `Load`
+  reattaches, and QEMU reconnects its netdev with `reconnect-ms`.
 - `internal/runtime/qemu`: builds the QEMU command for phase A (installer) and phase B
   (installed), seeds the per-VM OVMF vars copy, talks QMP (status, powerdown, events),
   captures the serial console to a file, listens on AF_VSOCK for `READY=1` from the guest
@@ -284,11 +284,20 @@ closed it; the two without it are open and scheduled in [plan.md](plan.md).
   command line is no tamper case for it; the agent does not quote PCR 12 yet. A
   predicted PCR 12 (the stub's measurements are documented and vm-manager knows what
   it passed) would close this. Follow-up, not scheduled.
-- **VM processes and vm-manager restarts (open).** `main` runs QEMU and swtpm as child
-  processes; a vm-manager restart stops the VMs and marks them `stopped`, and the
-  system service unit inherits that (stopping the service stops the VMs). Running each
-  VM as a transient systemd unit and re-dialing its QMP socket on startup is wave 4,
-  row 20 of [plan.md](plan.md).
+- **VM processes and vm-manager restarts.** Resolved: QEMU and swtpm run as transient
+  systemd *services* (`systemd-run --service-type=exec -p RemainAfterExit=yes`, units
+  `vm-manager-<id>-qemu` and `-swtpm` in `vm-manager.slice`), started under the user
+  manager when vm-manager is unprivileged and the system manager when it is root
+  (`internal/runtime/proc.SystemdExec`). systemd is their parent, so a vm-manager exit
+  leaves them running; `--detach-vms-on-exit` (default) makes `Close` hand them over and
+  `Load` reattaches through the handles in `vm.json` (`processes`): volume, lease, swtpm,
+  QEMU with QMP, notify subscription, supervisor. The exit status survives too:
+  `RemainAfterExit` keeps `ExecMainCode`/`ExecMainStatus` until the watcher (a pidfd on
+  the main process) has read them and releases the unit. `--scope` was rejected because a
+  scope's process stays a child of vm-manager, its exit status is lost to a successor and
+  its stderr pipe breaks with the parent; the service mode needs no cgroup delegation for
+  vm-manager's own unit. Without a reachable service manager the launcher falls back to
+  plain child processes and warns that VMs end with vm-manager.
 
 ## IMDS contract (Giant Swarm provider)
 

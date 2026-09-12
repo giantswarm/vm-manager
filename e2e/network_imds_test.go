@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -137,11 +138,11 @@ func TestNetworkIMDS(t *testing.T) {
 	assert.Less(t, install, apiInstallCeiling, "install phase")
 	assert.Less(t, boot, apiBootCeiling, "installed boot to READY=1")
 
-	// The server's children are the VM's qemu and swtpm; delete_vm and the
-	// shutdown must leave none of them behind.
-	children := childrenOf(t, srv.pid())
-	t.Logf("children of vm-manager serve: %v", children)
-	assert.GreaterOrEqual(t, len(children), 2, "expected qemu and swtpm as children of the server")
+	// The VM's qemu and swtpm run as transient units of the user manager,
+	// not as children of the server; the record names them. delete_vm and
+	// the shutdown must leave none of them behind.
+	children := vmProcesses(t, v)
+	t.Logf("processes of vm %s: %v (units %s, %s); children of the server: %v", v.ID, children, v.Processes.QEMU.Unit, v.Processes.TPM.Unit, childrenOf(t, srv.pid()))
 
 	g := &guest{m: m, id: v.ID}
 	g.waitSSH(ctx)
@@ -287,6 +288,11 @@ type server struct {
 	// URL is the server's base URL; REST under /api/v1, MCP under /mcp.
 	URL string
 	log string
+	// state is the --state-dir, where the VM records name their processes.
+	state string
+	// startup is how long the process took from start to /readyz, which
+	// includes the reattach of VMs left by an earlier server.
+	startup time.Duration
 	// exited is closed once Wait returned; waitErr is valid after that.
 	exited  chan struct{}
 	waitErr error
@@ -329,8 +335,9 @@ func startServer(ctx context.Context, t *testing.T, dir, imageDir string, flags 
 	}, flags...)
 	cmd := exec.Command(bin, args...) // #nosec G204 -- the binary built above
 	cmd.Stdout, cmd.Stderr = logFile, logFile
+	started := time.Now()
 	require.NoError(t, cmd.Start())
-	s := &server{t: t, cmd: cmd, URL: "http://" + addr, log: logPath, exited: make(chan struct{})}
+	s := &server{t: t, cmd: cmd, URL: "http://" + addr, log: logPath, state: filepath.Join(dir, "state"), exited: make(chan struct{})}
 	go func() {
 		s.waitErr = cmd.Wait()
 		close(s.exited)
@@ -338,6 +345,7 @@ func startServer(ctx context.Context, t *testing.T, dir, imageDir string, flags 
 	t.Cleanup(s.cleanup)
 	t.Logf("vm-manager serve pid %d on %s, log %s", cmd.Process.Pid, s.URL, logPath)
 	s.waitReady()
+	s.startup = time.Since(started)
 	return s
 }
 
@@ -380,23 +388,64 @@ func (s *server) stop() {
 	}
 }
 
-// cleanup kills a server the test left running, then whatever children it
-// had, so a failed test does not leak a VM.
+// cleanup kills a server the test left running, whatever children it had,
+// and the processes its VM records still name (the transient units a
+// failed test left behind), so a failed test does not leak a VM.
 func (s *server) cleanup() {
 	if s.t.Failed() {
 		s.t.Logf("%s", s.logTail())
 	}
 	select {
 	case <-s.exited:
-		return
 	default:
+		children := childrenOf(s.t, s.pid())
+		_ = s.cmd.Process.Kill()
+		<-s.exited
+		for pid := range children {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
 	}
-	children := childrenOf(s.t, s.pid())
-	_ = s.cmd.Process.Kill()
-	<-s.exited
-	for pid := range children {
+	for pid, comm := range recordedProcesses(s.state) {
+		s.t.Logf("killing leftover %s (pid %d)", comm, pid)
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
+}
+
+// recordedProcesses are the PIDs the VM records below stateDir name, by
+// unit, for VMs whose processes are still around.
+func recordedProcesses(stateDir string) map[int]string {
+	out := map[int]string{}
+	records, _ := filepath.Glob(filepath.Join(stateDir, "vms", "*", "vm.json"))
+	for _, path := range records {
+		data, err := os.ReadFile(path) // #nosec G304 -- the test's own state dir
+		if err != nil {
+			continue
+		}
+		var v vm.VM
+		if json.Unmarshal(data, &v) != nil || v.Processes == nil {
+			continue
+		}
+		for _, h := range []proc.Handle{v.Processes.QEMU, v.Processes.TPM} {
+			if h.PID > 0 && alive(h.PID) {
+				out[h.PID] = h.Unit
+			}
+		}
+	}
+	return out
+}
+
+// vmProcesses are the VM's qemu and swtpm as its record names them, by PID
+// with the process name; each must be running.
+func vmProcesses(t *testing.T, v vm.VM) map[int]string {
+	t.Helper()
+	require.NotNil(t, v.Processes, "a running VM records its processes")
+	out := map[int]string{}
+	for _, h := range []proc.Handle{v.Processes.QEMU, v.Processes.TPM} {
+		comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", h.PID)) // #nosec G304 -- /proc/<pid>/comm
+		require.NoError(t, err, "process %d (%s) of vm %s", h.PID, h.Unit, v.ID)
+		out[h.PID] = strings.TrimSpace(string(comm))
+	}
+	return out
 }
 
 // logTail is the end of the server log, labelled, for failure messages.

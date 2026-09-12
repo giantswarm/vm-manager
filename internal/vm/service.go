@@ -42,6 +42,7 @@ const (
 	tpmDir       = "tpm"
 	ovmfVarsFile = "ovmf_vars.fd"
 	qmpFile      = "qmp.sock"
+	qemuLogFile  = "qemu.log"
 	sshKeyFile   = "ssh_key"
 	userDataFile = "user-data"
 	reportFile   = "report.json"
@@ -94,6 +95,11 @@ type Options struct {
 	InstallTimeout time.Duration
 	BootTimeout    time.Duration
 	StopTimeout    time.Duration
+	// DetachOnClose makes Close leave the running VMs to the next
+	// vm-manager instead of stopping them: their records keep the process
+	// handles and Load reattaches. Only sound with a launcher whose
+	// processes outlive vm-manager (proc.Launcher.Persistent).
+	DetachOnClose bool
 	// Logger for lifecycle events; nil uses slog.Default().
 	Logger *slog.Logger
 	// Clock drives timeouts; nil uses SystemClock.
@@ -164,6 +170,8 @@ type Service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// lock is the state dir's flock, held until Close.
+	lock *os.File
 
 	// mu guards vms, every entry's record, imds, changed and closing.
 	mu      sync.Mutex
@@ -210,7 +218,8 @@ type imdsServer struct {
 	ln  io.Closer
 }
 
-// New returns a service; call Load before serving requests.
+// New returns a service holding the state dir's lock (ErrStateDirInUse when
+// another vm-manager serves it); call Load before serving requests.
 func New(opts Options) (*Service, error) {
 	if err := opts.defaults(); err != nil {
 		return nil, err
@@ -218,8 +227,13 @@ func New(opts Options) (*Service, error) {
 	if err := os.MkdirAll(filepath.Join(opts.StateDir, vmsDir), 0o700); err != nil {
 		return nil, fmt.Errorf("create state dir: %w", err)
 	}
+	lock, err := lockStateDir(opts.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
+		lock:    lock,
 		opts:    opts,
 		log:     opts.Logger,
 		clock:   opts.Clock,
@@ -232,8 +246,9 @@ func New(opts Options) (*Service, error) {
 }
 
 // Load restores the persisted state: networks (with their leases) and their
-// IMDS servers first, then the VM records. VMs recorded with a live process
-// are marked stopped: v1 does not reattach to QEMU across restarts.
+// IMDS servers first, then the VM records. A VM recorded with a live
+// process is reattached (reattach.go) when its processes still run under
+// their launcher, and marked stopped with the reason otherwise.
 func (s *Service) Load(ctx context.Context) error {
 	states, err := s.loadNetworks()
 	if err != nil {
@@ -265,11 +280,32 @@ func (s *Service) Load(ctx context.Context) error {
 		}
 		s.mu.Lock()
 		s.vms[e.rec.ID] = e
+		s.mu.Unlock()
+		if e.rec.State.Live() {
+			s.reattachOrStop(ctx, e)
+		}
+		s.mu.Lock()
 		s.save(e)
 		s.mu.Unlock()
 	}
 	s.broadcast()
 	return nil
+}
+
+// reattachOrStop picks the processes of a VM recorded live back up, or
+// settles the record as stopped with the reason when that is not possible.
+func (s *Service) reattachOrStop(ctx context.Context, e *entry) {
+	err := s.reattach(ctx, e)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		s.log.Info("vm reattached", "id", e.rec.ID, "state", e.rec.State, "pid", e.proc.inst.PID())
+		return
+	}
+	s.log.Warn("vm not reattached", "id", e.rec.ID, "state", e.rec.State, "err", err)
+	e.rec.LastError = fmt.Sprintf("vm-manager restarted while the VM was %s and could not reattach to its QEMU (%v); start the VM again", e.rec.State, err)
+	e.rec.State = StateStopped
+	e.rec.Processes = nil
 }
 
 func (s *Service) loadEntry(id string) (*entry, error) {
@@ -284,23 +320,20 @@ func (s *Service) loadEntry(id string) (*entry, error) {
 	e.rec.Paths = s.paths(id)
 	e.userData, _ = os.ReadFile(e.rec.Paths.UserData) // #nosec G304 -- state dir file.
 	e.report, _ = os.ReadFile(e.rec.Paths.Report)     // #nosec G304 -- state dir file.
-	switch {
-	case e.rec.State.Live():
-		e.rec.LastError = fmt.Sprintf("vm-manager restarted while the VM was %s; QEMU is not reattached across restarts, start the VM again", e.rec.State)
-		e.rec.State = StateStopped
-	case e.rec.State == StateCreating, e.rec.State == StateDeleting:
+	if e.rec.State == StateCreating || e.rec.State == StateDeleting {
 		e.rec.LastError = fmt.Sprintf("vm-manager restarted while the VM was %s; delete it", e.rec.State)
 		e.rec.State = StateFailed
 	}
 	return e, nil
 }
 
-// Close stops every running VM gracefully, then the IMDS servers. VMs are
-// not left running because nothing could reattach to them afterwards. Once
-// Close has begun no process is started any more: each VM is stopped under
-// its opMu, so a start in flight (Create, Start, the install-to-boot
-// handoff) completes first and is what gets stopped, and a start that has
-// not begun sees the closing flag and refuses.
+// Close ends the service: with DetachOnClose the running VMs are left to
+// the next vm-manager (detachAll), otherwise every one is stopped
+// gracefully (stopAll); then the IMDS servers go down. Once Close has begun
+// no process is started any more: each VM is visited under its opMu, so a
+// start in flight (Create, Start, the install-to-boot handoff) completes
+// first and is what gets stopped or detached, and a start that has not
+// begun sees the closing flag and refuses.
 func (s *Service) Close(ctx context.Context) error {
 	s.mu.Lock()
 	s.closing = true
@@ -310,6 +343,31 @@ func (s *Service) Close(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
+	if s.opts.DetachOnClose {
+		s.detachAll(entries)
+	} else {
+		s.stopAll(ctx, entries)
+	}
+
+	s.mu.Lock()
+	servers := s.imds
+	s.imds = make(map[string]*imdsServer)
+	s.mu.Unlock()
+	var errs []error
+	for name, srv := range servers {
+		if err := srv.close(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("imds %s: %w", name, err))
+		}
+	}
+	if err := s.lock.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		errs = append(errs, fmt.Errorf("release state dir lock: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// stopAll stops every VM, each under its opMu, and waits for the
+// supervisors to settle the records.
+func (s *Service) stopAll(ctx context.Context, entries []*entry) {
 	var wg sync.WaitGroup
 	for _, e := range entries {
 		wg.Add(1)
@@ -326,18 +384,41 @@ func (s *Service) Close(ctx context.Context) error {
 	wg.Wait()
 	s.cancel()
 	s.wg.Wait()
+}
 
-	s.mu.Lock()
-	servers := s.imds
-	s.imds = make(map[string]*imdsServer)
-	s.mu.Unlock()
-	var errs []error
-	for name, srv := range servers {
-		if err := srv.close(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("imds %s: %w", name, err))
-		}
+// detachAll leaves the processes running for the next vm-manager: starts in
+// flight finish (their records then carry the handles), the supervisors
+// return, and each live instance is detached (QMP closed, notify
+// subscription dropped) without a signal to the guest. The records stay
+// live on disk, which is what Load reattaches from.
+func (s *Service) detachAll(entries []*entry) {
+	for _, e := range entries {
+		e.opMu.Lock()
+		e.opMu.Unlock() //nolint:staticcheck // the lock only waits for an in-flight start
 	}
-	return errors.Join(errs...)
+	s.cancel()
+	s.wg.Wait()
+	detached := 0
+	for _, e := range entries {
+		s.mu.Lock()
+		p := e.proc
+		id, cid, state := e.rec.ID, e.rec.CID, e.rec.State
+		s.mu.Unlock()
+		if p == nil {
+			continue
+		}
+		if err := p.inst.Detach(); err != nil {
+			s.log.Warn("detaching vm", "id", id, "err", err)
+		}
+		if p.phase == qemu.PhaseBoot {
+			s.opts.Notify.Unsubscribe(cid)
+		}
+		s.log.Info("vm left running", "id", id, "state", state, "pid", p.inst.PID())
+		detached++
+	}
+	if detached > 0 {
+		s.log.Info("vms keep running under their launcher; the next vm-manager reattaches", "count", detached)
+	}
 }
 
 // Get returns one VM record.
@@ -495,6 +576,7 @@ func (s *Service) paths(id string) Paths {
 		TPMState:  filepath.Join(dir, tpmDir),
 		OVMFVars:  filepath.Join(dir, ovmfVarsFile),
 		QMPSocket: filepath.Join(dir, qmpFile),
+		QEMULog:   filepath.Join(dir, qemuLogFile),
 		SSHKey:    filepath.Join(dir, sshKeyFile),
 		UserData:  filepath.Join(dir, userDataFile),
 		Report:    filepath.Join(dir, reportFile),

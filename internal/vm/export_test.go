@@ -7,6 +7,7 @@ const (
 	NetworksFile     = networksFile
 	ConsoleTailLines = consoleTailLines
 	HostKeyFile      = hostKeyFile
+	LockFile         = lockFile
 )
 
 var WriteJSON = writeJSON

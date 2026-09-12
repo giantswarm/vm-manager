@@ -11,7 +11,9 @@ import (
 
 // FakeExec is an Exec for tests: it records every Cmd and returns a
 // FakeProcess the test drives. It lives here rather than in a _test file so
-// the qemu and tpm packages share one fake.
+// the qemu and tpm packages share one fake. It is also an Attacher: Attach
+// finds a process by PID among those the fake started (the same launcher
+// after a restart) and fails with ErrGone otherwise.
 type FakeExec struct {
 	// Hook runs on every Start with the command and the process about to
 	// be returned. It creates the side effects a real process would (a
@@ -40,6 +42,21 @@ func (f *FakeExec) Start(ctx context.Context, cmd Cmd) (Process, error) {
 		}
 	}
 	return p, nil
+}
+
+// Attach implements Attacher.
+func (f *FakeExec) Attach(ctx context.Context, h Handle) (Process, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.procs {
+		if p.pid == h.PID {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: pid %d", ErrGone, h.PID)
 }
 
 // Started are the commands passed to Start, in order.
@@ -77,6 +94,10 @@ func (p *FakeProcess) Cmd() Cmd { return p.cmd }
 
 // PID implements Process.
 func (p *FakeProcess) PID() int { return p.pid }
+
+// Handle implements Process; Unit is the Cmd's Unit, as a unit launcher
+// would report it.
+func (p *FakeProcess) Handle() Handle { return Handle{Unit: p.cmd.Unit, PID: p.pid} }
 
 // Wait implements Process.
 func (p *FakeProcess) Wait() <-chan ExitStatus { return waitOn(p.done, &p.status) }

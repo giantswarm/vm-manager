@@ -9,6 +9,12 @@
 // swtpm is told to terminate when QEMU drops the control connection, so a
 // VM that exits takes its TPM with it; Stop covers the cases where QEMU
 // never connected.
+//
+// Like QEMU, swtpm is launched through a proc.Exec; with the systemd
+// launcher it is the transient unit vm-manager-<id>-swtpm and survives a
+// vm-manager restart, after which Manager.Attach picks it up again from
+// the Handle the caller persisted. Its own output goes to swtpm.log in the
+// state directory so it is not lost with the vm-manager that started it.
 package tpm
 
 import (
@@ -32,6 +38,12 @@ const DefaultBinary = "swtpm"
 // DefaultSocketName is the control socket created in the state directory
 // when Config.SocketPath is empty.
 const DefaultSocketName = "swtpm.sock"
+
+// LogName is the file in the state directory swtpm's own output goes to.
+const LogName = "swtpm.log"
+
+// UnitRole names the swtpm process in its transient unit (proc.UnitName).
+const UnitRole = "swtpm"
 
 // Defaults for Options.
 const (
@@ -100,12 +112,19 @@ func New(opts Options) *Manager {
 
 // Config is one VM's TPM.
 type Config struct {
+	// ID is the owning VM's id; it names the transient unit
+	// (vm-manager-<id>-swtpm) under a launcher that uses units.
+	ID string
 	// StateDir holds the TPM state (created 0700 if missing); it must
 	// outlive the VM.
 	StateDir string
 	// SocketPath is the control socket; empty puts DefaultSocketName in
 	// StateDir. Unix socket paths are limited to 107 bytes.
 	SocketPath string
+	// Log, when set, is the file swtpm's own output is appended to
+	// (proc.Cmd.Log; LogName in StateDir is the convention). Empty keeps
+	// the output in memory, lost with the vm-manager that started it.
+	Log string
 }
 
 // socket is the effective control socket path.
@@ -132,6 +151,7 @@ func Args(cfg Config, logLevel int) []string {
 // Instance is a running swtpm.
 type Instance struct {
 	proc   proc.Process
+	cfg    Config
 	socket string
 	stderr *proc.Tail
 	grace  time.Duration
@@ -152,17 +172,40 @@ func (m *Manager) Start(ctx context.Context, cfg Config) (*Instance, error) {
 		return nil, fmt.Errorf("stale tpm socket: %w", err)
 	}
 	stderr := proc.NewTail(0)
-	p, err := m.exec.Start(ctx, proc.Cmd{Path: m.binary, Args: Args(cfg, m.logLevel), Stdout: stderr, Stderr: stderr})
+	cmd := proc.Cmd{Path: m.binary, Args: Args(cfg, m.logLevel), Stdout: stderr, Stderr: stderr, Log: cfg.Log, Unit: proc.UnitName(cfg.ID, UnitRole)}
+	p, err := m.exec.Start(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("swtpm: %w", err)
 	}
-	inst := &Instance{proc: p, socket: socket, stderr: stderr, grace: m.stopGrace, log: m.log}
+	inst := m.instance(cfg, p, stderr)
 	if err := inst.waitSocket(ctx, m.startTimeout); err != nil {
 		_ = p.Kill()
 		return nil, err
 	}
-	m.log.Info("swtpm started", "pid", p.PID(), "socket", socket)
+	m.log.Info("swtpm started", "pid", p.PID(), "socket", socket, "unit", p.Handle().Unit)
 	return inst, nil
+}
+
+// Attach picks up the swtpm of an earlier vm-manager behind h (the launcher
+// must be a proc.Attacher, else proc.ErrNoReattach; a process that is gone
+// is proc.ErrGone). A swtpm that has already exited is returned as is: its
+// Wait delivers at once and Stop is a no-op.
+func (m *Manager) Attach(ctx context.Context, cfg Config, h proc.Handle) (*Instance, error) {
+	a, ok := m.exec.(proc.Attacher)
+	if !ok {
+		return nil, fmt.Errorf("swtpm: %w", proc.ErrNoReattach)
+	}
+	p, err := a.Attach(ctx, h)
+	if err != nil {
+		return nil, fmt.Errorf("swtpm: %w", err)
+	}
+	inst := m.instance(cfg, p, proc.NewTail(0))
+	m.log.Info("swtpm reattached", "pid", p.PID(), "socket", inst.socket, "unit", h.Unit)
+	return inst, nil
+}
+
+func (m *Manager) instance(cfg Config, p proc.Process, stderr *proc.Tail) *Instance {
+	return &Instance{proc: p, cfg: cfg, socket: cfg.socket(), stderr: stderr, grace: m.stopGrace, log: m.log}
 }
 
 // waitSocket polls for the control socket until it exists, swtpm exits, ctx
@@ -193,11 +236,20 @@ func (i *Instance) SocketPath() string { return i.socket }
 // PID is the swtpm process id.
 func (i *Instance) PID() int { return i.proc.PID() }
 
+// Handle identifies the process for Manager.Attach after a restart.
+func (i *Instance) Handle() proc.Handle { return i.proc.Handle() }
+
 // Wait delivers the exit status; see proc.Process.Wait.
 func (i *Instance) Wait() <-chan proc.ExitStatus { return i.proc.Wait() }
 
-// Stderr is the tail of what swtpm printed.
-func (i *Instance) Stderr() string { return i.stderr.String() }
+// Stderr is the tail of what swtpm printed: the end of Config.Log when the
+// output goes to a file, else what was kept in memory.
+func (i *Instance) Stderr() string {
+	if i.cfg.Log != "" {
+		return proc.TailFile(i.cfg.Log, 0)
+	}
+	return i.stderr.String()
+}
 
 // Stop ends swtpm: SIGTERM, then SIGKILL once the grace period or ctx runs
 // out. It returns nil when the process is gone.

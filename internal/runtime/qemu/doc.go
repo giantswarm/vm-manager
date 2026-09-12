@@ -24,4 +24,10 @@
 // network package prepares. Command is a pure function of the Spec, Runtime
 // adds the process lifecycle, QMP the control channel, NotifyListener the
 // READY=1 signal, and the tpm package the swtpm that must run before QEMU.
+//
+// QEMU is launched through a proc.Exec; with the systemd launcher it runs
+// as the transient unit vm-manager-<id>-qemu and outlives vm-manager.
+// Instance.Handle is what the caller persists, Runtime.Attach turns it back
+// into an Instance after a restart (process, exit status, QMP), and
+// Instance.Detach lets go of a VM that is meant to keep running.
 package qemu

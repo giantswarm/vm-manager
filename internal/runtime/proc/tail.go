@@ -1,6 +1,8 @@
 package proc
 
 import (
+	"io"
+	"os"
 	"strings"
 	"sync"
 )
@@ -45,4 +47,28 @@ func (t *Tail) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return strings.TrimSpace(string(t.buf))
+}
+
+// TailFile is the last limit bytes of the file at path (a Cmd.Log), trimmed
+// like Tail.String; limit <= 0 uses DefaultTailBytes. A missing or
+// unreadable file yields "".
+func TailFile(path string, limit int) string {
+	if limit <= 0 {
+		limit = DefaultTailBytes
+	}
+	f, err := os.Open(path) // #nosec G304 -- the caller's own log path
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	offset := max(st.Size()-int64(limit), 0)
+	data, err := io.ReadAll(io.NewSectionReader(f, offset, st.Size()-offset))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

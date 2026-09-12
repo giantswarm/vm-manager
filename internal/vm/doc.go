@@ -93,15 +93,30 @@
 //  5. images.Load(dir, log) -> Options.Images
 //  6. svc, _ := New(opts); svc.Load(ctx): restores the networks with their
 //     leases, starts one IMDS server per network (ServeIMDS) and loads the VM
-//     records. VMs recorded with a live process become stopped with a note.
-//  7. serve the API; on shutdown svc.Close(ctx) stops every VM gracefully.
+//     records. A VM recorded with a live process is reattached when its
+//     processes still run (see below); otherwise it becomes stopped with a
+//     note.
+//  7. serve the API; on shutdown svc.Close(ctx) leaves the VMs running for
+//     the next vm-manager (DetachOnClose) or stops every one gracefully.
 //
-// # Known limitations
+// # Restarts
 //
-// vm-manager does not reattach to QEMU processes across its own restarts:
-// Load marks such VMs stopped and Close stops them before exiting, because a
-// QEMU nobody supervises would collide with a later Start on the same disk.
-// The planned fix runs each VM as a transient systemd unit and re-dials its
-// QMP socket on startup. Networks are recreated from networks.json, so leases
-// and MACs survive restarts.
+// With the systemd launcher (proc.SystemdExec) QEMU and swtpm are transient
+// units that outlive vm-manager, and the record carries their handles
+// (VM.Processes). Close with DetachOnClose closes the QMP connection and
+// leaves them be; Load reattaches in reattach.go: volume, network lease,
+// swtpm, QEMU with QMP, notify subscription, supervisor. A process that
+// exited while nobody watched is settled through the same supervisor path
+// as any exit; a record whose processes are gone, or that came from the
+// plain process launcher, becomes stopped with a note. Networks are
+// recreated from networks.json, so leases and MACs survive restarts, and
+// QEMU reconnects its netdev by itself. The vsock notify port is recorded
+// in the state dir (qemu.ListenNotifyPersistent) because the guests carry
+// it in a credential from boot; the state dir itself is flock(2)ed
+// (lock.go) so no second vm-manager serves it.
+//
+// Known limitation: swtpm is reattached on the unit's word alone. A swtpm
+// whose unit cannot be queried (or is gone) while the process still lives
+// is treated as gone: the VM stays tracked and running, its swtpm is
+// neither stopped nor stopped later with the VM, and a warning is logged.
 package vm

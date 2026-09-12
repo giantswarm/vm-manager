@@ -150,6 +150,11 @@ type Spec struct {
 	SerialLog string
 	// QMPSocket is the unix socket QEMU serves QMP on.
 	QMPSocket string
+	// ProcessLog, when set, is the file QEMU's own stdout and stderr are
+	// appended to (proc.Cmd.Log); Instance.Stderr reads its tail. Empty
+	// keeps the output in memory, which is lost with the vm-manager that
+	// started the process.
+	ProcessLog string
 	// NoReboot makes a guest reboot end the process instead (PhaseInstall).
 	NoReboot bool
 }

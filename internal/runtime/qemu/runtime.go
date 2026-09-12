@@ -17,6 +17,9 @@ import (
 // DefaultBinary is the QEMU executable looked up on PATH.
 const DefaultBinary = "qemu-system-x86_64"
 
+// UnitRole names the QEMU process in its transient unit (proc.UnitName).
+const UnitRole = "qemu"
+
 // DefaultOVMFVarsTemplate is the pristine variable store each VM's OVMFVars
 // is copied from (Arch edk2-ovmf; host.Info reports the code image).
 const DefaultOVMFVarsTemplate = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
@@ -98,11 +101,13 @@ func New(opts Options) *Runtime {
 
 // Instance is a running VM.
 type Instance struct {
-	spec             Spec
-	proc             proc.Process
+	spec   Spec
+	proc   proc.Process
+	stderr *proc.Tail
+	exited chan struct{}
+	// qmp is nil only on an Instance attached to a QEMU that had already
+	// exited; every method tolerates that.
 	qmp              *QMP
-	stderr           *proc.Tail
-	exited           chan struct{}
 	log              *slog.Logger
 	powerdownTimeout time.Duration
 	stopGrace        time.Duration
@@ -120,10 +125,53 @@ func (r *Runtime) Start(ctx context.Context, spec Spec) (*Instance, error) {
 		return nil, err
 	}
 	stderr := proc.NewTail(0)
-	p, err := r.exec.Start(ctx, proc.Cmd{Path: r.binary, Args: args, Stdout: stderr, Stderr: stderr})
+	cmd := proc.Cmd{Path: r.binary, Args: args, Stdout: stderr, Stderr: stderr, Log: spec.ProcessLog, Unit: proc.UnitName(spec.ID, UnitRole)}
+	p, err := r.exec.Start(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("qemu: %w", err)
 	}
+	inst := r.instance(spec, p, stderr)
+	qmp, err := inst.connectQMP(ctx, r.startTimeout)
+	if err != nil {
+		_ = inst.Kill()
+		return nil, err
+	}
+	inst.setQMP(qmp)
+	inst.log.Info("qemu started", "phase", spec.Phase, "pid", p.PID(), "unit", p.Handle().Unit)
+	return inst, nil
+}
+
+// Attach picks up the QEMU of an earlier vm-manager: the process behind h
+// (the launcher must be a proc.Attacher, else proc.ErrNoReattach; a process
+// that is gone is proc.ErrGone) and its QMP socket. A QEMU that has already
+// exited comes back as an exited Instance so the caller settles it the way
+// it settles any exit; one that runs but does not answer QMP is an error,
+// and left running for the caller to decide.
+func (r *Runtime) Attach(ctx context.Context, spec Spec, h proc.Handle) (*Instance, error) {
+	a, ok := r.exec.(proc.Attacher)
+	if !ok {
+		return nil, fmt.Errorf("qemu: %w", proc.ErrNoReattach)
+	}
+	p, err := a.Attach(ctx, h)
+	if err != nil {
+		return nil, fmt.Errorf("qemu: %w", err)
+	}
+	inst := r.instance(spec, p, proc.NewTail(0))
+	qmp, err := inst.connectQMP(ctx, r.startTimeout)
+	switch {
+	case err == nil:
+		inst.setQMP(qmp)
+	case inst.Exited():
+		inst.log.Info("qemu had exited before reattach", "exit", inst.status().String())
+	default:
+		return nil, fmt.Errorf("reattach qemu pid %d: %w", p.PID(), err)
+	}
+	inst.log.Info("qemu reattached", "phase", spec.Phase, "pid", p.PID(), "unit", h.Unit)
+	return inst, nil
+}
+
+// instance wraps a started or attached process.
+func (r *Runtime) instance(spec Spec, p proc.Process, stderr *proc.Tail) *Instance {
 	inst := &Instance{
 		spec:             spec,
 		proc:             p,
@@ -137,18 +185,16 @@ func (r *Runtime) Start(ctx context.Context, spec Spec) (*Instance, error) {
 		<-p.Wait()
 		close(inst.exited)
 	}()
-	qmp, err := inst.connectQMP(ctx, r.startTimeout)
-	if err != nil {
-		_ = inst.Kill()
-		return nil, err
-	}
-	inst.qmp = qmp
+	return inst
+}
+
+// setQMP installs the control channel and closes it with the process.
+func (i *Instance) setQMP(qmp *QMP) {
+	i.qmp = qmp
 	go func() {
-		<-inst.exited
+		<-i.exited
 		_ = qmp.Close()
 	}()
-	inst.log.Info("qemu started", "phase", spec.Phase, "pid", p.PID())
-	return inst, nil
 }
 
 // prepare creates the directories the VM writes into, seeds the OVMF
@@ -225,8 +271,24 @@ func (i *Instance) Spec() Spec { return i.spec }
 // PID is the QEMU process id.
 func (i *Instance) PID() int { return i.proc.PID() }
 
-// QMP is the control channel; nil is never returned for a started Instance.
+// Handle identifies the process for Runtime.Attach after a restart.
+func (i *Instance) Handle() proc.Handle { return i.proc.Handle() }
+
+// QMP is the control channel; nil only for an Instance attached after QEMU
+// had exited.
 func (i *Instance) QMP() *QMP { return i.qmp }
+
+// Detach lets go of a running QEMU without stopping it: the QMP connection
+// is closed so the next vm-manager can take it (QEMU serves one client),
+// the process keeps running under its launcher. Wait no longer reports its
+// exit to this Instance in any useful way.
+func (i *Instance) Detach() error {
+	if i.qmp == nil {
+		return nil
+	}
+	i.log.Info("qemu detached", "pid", i.PID(), "unit", i.Handle().Unit)
+	return i.qmp.Close()
+}
 
 // Wait delivers the exit status; see proc.Process.Wait. In PhaseInstall
 // with NoReboot the guest's reboot ends the process with status 0.
@@ -242,8 +304,14 @@ func (i *Instance) Exited() bool {
 	}
 }
 
-// Stderr is the tail of what QEMU printed.
-func (i *Instance) Stderr() string { return i.stderr.String() }
+// Stderr is the tail of what QEMU printed: the end of Spec.ProcessLog when
+// the output goes to a file, else what was kept in memory.
+func (i *Instance) Stderr() string {
+	if i.spec.ProcessLog != "" {
+		return proc.TailFile(i.spec.ProcessLog, 0)
+	}
+	return i.stderr.String()
+}
 
 // Stop shuts the VM down in escalating steps: system_powerdown over QMP
 // and wait for the guest (until ctx's deadline, or PowerdownTimeout when it
@@ -259,7 +327,9 @@ func (i *Instance) Stop(ctx context.Context) error {
 		pctx, cancel = context.WithTimeout(ctx, i.powerdownTimeout)
 		defer cancel()
 	}
-	if err := i.qmp.SystemPowerdown(pctx); err != nil {
+	if i.qmp == nil {
+		i.log.Debug("no QMP channel, terminating")
+	} else if err := i.qmp.SystemPowerdown(pctx); err != nil {
 		i.log.Debug("powerdown not delivered, terminating", "error", err)
 	} else {
 		select {

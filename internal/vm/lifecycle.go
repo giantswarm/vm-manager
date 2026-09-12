@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ func (s *Service) launch(ctx context.Context, e *entry, img images.Image, nw Net
 	}
 	s.mu.Lock()
 	e.proc = p
+	e.rec.Processes = p.handles()
 	e.rec.State = StateInstalling
 	e.rec.Phase = qemu.PhaseInstall
 	s.save(e)
@@ -347,7 +349,7 @@ func (s *Service) startProcess(ctx context.Context, e *entry, phase qemu.Phase, 
 	if err != nil {
 		return nil, fmt.Errorf("attach network: %w", err)
 	}
-	t, err := s.opts.TPM.Start(ctx, tpm.Config{StateDir: rec.Paths.TPMState})
+	t, err := s.opts.TPM.Start(ctx, tpmConfig(rec))
 	if err != nil {
 		return nil, fmt.Errorf("start swtpm: %w", err)
 	}
@@ -391,6 +393,17 @@ func (s *Service) startProcess(ctx context.Context, e *entry, phase qemu.Phase, 
 	return p, nil
 }
 
+// tpmConfig is the swtpm of a VM: state and log in Paths.TPMState, the
+// unit named after the VM.
+func tpmConfig(rec *VM) tpm.Config {
+	return tpm.Config{ID: rec.ID, StateDir: rec.Paths.TPMState, Log: filepath.Join(rec.Paths.TPMState, tpm.LogName)}
+}
+
+// handles are the process handles the record persists for reattaching.
+func (p *process) handles() *Processes {
+	return &Processes{QEMU: p.inst.Handle(), TPM: p.tpm.Handle()}
+}
+
 // qemuSpec builds the QEMU spec of one phase; see docs/design.md "Boot flow".
 func (s *Service) qemuSpec(rec *VM, phase qemu.Phase, img images.Image, netSocket, mac, tpmSocket string) qemu.Spec {
 	creds := map[string]string{
@@ -418,6 +431,7 @@ func (s *Service) qemuSpec(rec *VM, phase qemu.Phase, img images.Image, netSocke
 		OVMFVars:    rec.Paths.OVMFVars,
 		SerialLog:   rec.Paths.Console,
 		QMPSocket:   rec.Paths.QMPSocket,
+		ProcessLog:  rec.Paths.QEMULog,
 	}
 	switch phase {
 	case qemu.PhaseInstall:
@@ -457,6 +471,9 @@ func (s *Service) run(e *entry, p *process) {
 	timer := s.clock.After(timeout)
 	for {
 		select {
+		case <-s.ctx.Done():
+			// Close is detaching: the process lives on, unsupervised here.
+			return
 		case exit := <-p.wait:
 			s.onExit(e, p, exit, timeout)
 			return
@@ -528,6 +545,7 @@ func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout tim
 
 	s.mu.Lock()
 	e.proc = nil
+	e.rec.Processes = nil
 	prev := e.rec.State
 	installed := false
 	switch {
@@ -606,6 +624,7 @@ func (s *Service) startBoot(ctx context.Context, e *entry) error {
 	}
 	s.mu.Lock()
 	e.proc = p
+	e.rec.Processes = p.handles()
 	e.rec.State = StateBooting
 	e.rec.Phase = qemu.PhaseBoot
 	e.rec.BootedAt = s.now()
@@ -691,6 +710,20 @@ func (s *Service) openVolume(ctx context.Context, e *entry) error {
 	e.rec.Paths.Volume = vol.Path
 	s.mu.Unlock()
 	return nil
+}
+
+// closeVolume undoes openVolume; the volume itself stays.
+func (s *Service) closeVolume(ctx context.Context, e *entry) {
+	s.mu.Lock()
+	vol := e.volume
+	e.volume = nil
+	s.mu.Unlock()
+	if vol == nil {
+		return
+	}
+	if err := s.opts.Storage.Release(ctx, vol); err != nil {
+		s.log.Warn("release volume", "id", e.rec.ID, "err", err)
+	}
 }
 
 // Stop shuts a running VM down: ACPI powerdown, then SIGTERM and SIGKILL

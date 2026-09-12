@@ -92,7 +92,8 @@ make build                                                   # ./vm-manager, sta
 install -Dm0755 vm-manager /usr/local/bin/vm-manager
 install -Dm0644 deploy/systemd/sysusers.d/vm-manager.conf /usr/lib/sysusers.d/vm-manager.conf
 install -Dm0644 deploy/systemd/vm-manager.service /etc/systemd/system/vm-manager.service
-systemd-sysusers                                             # creates the vm-manager user
+systemd-sysusers                                             # creates the vm-manager user (in group kvm)
+loginctl enable-linger vm-manager                            # its own service manager runs the VMs, see below
 install -d -o vm-manager -g vm-manager -m 0750 /var/lib/vm-manager /var/lib/vm-manager/images
 cp -r images/build/giantswarm-vm-base_* images/build/policy.json images/build/sysupdate /var/lib/vm-manager/images/
 chown -R vm-manager:vm-manager /var/lib/vm-manager/images
@@ -118,11 +119,38 @@ Flags on the command line win over the environment, so `--listen`, `--state-dir`
 them. The listener stays on loopback because the API is anonymous without
 `--enable-oauth`; put a reverse proxy or the OAuth guard in front before exposing it.
 
-Stopping or restarting the service powers every VM down (ACPI, then SIGTERM and SIGKILL
-after `--stop-timeout`, 30 s by default; the unit gives the shutdown 90 s) and the VMs
-come back `stopped` with a note in `lastError`; `start_vm` boots them again. Package
-upgrades of vm-manager therefore mean a maintenance window for the VMs on the host until
-[transient units](plan.md) land.
+### VMs survive restarts of the service
+
+QEMU and swtpm do not run inside `vm-manager.service`. vm-manager starts them as transient
+systemd units (`vm-manager-<id>-qemu.service`, `vm-manager-<id>-swtpm.service`, grouped in
+`vm-manager.slice`) of the **vm-manager user's own service manager**, `user@<uid>.service`.
+Stopping or restarting `vm-manager.service` leaves them running (`--detach-vms-on-exit`,
+default on); the next start reattaches through `vms/<id>/vm.json` in the state dir, exit
+status included, and the VMs stay `ready`. Package upgrades therefore need no maintenance
+window.
+
+That user manager exists only while the user has a session or lingering is enabled, hence
+the `loginctl enable-linger vm-manager` above (it survives reboots; `loginctl show-user
+vm-manager -p Linger` says `yes`). vm-manager finds the manager at `/run/user/<uid>`
+by itself: `Environment=XDG_RUNTIME_DIR=` in the unit is not needed and `%U` would not
+help, since in a system unit `%U` is the UID of the *service manager*, 0, not of `User=`
+(`man systemd.unit`, "Specifiers"). The kvm group membership from `sysusers.d` matters here
+too: the VMs run outside the unit's `SupplementaryGroups=` and `DeviceAllow=`, so they open
+`/dev/kvm` and `/dev/vhost-vsock` with the user's own groups.
+
+Without lingering (or with `--launcher process`) vm-manager falls back to plain child
+processes and logs `VMs run as child processes and end with vm-manager` at startup; then
+a stop or restart powers every VM down (ACPI, then SIGTERM and SIGKILL after
+`--stop-timeout`, 30 s by default; the unit gives the shutdown 90 s) and the VMs come back
+`stopped` with a note in `lastError`; `start_vm` boots them again. The startup log line
+`vm launcher selected launcher=systemd manager=user` confirms the intended mode, and
+`systemd-cgls --user-unit vm-manager.slice` (as the vm-manager user) or `systemctl
+--machine vm-manager@ --user list-units 'vm-manager-*'` lists the running VMs.
+
+Two things in the state dir are part of this contract: `notify-port`, the vsock port the
+guests report `READY=1` to (fixed in each guest's credentials at boot, so every start
+reuses it; a second vm-manager on the same state dir fails with "notify port in use"), and
+`lock`, an `flock(2)` that makes a second vm-manager on the same state dir fail fast.
 
 ## First run
 
@@ -254,8 +282,10 @@ firmware update on the host) needs one learn-mode boot and `image golden` again.
 
 ## Known limitations
 
-- VMs stop with the service: no reattach to QEMU across vm-manager restarts (transient
-  units are planned, [plan.md](plan.md) wave 4).
+- VMs survive service restarts only with a service manager for the vm-manager user
+  (lingering, see above); without one they are child processes and stop with the service.
+  A swtpm whose unit cannot be queried at reattach is treated as gone and no longer
+  managed, even if the process is alive.
 - One host per vm-manager; nothing schedules across hosts. The virtual network is
   userspace: hundreds of Mbit/s, IPv4 only, no UDP or ICMP from the host into the network.
 - The attestation key is trusted on first use (vm-manager created the VM and its vTPM

@@ -110,6 +110,34 @@ type Runtime struct {
 	// hold runs before Start does anything; a test blocks in it to freeze a
 	// start mid-flight.
 	hold func(qemu.Spec)
+	// attachable are the PIDs Attach finds, see SetAttachable.
+	attachable map[int]bool
+}
+
+// SetAttachable declares the PIDs a later Attach finds still running, as a
+// launcher whose processes outlived the previous vm-manager would report;
+// any other handle is proc.ErrGone.
+func (r *Runtime) SetAttachable(pids ...int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.attachable = make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		r.attachable[pid] = true
+	}
+}
+
+// Attach implements vm.Runtime: an Instance for an attachable PID, whose
+// exit the test drives like any other.
+func (r *Runtime) Attach(_ context.Context, spec qemu.Spec, h proc.Handle) (vm.Instance, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ev.Add("qemu.attach:" + string(spec.Phase))
+	if !r.attachable[h.PID] {
+		return nil, fmt.Errorf("%w: pid %d", proc.ErrGone, h.PID)
+	}
+	inst := &Instance{spec: spec, ev: r.ev, exit: make(chan proc.ExitStatus, 1), Pid: h.PID}
+	r.insts = append(r.insts, inst)
+	return inst, nil
 }
 
 func (r *Runtime) Start(_ context.Context, spec qemu.Spec) (vm.Instance, error) {
@@ -168,6 +196,17 @@ type Instance struct {
 func (i *Instance) Wait() <-chan proc.ExitStatus { return i.exit }
 func (i *Instance) PID() int                     { return i.Pid }
 
+// Handle names the unit the way the systemd launcher would.
+func (i *Instance) Handle() proc.Handle {
+	return proc.Handle{Unit: proc.UnitName(i.spec.ID, qemu.UnitRole), PID: i.Pid}
+}
+
+// Detach records the handover; the fake process keeps "running".
+func (i *Instance) Detach() error {
+	i.ev.Add("qemu.detach")
+	return nil
+}
+
 func (i *Instance) Stop(context.Context) error {
 	i.ev.Add("qemu.stop")
 	i.Exit(0)
@@ -193,10 +232,13 @@ func (i *Instance) end(st proc.ExitStatus) { i.once.Do(func() { i.exit <- st }) 
 
 // TPM counts live swtpm instances.
 type TPM struct {
-	mu       sync.Mutex
-	ev       *Events
-	live     map[*TPMInstance]bool
-	StartErr error
+	mu sync.Mutex
+	ev *Events
+	// live are the running swtpms by state dir: one process per VM, which
+	// an Attach finds again rather than duplicates.
+	live      map[string]bool
+	StartErr  error
+	AttachErr error
 }
 
 func (m *TPM) Start(_ context.Context, cfg tpm.Config) (vm.TPMInstance, error) {
@@ -206,12 +248,28 @@ func (m *TPM) Start(_ context.Context, cfg tpm.Config) (vm.TPMInstance, error) {
 	if m.StartErr != nil {
 		return nil, m.StartErr
 	}
-	if m.live == nil {
-		m.live = make(map[*TPMInstance]bool)
+	return m.instance(cfg), nil
+}
+
+// Attach implements vm.TPMManager: the swtpm is found again unless
+// AttachErr is set; it counts as running from then on.
+func (m *TPM) Attach(_ context.Context, cfg tpm.Config, _ proc.Handle) (vm.TPMInstance, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ev.Add("tpm.attach")
+	if m.AttachErr != nil {
+		return nil, m.AttachErr
 	}
-	inst := &TPMInstance{m: m, dir: cfg.StateDir}
-	m.live[inst] = true
-	return inst, nil
+	return m.instance(cfg), nil
+}
+
+// instance marks cfg's swtpm live; the caller holds m.mu.
+func (m *TPM) instance(cfg tpm.Config) *TPMInstance {
+	if m.live == nil {
+		m.live = make(map[string]bool)
+	}
+	m.live[cfg.StateDir] = true
+	return &TPMInstance{m: m, id: cfg.ID, dir: cfg.StateDir}
 }
 
 func (m *TPM) Running() int {
@@ -222,16 +280,22 @@ func (m *TPM) Running() int {
 
 type TPMInstance struct {
 	m   *TPM
+	id  string
 	dir string
 }
 
 func (i *TPMInstance) SocketPath() string { return filepath.Join(i.dir, tpm.DefaultSocketName) }
 
+// Handle names the unit the way the systemd launcher would.
+func (i *TPMInstance) Handle() proc.Handle {
+	return proc.Handle{Unit: proc.UnitName(i.id, tpm.UnitRole), PID: 1}
+}
+
 func (i *TPMInstance) Stop(context.Context) error {
 	i.m.mu.Lock()
 	defer i.m.mu.Unlock()
 	i.m.ev.Add("tpm.stop")
-	delete(i.m.live, i)
+	delete(i.m.live, i.dir)
 	return nil
 }
 
