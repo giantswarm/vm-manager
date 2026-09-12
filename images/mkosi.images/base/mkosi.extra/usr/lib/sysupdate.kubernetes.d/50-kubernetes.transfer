@@ -1,7 +1,11 @@
-# Kubernetes sysext, pulled as a separate sysupdate component:
-#   systemd-sysupdate --component=kubernetes update
-# vm-manager's IMDS directory lists only the version the VM was created with.
-# SHA256SUMS.gpg is verified against /etc/systemd/import-pubring.pgp.
+# Kubernetes sysext, pulled as a separate sysupdate component by
+# vm-kubernetes.service (/usr/lib/vm-manager/kubernetes):
+#   systemd-sysupdate --component=kubernetes update <version>
+# with the version from the IMDS key /kubernetes-version; the directory is
+# served unfiltered. SHA256SUMS.gpg is verified against
+# /etc/systemd/import-pubring.pgp. InstancesMax=2 is the minimum sysupdate.d(5)
+# accepts; the unit removes superseded kubernetes_*.raw itself so that exactly
+# one version is present when systemd-sysext merges (it merges every file).
 [Transfer]
 Verify=yes
 

@@ -62,12 +62,16 @@ func TestPolicyFor(t *testing.T) {
 
 	h.restartWithPolicy(`{"image_id":"giantswarm-vm-base","image_version":"0.1.0",
 		"pcr11":{"enter-initrd":"` + hexA + `","enter-initrd:leave-initrd:sysinit:ready":"` + hexB + `"},
+		"pcr13":{"1.32.0":"` + hexB + `"},
 		"golden":{"sha256":{"4":"` + hexA + `"}}}`)
 	p, err := h.svc.PolicyFor(h.ctx, v.ID)
 	require.NoError(t, err)
 	assert.Equal(t, hexA, p.PCR11[attest.PhaseInitrd])
 	assert.Equal(t, hexB, p.PCR11[attest.PhaseReady])
 	assert.Equal(t, map[int]string{4: hexA}, p.Golden[attest.Bank])
+	assert.Equal(t, map[string]string{"1.32.0": hexB}, p.PCR13)
+	assert.Equal(t, "1.32.0", v.KubernetesVersion, "the harness image's highest version")
+	assert.Equal(t, v.KubernetesVersion, p.KubernetesVersion, "the VM's version selects the pcr13 entry")
 
 	h.restartWithPolicy(`{"pcr11":{"enter-initrd":"` + hexA + `"}}`)
 	_, err = h.svc.PolicyFor(h.ctx, v.ID)

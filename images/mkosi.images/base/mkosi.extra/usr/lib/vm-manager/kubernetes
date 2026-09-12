@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Pull the Kubernetes sysext the VM was created with, activate it and measure
+# it into PCR 13. Run once per boot by vm-kubernetes.service.
+#
+#  1. /kubernetes-version from the IMDS names the version; an unset key means
+#     the VM runs without Kubernetes and the unit ends here.
+#  2. Every other kubernetes_*.raw in /var/lib/extensions is removed first:
+#     systemd-sysext merges every image it finds (the later name wins per
+#     file), so exactly one version may be present when it refreshes. The
+#     sysupdate transfer keeps InstancesMax=2 (the minimum sysupdate.d(5)
+#     accepts); this is what enforces one.
+#  3. systemd-sysupdate --component=kubernetes update <version> downloads
+#     kubernetes_<version>.raw from the vm-manager IMDS directory, verifying
+#     SHA256SUMS.gpg against /etc/systemd/import-pubring.pgp; an already
+#     present version is a no-op.
+#  4. systemd-sysext refresh merges it (a no-op when systemd-sysext.service
+#     already merged this very file early in the boot). The extension carries
+#     EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the manager and the
+#     Upholds= of multi-user.target starts containerd and kubelet.
+#  5. The line `sha256sum kubernetes_<version>.raw` prints in
+#     /var/lib/extensions ("<sha256>  kubernetes_<version>.raw", the same line
+#     the published SHA256SUMS carries) is measured into PCR 13 with
+#     systemd-pcrextend: PCR 13 := sha256(PCR 13 || sha256(line)). The only
+#     other PCR 13 event of a boot is the initrd's "os-separator", so the host
+#     predicts the value from the artifact alone (images/scripts/verify-kubernetes
+#     writes it to policy.json as pcr13.<version>).
+#
+# A different /kubernetes-version on a later boot replaces the file and the
+# merge; PCR 13 then carries the new version only, because this runs once per
+# boot and measures after the final merge.
+set -euo pipefail
+shopt -s nullglob
+
+extensions=/var/lib/extensions
+pcr=13
+
+log() { echo "vm-kubernetes: $*"; }
+fail() { echo "vm-kubernetes: $*" >&2; exit 1; }
+
+# systemd-imds exits 1 with the varlink error name of systemd-imdsd on stderr:
+# KeyNotFound for an unset key (vm-manager's bodyless 404: the VM was created
+# without a Kubernetes version), NotSupported when no IMDS provider matched
+# the machine (a boot outside vm-manager, e.g. scripts/smoke-boot). Both mean
+# there is nothing to pull; CommunicationFailure, Timeout and NotAvailable
+# are failures of a VM that should have a version.
+err=/run/vm-kubernetes.imds-err
+if ! version="$(/usr/lib/systemd/systemd-imds /kubernetes-version 2>"$err")"; then
+        if /usr/bin/grep -q -E "InstanceMetadata\.(KeyNotFound|NotSupported)" "$err"; then
+                log "no /kubernetes-version from the IMDS ($(/usr/bin/grep -o -E "InstanceMetadata\.[A-Za-z]+" "$err" | head -1)), this VM runs without Kubernetes"
+                exit 0
+        fi
+        fail "cannot read /kubernetes-version from the IMDS: $(tr '\n' ' ' <"$err")"
+fi
+version="${version//[[:space:]]/}"
+[[ -n "$version" ]] || { log "/kubernetes-version is empty, this VM runs without Kubernetes"; exit 0; }
+name="kubernetes_$version.raw"
+
+for f in "$extensions"/kubernetes_*.raw; do
+        [[ "${f##*/}" == "$name" ]] && continue
+        log "removing superseded ${f##*/}"
+        rm -f "$f"
+done
+
+if [[ -s "$extensions/$name" ]]; then
+        log "$name is present, no download"
+else
+        # EPOCHREALTIME is seconds with six decimals; strip the point for
+        # microsecond integer arithmetic (the base image has no awk or bc).
+        start=${EPOCHREALTIME/./}
+        systemd-sysupdate --component=kubernetes update "$version"
+        [[ -s "$extensions/$name" ]] || fail "systemd-sysupdate did not install $name"
+        ms=$(( (${EPOCHREALTIME/./} - start) / 1000 ))
+        log "pulled $name ($(stat -c %s "$extensions/$name") bytes) in $((ms / 1000)).$(printf '%03d' $((ms % 1000))) s"
+fi
+
+systemd-sysext refresh
+# `systemd-sysext status` prints one row per hierarchy: HIERARCHY EXTENSIONS
+# SINCE, EXTENSIONS comma-separated. Exactly our version may be on /usr.
+merged=""
+while read -r hierarchy exts _; do
+        [[ "$hierarchy" == /usr ]] && merged="$exts"
+done < <(systemd-sysext status --no-legend --no-pager 2>/dev/null)
+[[ "$merged" == "kubernetes_$version" ]] || fail "expected kubernetes_$version merged on /usr, systemd-sysext status says '${merged:-nothing}'"
+
+line="$(cd "$extensions" && sha256sum "$name")"
+/usr/lib/systemd/systemd-pcrextend --pcr="$pcr" "$line"
+log "measured '$line' into PCR $pcr"

@@ -1,0 +1,29 @@
+[Unit]
+Description=Pull, activate and measure the Kubernetes sysext
+Documentation=man:systemd-sysupdate(8) man:systemd-sysext(8) man:systemd-pcrphase.service(8)
+# The installer boot (vm.install-target credential set) copies the OS to the
+# target disk and reboots; the sysext is pulled by the installed system, onto
+# its var partition. systemd.imds=no on the kernel command line switches the
+# IMDS logic off (systemd-imds-generator(8)); without it systemd-imds would
+# socket-activate systemd-imdsd and wait on an address nobody serves.
+ConditionCredential=!vm.install-target
+ConditionKernelCommandLine=!systemd.imds=no
+Wants=network-online.target
+# The IMDS answers once the network is up and systemd-imds-import.service has
+# talked to it; systemd-sysext.service merged whatever /var/lib/extensions
+# held before this boot; the TPM is set up for systemd-pcrextend. Units that
+# need the merged extension or the PCR 13 measurement (the kubeadm unit from
+# CAPI's Ignition config, the ready-stage attestation quote) order
+# After=vm-kubernetes.service.
+After=network-online.target systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vm-manager/kubernetes
+# The download is 200 MB from the host over the virtual network, plus the
+# SHA256SUMS.gpg check and the sha256 of the file for the measurement.
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target

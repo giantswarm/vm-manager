@@ -117,13 +117,22 @@ cache, `make images verify` (everything, warm) ~30 s.
   Example 1 plus the signature partition). `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`
   pulls `kubernetes_@v.raw` into `/var/lib/extensions/` from `.../sysupdate/kubernetes/`
   (`Verify=yes`, key in `/etc/systemd/import-pubring.pgp`). `systemd-sysupdate.timer` stays off.
+- `vm-kubernetes.service` (enabled, `ConditionCredential=!vm.install-target`,
+  `ConditionKernelCommandLine=!systemd.imds=no`,
+  `After=network-online.target systemd-imds-import.service systemd-sysext.service
+  systemd-tpm2-setup.service`, wanted by `multi-user.target` so `READY=1` waits for it)
+  runs `/usr/lib/vm-manager/kubernetes` once per boot: reads `/kubernetes-version` from
+  the IMDS, pulls that sysext with `systemd-sysupdate --component=kubernetes update <v>`,
+  merges it with `systemd-sysext refresh` and measures it into PCR 13 with
+  `systemd-pcrextend` (details under [Kubernetes sysext](#kubernetes-sysext)).
 - `vm-report-upload.timer` (every 15 s) runs
   `systemd-report upload --url=http://169.254.169.254/giantswarm/v1/report --key=- --network-timeout=5`.
 - `/usr/lib/systemd/system-preset/10-vm-manager.preset` enables `systemd-networkd`
   (DHCP on every ethernet link), `systemd-resolved`, `systemd-timesyncd`,
   `systemd-imdsd.socket`, `systemd-sysext.service`, `sshd.service` (plus
   `systemd-ssh-generator`'s AF_VSOCK port 22 listener), `vm-sysinstall.service`,
-  `vm-report-upload.timer`, and disables `systemd-sysupdate*.timer`, `systemd-homed`,
+  `vm-kubernetes.service`, `vm-report-upload.timer`, and disables
+  `systemd-sysupdate*.timer`, `systemd-homed`,
   `machines.target`. `systemd-pcrphase*` are the systemd defaults.
 - Kernel command line: `console=ttyS0,115200 systemd.imds.import=yes systemd.firstboot=off`
   plus `roothash=<hash>` added by mkosi.
@@ -304,24 +313,78 @@ extracted `kubeadm version`/`kubelet --version`. A new Kubernetes version: bump
 `build/sysupdate/kubernetes/`. The base image is untouched by a Kubernetes bump.
 
 How the VM receives it: vm-manager serves `build/sysupdate/kubernetes/` at
-`http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/` (the directory listing must
-show `kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg`) and runs
-`systemd-sysupdate --component=kubernetes update` in the guest (the transfer in the base
-image is `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`, `Verify=yes` against
-`/etc/systemd/import-pubring.pgp`, target `/var/lib/extensions/kubernetes_@v.raw`,
-`InstancesMax=2`). `systemd-sysext.service` (enabled in the base, `Before=sysinit.target
-systemd-tmpfiles-setup.service`) merges it on the next boot, or `systemd-sysext refresh`
-does it live; the verity signature is checked against `/usr/lib/verity.d/verity.crt`.
-The kubeadm unit from CAPI's Ignition config must be ordered `After=systemd-sysext.service`
-(docs/design.md, boot flow step 7); until `kubeadm init/join` ran, `kubelet.service`
-exits and restarts every 10 s, which is expected and harmless.
+`http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/` (`kubernetes_<kv>.raw`,
+`SHA256SUMS`, `SHA256SUMS.gpg`, unfiltered) and `/kubernetes-version` with the version
+the VM was created with. `vm-kubernetes.service` (base image, enabled, `WantedBy=multi-user.target`,
+`After=network-online.target systemd-imds-import.service systemd-sysext.service
+systemd-tpm2-setup.service`, skipped on the installer boot by
+`ConditionCredential=!vm.install-target` and on a boot with `systemd.imds=no` on the
+kernel command line by `ConditionKernelCommandLine=`, the switch systemd-imds-generator
+honours; without it `systemd-imds` would socket-activate `systemd-imdsd` against an
+address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
+`/usr/lib/vm-manager/kubernetes` once per boot:
 
-PCR 13: systemd-stub measures extension images it loads from the ESP
-(`<uki>.efi.extra.d/*.sysext.raw`) into PCR 13; systemd 261 does *not* measure
-extensions merged from `/var/lib/extensions`. With the sysupdate delivery used here the
-trust anchor is the verity signature (plus `SHA256SUMS.gpg` for the download); if the
-attestation policy must cover the Kubernetes version, vm-manager has to either place the
-image next to the UKI on the ESP or extend a PCR itself (`systemd-pcrextend`) after the merge.
+1. `systemd-imds /kubernetes-version`. `KeyNotFound` (VM without a Kubernetes version)
+   and `NotSupported` (no IMDS provider matched, e.g. `scripts/smoke-boot`) end the unit
+   successfully with nothing to do; any other error fails it.
+2. Every other `kubernetes_*.raw` in `/var/lib/extensions/` is deleted: systemd-sysext
+   merges every image it finds, so exactly one version may be present.
+3. `systemd-sysupdate --component=kubernetes update <kv>` (the transfer is
+   `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`, `Verify=yes` against
+   `/etc/systemd/import-pubring.pgp`, target `/var/lib/extensions/kubernetes_@v.raw`);
+   a present file is a no-op, so a reboot downloads nothing.
+4. `systemd-sysext refresh` merges it (the verity signature is checked against
+   `/usr/lib/verity.d/verity.crt`; the kernel's "Required key not available" lines in the
+   journal are the keyring attempt before that). `EXTENSION_RELOAD_MANAGER=1` makes the
+   refresh a daemon-reload, after which `Upholds=` of `multi-user.target` starts
+   `containerd.service` and `kubelet.service`. The unit checks that
+   `systemd-sysext status` lists exactly `kubernetes_<kv>` on `/usr`.
+5. PCR 13 is extended, see below.
+
+In the e2e (`e2e/kubernetes_sysext_test.go`, `make e2e`) the download of the 206 MB takes
+about 2 s, the unit 2.7 s, and the installed boot reaches `READY=1` (which waits for the
+unit) after 14 s. Units that need the extension or the measurement order
+`After=vm-kubernetes.service`: the kubeadm unit from CAPI's Ignition config
+(docs/design.md, boot flow step 7) and the ready-stage attestation quote. Until
+`kubeadm init/join` wrote `/var/lib/kubelet/config.yaml`, `kubelet.service` exits and
+`Restart=always` brings it back every 10 s: `activating (auto-restart)`, never `failed`,
+so `systemctl --failed` stays empty; the e2e pins that.
+
+Lifecycle: `InstancesMax=2` in the transfer is the minimum sysupdate.d(5) accepts, hence
+step 2 (a superseded file is removed before the refresh, never left for a later boot).
+A changed `/kubernetes-version` takes effect on the next boot: the early
+`systemd-sysext.service` still merges the old file, the unit then replaces it and
+refreshes, and PCR 13 carries only the new version because the unit measures once, after
+the final merge. A version switch while the node runs is not supported (the running
+containerd/kubelet would be swapped underneath).
+
+PCR 13. systemd-stub measures only extension images it loads itself from the ESP
+(`<uki>.efi.extra.d/*.sysext.raw`) into PCR 13, and those land in `/.extra/sysext/` of
+the *initrd*, a directory systemd-sysext searches only when invoked in the initrd: they
+extend the initrd, not the installed root, so delivering the Kubernetes layer that way
+would not merge it at all. The measured object would also be the cpio archive the stub
+packs (a host would have to reproduce it byte for byte), the 206 MB would sit on the
+512 MB ESP next to the UKIs, and the first installed boot would need the installer to
+place it. The unit therefore measures after the merge with
+`systemd-pcrextend --pcr=13 "<line>"`, where `<line>` is what `sha256sum
+kubernetes_<kv>.raw` prints in `/var/lib/extensions`, i.e. the file's line in the
+published `SHA256SUMS`: `<sha256>  kubernetes_<kv>.raw` (two spaces, no newline).
+The PCR 13 rule, implemented by `scripts/verify-kubernetes` (step 10, Python) and
+`attest.SysextPCR` (Go), both checked against the TPM by the e2e:
+
+    PCR13 = 0 (32 zero bytes)
+    PCR13 = sha256(PCR13 || sha256("os-separator"))     systemd-pcrosseparator.service, initrd
+    PCR13 = sha256(PCR13 || sha256("<sha256>  kubernetes_<kv>.raw"))   vm-kubernetes.service
+
+`systemd-pcrosseparator.service` (initrd, `ConditionSecurity=measured-os`) is the only
+other PCR 13 event of a boot; both events are in `/run/log/systemd/tpm2-measure.log`,
+`systemd-analyze pcrs 13` shows the result. `verify-kubernetes` writes the value to
+`build/policy.json` as `"pcr13": {"<kv>": "<hex>"}` (kept across `verify-base` runs, one
+entry per sysext version built); vm-manager compares it at the ready stage against the
+VM's Kubernetes version and falls back to `golden.sha256.13` for a VM without one
+(`internal/attest`). The trust chain for the content itself stays the verity signature
+(`/usr/lib/verity.d/verity.crt`) plus `SHA256SUMS.gpg` for the download; PCR 13 binds
+the attested boot to the exact artifact.
 
 ## Keys
 
@@ -547,13 +610,15 @@ Kubernetes sysext:
 - The `iptables` package is already part of the base tree (`/usr/bin/iptables ->
   xtables-nft-multi`), so it leaves no files in the overlay delta; it stays in the
   package list to keep the extension self-describing.
-- `systemd-sysext` 261 does not deduplicate versions: with `InstancesMax=2` in
-  `50-kubernetes.transfer`, two files `kubernetes_<a>.raw` and `kubernetes_<b>.raw` in
-  `/var/lib/extensions/` would *both* be merged (verified with directory images on the
-  host; the later name wins per file). vm-manager must remove the superseded file (or
-  the transfer needs `InstancesMax=1`) before `systemd-sysext refresh`/reboot.
-- PCR 13 is only extended for extensions loaded by systemd-stub from the ESP, not for
-  `/var/lib/extensions/` merges (see Kubernetes sysext above).
+- `systemd-sysext` 261 does not deduplicate versions: two files `kubernetes_<a>.raw`
+  and `kubernetes_<b>.raw` in `/var/lib/extensions/` would *both* be merged (the later
+  name wins per file), and sysupdate.d(5) rejects `InstancesMax=` below 2, so
+  `vm-kubernetes.service` deletes every `kubernetes_*.raw` other than the requested
+  version before `systemd-sysext refresh` (see Kubernetes sysext above).
+- PCR 13 is only extended by systemd-stub for extensions it loads from the ESP, which
+  end up in the initrd, not for `/var/lib/extensions/` merges; `vm-kubernetes.service`
+  extends it with `systemd-pcrextend` after the merge (rule under Kubernetes sysext).
+  The base image has no awk or bc: the unit's script does its arithmetic in bash.
 - `publish-sysupdate` no longer writes an empty signed manifest for the kubernetes
   component on base-only builds; `build/sysupdate/kubernetes/` exists once the sysext
   was built.

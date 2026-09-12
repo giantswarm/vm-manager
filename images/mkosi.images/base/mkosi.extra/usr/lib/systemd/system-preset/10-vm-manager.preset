@@ -7,6 +7,7 @@ enable systemd-resolved.service
 enable systemd-timesyncd.service
 enable systemd-imdsd.socket
 enable systemd-sysext.service
+enable vm-kubernetes.service
 enable sshd.service
 enable vm-sysinstall.service
 enable vm-report-upload.timer

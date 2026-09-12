@@ -3,7 +3,8 @@
 # read with sfdisk and systemd-dissect --validate, the erofs is extracted with
 # fsck.erofs, and the extension is merged onto the base tree with systemd-sysext
 # in an unprivileged user namespace (directory form of the extension; loop
-# devices for the DDI itself need root).
+# devices for the DDI itself need root). Writes the expected PCR 13 of a guest
+# running this version into build/policy.json (pcr13.<version>, step 10).
 set -euo pipefail
 
 build="${1:?build dir}" version="${2:?kubernetes version}" keys="${3:?keys dir}"
@@ -212,6 +213,32 @@ GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$pub
 rm -f "$pubring" "$pubring~"
 (cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
 ok "sysupdate/kubernetes: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifact(s)"
+
+# 10. Expected PCR 13 of a guest running this version, into policy.json as
+#     pcr13.<version> (next to the pcr11 values scripts/verify writes; other
+#     versions and the golden values are kept). The rule, mirrored by
+#     attest.SysextPCR: PCR 13 starts at zero; the initrd's
+#     systemd-pcrosseparator.service extends it with the word "os-separator";
+#     vm-kubernetes.service extends it once with the SHA256SUMS line of the
+#     merged file, "<sha256>  kubernetes_<version>.raw" (no newline), through
+#     systemd-pcrextend. Each extension is PCR := sha256(PCR || sha256(word)).
+line="$(/usr/bin/grep -E "  $name\.raw\$" "$sysupdate/SHA256SUMS")"
+[[ -n "$line" ]] || fail "SHA256SUMS has no line for $name.raw"
+python3 - "$build/policy.json" "$version" "$line" <<'EOF'
+import hashlib, json, sys
+policy, version, line = sys.argv[1:]
+pcr = bytes(32)
+for word in ("os-separator", line):
+    pcr = hashlib.sha256(pcr + hashlib.sha256(word.encode()).digest()).digest()
+try:
+    out = json.load(open(policy))
+except (OSError, ValueError):
+    out = {}
+out.setdefault("pcr13", {})[version] = pcr.hex()
+json.dump(out, open(policy, "w"), indent=2)
+open(policy, "a").write("\n")
+print(f"verify-kubernetes: ok: pcr13[{version}] = {pcr.hex()} (os-separator, then '{line}') written to {policy}")
+EOF
 
 echo "verify-kubernetes: $name.raw $(du -h "$img" | cut -f1) ($(du -sh "$ext" | cut -f1) uncompressed), roothash $roothash"
 echo "verify-kubernetes: PASS"
