@@ -31,17 +31,34 @@ const (
 	attestUnit = "vm-agent-attest.service"
 	// policyFile is the image policy the server reads next to the artifacts.
 	policyFile = "policy.json"
-	// tamperedOVMF is the Secure Boot build of the firmware the server boots
-	// with by default (OVMF_CODE.4m.fd): a different firmware volume and
-	// Secure Boot configuration, hence different PCR 0 and 7 than the golden
-	// values recorded with the default build. The tamper case of the design.
-	tamperedOVMF = "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd"
 	// agentRejected is what the agent prints (exit 2) when the verifier said
 	// no; StandardOutput=journal+console puts it on the serial console.
 	agentRejected = "Attestation rejected: "
 	// learnedNote is the verdict's suffix in learn mode.
 	learnedNote = "accepted without golden value"
 )
+
+// tamperedOVMFCandidates are the Secure Boot builds of the firmware the
+// server boots with by default (OVMF_CODE.4m.fd on Arch, OVMF_CODE_4M.fd on
+// Ubuntu/Debian): a different firmware volume and Secure Boot configuration,
+// hence different PCR 0 and 7 than the golden values recorded with the
+// default build. The tamper case of the design.
+var tamperedOVMFCandidates = []string{
+	"/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
+	"/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+}
+
+// findTamperedOVMF returns the first installed candidate, or the error of
+// the last stat when the host has none.
+func findTamperedOVMF() (string, error) {
+	var err error
+	for _, p := range tamperedOVMFCandidates {
+		if _, err = os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", err
+}
 
 // Ceilings. Three VMs are created in turn, each through the installer boot;
 // the tampered VM only has to reach the initrd's quote.
@@ -161,14 +178,15 @@ func TestAttestation(t *testing.T) {
 		remove(t, m, v.ID)
 	})
 
-	if _, err := os.Stat(tamperedOVMF); err == nil {
+	tamperedOVMF, tamperErr := findTamperedOVMF()
+	if tamperErr == nil {
 		srv.stop()
 		srv = startServer(ctx, t, dir, imageDir, "--attestation=verify", "--ovmf-code="+tamperedOVMF)
 		m = newMCPClient(ctx, t, srv.URL)
 	}
 	t.Run("tamper: different firmware is rejected and user-data stays gated", func(t *testing.T) {
-		if _, err := os.Stat(tamperedOVMF); err != nil {
-			t.Skipf("e2e: no Secure Boot OVMF build to tamper with: %v", err)
+		if tamperErr != nil {
+			t.Skipf("e2e: no Secure Boot OVMF build to tamper with: %v", tamperErr)
 		}
 		v := create(t, m, attestTamperVM, vm.WaitInstalled)
 		require.NotNil(t, v.InstalledAt, "create_vm with wait_for installed: state %s lastError %q\n%s", v.State, v.LastError, srv.logTail())

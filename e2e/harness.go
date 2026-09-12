@@ -23,21 +23,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mdlayher/vsock"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/tpm"
+	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
-// Host paths and tools the tests need. OVMF is the Arch edk2-ovmf layout
-// (host.Info reports the same code image).
-const (
-	ovmfCode = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
-	ovmfVars = qemu.DefaultOVMFVarsTemplate
-	sshProxy = "/usr/lib/systemd/systemd-ssh-proxy"
-)
+// sshPort is where the guest's systemd-ssh-generator binds sshd on AF_VSOCK.
+const sshPort = 22
 
 // Image artifacts: images/mkosi.conf sets ImageId= and
 // UnifiedKernelImageFormat=%i_%v, so the files are <imageID>_<version>.{efi,raw}.
@@ -100,12 +97,17 @@ type Harness struct {
 	// MachineID seeds /etc/machine-id in both phases (the var partition
 	// UUID is derived from it).
 	MachineID string
-	// PrivateKey is the ed25519 key file ssh authenticates root with;
+	// PrivateKey is the ed25519 key file (for a manual ssh into a kept
+	// VM); signer is the same key as SSH authenticates root with;
 	// AuthorizedKey is the matching authorized_keys line.
 	PrivateKey    string
 	AuthorizedKey string
-	// OVMFVars is the writable firmware variable store (bootctl writes the
-	// boot entry there in phase A, phase B boots by it).
+	signer        ssh.Signer
+	// OVMFCode is the host's firmware code image (vm.FindOVMF: Arch
+	// edk2-ovmf or Debian/Ubuntu ovmf); OVMFVars the writable variable
+	// store (bootctl writes the boot entry there in phase A, phase B boots
+	// by it).
+	OVMFCode string
 	OVMFVars string
 	// Target is the raw target disk.
 	Target string
@@ -124,7 +126,7 @@ type Harness struct {
 // directory survives a failed test (and always with VM_MANAGER_E2E_KEEP=1).
 func New(t *testing.T) *Harness {
 	t.Helper()
-	requireHost(t)
+	ovmfCode, ovmfVars := requireHost(t)
 	image := locateImage(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -140,6 +142,7 @@ func New(t *testing.T) *Harness {
 		Image:     image,
 		CID:       allocateCID(),
 		MachineID: randomHex(16),
+		OVMFCode:  ovmfCode,
 		OVMFVars:  filepath.Join(dir, "OVMF_VARS.fd"),
 		Target:    filepath.Join(dir, "target.raw"),
 		tpmState:  filepath.Join(dir, "tpm"),
@@ -147,6 +150,7 @@ func New(t *testing.T) *Harness {
 		rt:        qemu.New(qemu.Options{Logger: log, OVMFVarsTemplate: ovmfVars}),
 	}
 	h.PrivateKey, h.AuthorizedKey = generateSSHKey(t, dir)
+	h.signer = loadSigner(t, h.PrivateKey)
 
 	// A blank, sparse target: what a fresh volume from the storage layer
 	// looks like to the installer.
@@ -166,8 +170,9 @@ func New(t *testing.T) *Harness {
 }
 
 // requireHost skips unless KVM, vsock, the binaries and the firmware are
-// there.
-func requireHost(t *testing.T) {
+// there, and returns the firmware pair (code image, variable store
+// template) the host has: what `vm-manager serve` picks by default too.
+func requireHost(t *testing.T) (ovmfCode, ovmfVars string) {
 	t.Helper()
 	for _, dev := range []string{"/dev/kvm", "/dev/vhost-vsock"} {
 		f, err := os.OpenFile(dev, os.O_RDWR, 0) // #nosec G304 -- fixed device paths
@@ -176,16 +181,18 @@ func requireHost(t *testing.T) {
 		}
 		_ = f.Close()
 	}
-	for _, bin := range []string{qemu.DefaultBinary, tpm.DefaultBinary, "sfdisk", "ssh"} {
+	for _, bin := range []string{qemu.DefaultBinary, tpm.DefaultBinary, "sfdisk"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("e2e: %s not installed", bin)
 		}
 	}
-	for _, p := range []string{sshProxy, ovmfCode, ovmfVars} {
+	ovmfCode, ovmfVars = vm.FindOVMF()
+	for _, p := range []string{ovmfCode, ovmfVars} {
 		if _, err := os.Stat(p); err != nil {
-			t.Skipf("e2e: %v", err)
+			t.Skipf("e2e: OVMF firmware: %v", err)
 		}
 	}
+	return ovmfCode, ovmfVars
 }
 
 // locateImage finds the artifacts in $VM_MANAGER_E2E_IMAGE_DIR or
@@ -293,6 +300,16 @@ func generateSSHKey(t *testing.T, dir string) (string, string) {
 	return path, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
 }
 
+// loadSigner reads the key generateSSHKey wrote, for SSH.
+func loadSigner(t *testing.T, path string) ssh.Signer {
+	t.Helper()
+	pemBytes, err := os.ReadFile(path) // #nosec G304 -- the key file this harness wrote
+	require.NoError(t, err)
+	signer, err := ssh.ParsePrivateKey(pemBytes)
+	require.NoError(t, err)
+	return signer
+}
+
 // StartTPM starts swtpm on the harness's TPM state; the state directory is
 // the same in every phase, the process is not: swtpm terminates with the
 // QEMU it served, so each phase gets a fresh one over the persisted state.
@@ -329,7 +346,7 @@ func (h *Harness) Spec(phase qemu.Phase, tp *tpm.Instance, name string) qemu.Spe
 		KernelCmdlineExtra: kernelCmdlineExtra,
 		VsockCID:           h.CID,
 		TPMSocket:          tp.SocketPath(),
-		OVMFCode:           ovmfCode,
+		OVMFCode:           h.OVMFCode,
 		OVMFVars:           h.OVMFVars,
 		SerialLog:          filepath.Join(h.Dir, name+".log"),
 		QMPSocket:          filepath.Join(h.Dir, name+".qmp"),
@@ -445,34 +462,58 @@ func tail(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// SSH runs command as root in the guest over AF_VSOCK through
-// systemd-ssh-proxy (the guest's systemd-ssh-generator binds sshd to vsock
-// port 22) and returns stdout; stderr is part of the error.
+// SSH runs command as root in the guest over AF_VSOCK (the guest's
+// systemd-ssh-generator binds sshd to vsock port 22) and returns stdout;
+// stderr is part of the error. The connection is dialed from Go, so the host
+// needs neither an ssh client nor systemd-ssh-proxy (systemd 256+), which
+// hosted CI runners lack. One call is bounded by 2*sshConnectTimeout.
 func (h *Harness) SSH(ctx context.Context, command string) (string, error) {
 	h.t.Helper()
 	cctx, cancel := context.WithTimeout(ctx, 2*sshConnectTimeout)
 	defer cancel()
-	args := []string{
-		"-F", "/dev/null",
-		"-o", "ProxyCommand=" + sshProxy + " %h %p",
-		"-o", "ProxyUseFdpass=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "IdentitiesOnly=yes",
-		"-o", "IdentityFile=" + h.PrivateKey,
-		"-o", "BatchMode=yes",
-		"-o", "LogLevel=ERROR",
-		"-o", fmt.Sprintf("ConnectTimeout=%d", int(sshConnectTimeout.Seconds())),
-		fmt.Sprintf("root@vsock/%d", h.CID),
-		"--", command,
+	client, err := h.dialSSH(cctx)
+	if err != nil {
+		return "", fmt.Errorf("ssh %q: %w", command, err)
 	}
-	cmd := exec.CommandContext(cctx, "ssh", args...) // #nosec G204 -- fixed binary, arguments built here
+	defer func() { _ = client.Close() }()
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("ssh %q: session: %w", command, err)
+	}
+	defer func() { _ = session.Close() }()
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	session.Stdout, session.Stderr = &stdout, &stderr
+	if err := session.Run(command); err != nil {
 		return stdout.String(), fmt.Errorf("ssh %q: %w: %s", command, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+// dialSSH connects to the guest's sshd over vsock and completes the ssh
+// handshake as root with the harness key. The deadline of ctx becomes the
+// connection's, so the whole call (handshake and command) ends with it. The
+// host key is not checked: the guest generates it on first boot and vsock
+// addresses only this VM.
+func (h *Harness) dialSSH(ctx context.Context) (*ssh.Client, error) {
+	conn, err := vsock.Dial(h.CID, sshPort, nil)
+	if err != nil {
+		return nil, fmt.Errorf("vsock cid %d port %d: %w", h.CID, sshPort, err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	cfg := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(h.signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // #nosec G106 -- a throw-away test VM reached over vsock, see above
+		Timeout:         sshConnectTimeout,
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, fmt.Sprintf("vsock/%d", h.CID), cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("ssh handshake: %w", err)
+	}
+	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
 // SSHRetry repeats SSH until it succeeds or within passes: sshd's host keys

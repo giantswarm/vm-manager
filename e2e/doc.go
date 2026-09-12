@@ -15,10 +15,14 @@
 //	VM_MANAGER_E2E_IMAGE_DIR=... make e2e
 //
 // They need /dev/kvm and /dev/vhost-vsock, qemu-system-x86_64, swtpm, the
-// edk2 OVMF firmware, sfdisk, ssh with systemd-ssh-proxy, and the image
-// artifacts built by `make -C images keys base` (giantswarm-vm-base_<v>.efi
-// and .raw in images/build, or in $VM_MANAGER_E2E_IMAGE_DIR). A host without
-// them skips with a message saying what is missing.
+// OVMF firmware (Arch edk2-ovmf or Debian/Ubuntu ovmf, found the way
+// `vm-manager serve` finds it), sfdisk, and the image artifacts built by
+// `make -C images keys base` (giantswarm-vm-base_<v>.efi and .raw in
+// images/build, or in $VM_MANAGER_E2E_IMAGE_DIR). ssh into the guest is
+// dialed over AF_VSOCK from Go, so no ssh client or systemd-ssh-proxy is
+// needed on the host. A host without them skips with a message saying what
+// is missing. .github/workflows/e2e.yml runs them on a hosted ubuntu-24.04
+// runner (KVM and vhost_vsock enabled there), see docs/development.md "CI".
 //
 // On failure the per-test state directory (serial consoles, TPM state, target
 // disk) is kept and its path printed; VM_MANAGER_E2E_KEEP=1 keeps it always.
