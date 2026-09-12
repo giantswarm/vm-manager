@@ -221,17 +221,20 @@ func assertGuest(ctx context.Context, t *testing.T, g *guest, v vm.VM, testKey s
 }
 
 // assertReport waits for the guest's first vm-report-upload.timer run to
-// show up as get_vm_metrics' report: systemd-report posted to the IMDS.
+// show up as get_vm_metrics' guest summary: systemd-report posted to the
+// IMDS and the server parsed it into series.
 func assertReport(ctx context.Context, t *testing.T, m *mcpClient, id string) {
 	t.Helper()
 	deadline := time.Now().Add(reportWithin)
 	for {
 		var metrics api.MetricsResponse
 		m.call(ctx, api.ToolGetVMMetrics, map[string]any{"id": id}, &metrics)
-		if metrics.Guest != nil {
-			assert.Positive(t, metrics.Guest.Series, "series in the guest's report")
-			t.Logf("systemd-report upload received: %d families, %d series (%d exported)",
-				metrics.Guest.Families, metrics.Guest.Series, metrics.Guest.SeriesExported)
+		if g := metrics.Guest; g != nil {
+			assert.Empty(t, metrics.Note, "the upload must parse as a systemd-report")
+			assert.Positive(t, g.Families, "report families")
+			assert.Positive(t, g.Series, "report series")
+			assert.NotEmpty(t, g.Sample, "report sample")
+			t.Logf("systemd-report upload received: %d families, %d series (%d exported), age %.1fs", g.Families, g.Series, g.SeriesExported, g.ReportAgeSeconds)
 			return
 		}
 		if time.Now().After(deadline) {
