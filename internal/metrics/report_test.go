@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -159,4 +161,19 @@ func TestConvert(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBoundLabelTruncatesGuestValues(t *testing.T) {
+	short := strings.Repeat("a", maxLabelValueBytes)
+	assert.Equal(t, short, boundLabel(short), "values at the limit pass through")
+
+	long := strings.Repeat("a", maxLabelValueBytes*10)
+	got := boundLabel(long)
+	assert.LessOrEqual(t, len(got), maxLabelValueBytes+len("…"))
+	assert.True(t, strings.HasSuffix(got, "…"))
+
+	multi := strings.Repeat("ä", maxLabelValueBytes) // 2 bytes per rune
+	got = boundLabel(multi)
+	assert.True(t, utf8.ValidString(got), "truncation keeps rune boundaries")
+	assert.True(t, strings.HasSuffix(got, "…"))
 }

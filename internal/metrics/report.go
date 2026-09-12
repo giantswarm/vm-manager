@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ReportMediaType is the mediaType systemd-report generate writes.
@@ -184,14 +185,33 @@ func convert(e Entry) (series, bool) {
 		name += "_info"
 	}
 	labels := make(map[string]string, len(e.Fields)+2)
-	labels[labelObject] = e.Object
+	labels[labelObject] = boundLabel(e.Object)
 	for f, v := range e.Fields {
-		labels[labelName(f)] = labelString(v)
+		labels[labelName(f)] = boundLabel(labelString(v))
 	}
 	if k == kindInfo {
-		labels[labelValue] = str
+		labels[labelValue] = boundLabel(str)
 	}
 	return series{name: name, family: e.Name, kind: k, labels: labels, value: value}, true
+}
+
+// maxLabelValueBytes bounds every guest-supplied label value. The guest
+// controls object, field and string values; without a bound a single
+// oversized value would bloat every /metrics scrape for as long as that
+// report is the VM's latest.
+const maxLabelValueBytes = 128
+
+// boundLabel truncates a label value to maxLabelValueBytes at a rune
+// boundary and marks the cut with an ellipsis.
+func boundLabel(v string) string {
+	if len(v) <= maxLabelValueBytes {
+		return v
+	}
+	cut := maxLabelValueBytes - 1
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut] + "…"
 }
 
 // familyName snake-cases a dotted CamelCase family name into a metric name
