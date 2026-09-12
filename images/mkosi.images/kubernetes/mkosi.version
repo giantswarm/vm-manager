@@ -1,1 +1,11 @@
-1.36.4
+#!/bin/sh
+# The image version of the kubernetes sysext is the Kubernetes release it
+# ships: KUBERNETES_VERSION, exported by images/Makefile (mkosi runs an
+# executable mkosi.version and takes its output as ImageVersion=). One
+# configuration builds every listed release; the packages of the release come
+# from build/pkgs/<version>, see the kubernetes targets of the Makefile.
+if [ -z "${KUBERNETES_VERSION:-}" ]; then
+        echo "kubernetes/mkosi.version: KUBERNETES_VERSION is unset; run mkosi through make -C images (kubernetes, kubernetes-all, images)" >&2
+        exit 1
+fi
+printf '%s\n' "$KUBERNETES_VERSION"

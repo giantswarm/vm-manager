@@ -21,12 +21,12 @@ make -C images clean                           # drop build/, keep keys/
 |---|---|
 | `mkosi.conf` | main image: `Format=disk`, `Bootable=yes`, systemd-boot, UKI, `Verity=signed`, `SignExpectedPcr=yes`, kernel command line, split artifacts, `mkosi vm` runtime settings |
 | `mkosi.images/base/` | the OS tree (`Format=directory`, `Output=base`): package list, `mkosi.extra/` content (units, presets, repart and sysupdate definitions, hwdb), `mkosi.postinst` (hwdb compile, PGP pubring, mask). The main image and the sysext consume it via `BaseTrees=%O/base` |
-| `mkosi.images/kubernetes/` | the Kubernetes sysext (`Format=sysext`, `Overlay=yes`): package list, `mkosi.version` (= Kubernetes version), `mkosi.extra/` (drop-ins, containerd.toml, sysctl, tmpfiles, preset), `mkosi.postinst` (version guard, drops `/opt`, seeds extension-release) |
+| `mkosi.images/kubernetes/` | the Kubernetes sysext (`Format=sysext`, `Overlay=yes`): package list (`kubeadm=%v kubelet=%v kubectl=%v`, pinned to the image version), `mkosi.version` (executable: prints `KUBERNETES_VERSION` from the Makefile, so one configuration builds every listed release), `mkosi.extra/` (drop-ins, containerd.toml, sysctl, tmpfiles, preset), `mkosi.postinst` (version guard, drops `/opt`, seeds extension-release) |
 | `mkosi.repart/` | partition definitions of the *base image*: ESP 256M, erofs root (zstd), verity hash, verity signature |
 | `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, `persistent-etc.service` with its script `usr/lib/vm-manager/persistent-etc` (see [Persistent state](#persistent-state)), the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp` |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>`, `verify` (base), `verify-kubernetes`, `smoke-boot` |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `verify` (base), `verify-kubernetes` (every published version), `smoke-boot` |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -49,17 +49,20 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}`; `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}` for every published version (and drops entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
 | `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
-`make kubernetes` (or `make images`) adds, via `scripts/publish-sysupdate kubernetes`:
+`make kubernetes` (one version, `KUBERNETES_VERSION`), `make kubernetes-all` (every version of
+`KUBERNETES_VERSIONS`) and `make images` (the default version) add, via
+`scripts/fetch-kubernetes-packages` and `scripts/publish-sysupdate kubernetes`:
 
 | Artifact | Content |
 |---|---|
+| `build/pkgs/<kv>/` | the release's `kubeadm`, `kubelet`, `kubectl` `.pkg.tar.zst` from the Arch Linux Archive (`signatures/` next to them, `.verified` stamp), mkosi's local repository for the sysext build |
 | `build/kubernetes_<kv>.raw` | the sysext DDI: root (erofs, zstd, `Verity=data`), root-verity, root-verity-sig; no ESP |
 | `build/kubernetes_<kv>.roothash` | its verity root hash |
-| `build/sysupdate/kubernetes/` | what vm-manager serves at `.../sysupdate/kubernetes/`: `kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg` |
+| `build/sysupdate/kubernetes/` | what vm-manager serves at `.../sysupdate/kubernetes/`: one `kubernetes_<kv>.raw` per published version, `SHA256SUMS` over all of them, `SHA256SUMS.gpg`. Publishing a version replaces only that version's file (`publish-sysupdate` accumulates, for `base` too) |
 
 Root and verity partition UUIDs are derived from the root hash (first/last 128 bits),
 which is how `roothash=` locates them; that is why the sysupdate file names carry
@@ -418,19 +421,48 @@ reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
   `ARCHITECTURE=x86-64`, `EXTENSION_RELOAD_MANAGER=1` (daemon-reload after the merge so
   the units above are seen).
 
-Version pinning: `mkosi.images/kubernetes/mkosi.version` is the Kubernetes version and
-becomes `ImageVersion=`, the file name `kubernetes_<kv>.raw`, `SYSEXT_VERSION_ID` and the
-`@v` of the sysupdate transfer. Packages come from the Arch repositories; `mkosi.postinst`
-fails the build when the installed kubeadm is not `<kv>`, `verify-kubernetes` runs the
-extracted `kubeadm version`/`kubelet --version`. A new Kubernetes version: bump
-`mkosi.version` to what `pacman -Si kubeadm` offers, `make kubernetes verify-kubernetes`
-(rebuilds only the sysext; `make clean` if the base tree changed), publish
-`build/sysupdate/kubernetes/`. The base image is untouched by a Kubernetes bump.
+Versions: `KUBERNETES_VERSIONS` in the Makefile (newest first, `1.36.4 1.35.4`) lists the
+releases that are built; `KUBERNETES_VERSION` (default: the first) is the one `make
+kubernetes` builds and `make images` builds in the same mkosi run as the base image, `make
+kubernetes-all` builds every one and `make` (all) does both. The version becomes the
+sysext's `ImageVersion=` through `mkosi.images/kubernetes/mkosi.version`, an executable that
+prints the exported `KUBERNETES_VERSION` (mkosi runs an executable `mkosi.version`), and
+with it the file name `kubernetes_<kv>.raw`, `SYSEXT_VERSION_ID` and the `@v` of the
+sysupdate transfer. The base image is untouched by any of this.
+
+Where the packages come from: the official Arch repositories carry one Kubernetes release
+at a time (`pacman -Si kubeadm`), the [Arch Linux Archive](https://archive.archlinux.org/packages/)
+keeps every build ever published. `scripts/fetch-kubernetes-packages <kv> build/pkgs/<kv>`
+(target `kubernetes-packages`) reads the archive's index for `kubeadm`, `kubelet` and
+`kubectl`, downloads the highest pkgrel of `<kv>` with its `.sig`, and verifies the
+signature against the Arch packagers' keyring (`/usr/share/pacman/keyrings/archlinux.gpg`,
+the `archlinux-keyring` package; keys on `archlinux-revoked` are refused) because mkosi's
+local repository is `SigLevel = Never`. The directory is handed to mkosi as
+`--volatile-package-directory=` (a local pacman repository that precedes the official
+ones; "volatile" keeps it out of the incremental cache manifest, so the cached base tree
+survives a version switch), and the subimage pins `kubeadm=%v kubelet=%v kubectl=%v`: a
+release the directory lacks fails the build instead of silently installing what the
+repositories offer, and `mkosi.postinst` still refuses an installed kubeadm that is not
+`<kv>`. `containerd`, `runc`, `crictl` and `cni-plugins` come from the current repositories
+(the same set for every release: both sysexts of this repository state carry
+containerd 2.3.5, runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1; `verify-kubernetes` prints
+what a sysext holds).
+
+Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
+KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
+`build/sysupdate/kubernetes/` then serves the new file next to the old ones,
+`SHA256SUMS` is regenerated over all of them and re-signed, `build/policy.json` gains
+`pcr13.<kv>`, and vm-manager's catalog (`internal/images`, `get_image`) lists it. Retiring a
+release: remove it from the list, delete `build/sysupdate/kubernetes/kubernetes_<kv>.raw`,
+publish any version (`make kubernetes`) so the manifest no longer names it, and
+`verify-kubernetes` drops its `pcr13` entry. `make kubernetes` for a version rebuilds only
+that sysext (`make clean` if the base tree changed) and replaces only that version's file.
 
 How the VM receives it: vm-manager serves `build/sysupdate/kubernetes/` at
-`http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/` (`kubernetes_<kv>.raw`,
-`SHA256SUMS`, `SHA256SUMS.gpg`, unfiltered) and `/kubernetes-version` with the version
-the VM was created with. `vm-kubernetes.service` (base image, enabled, `WantedBy=multi-user.target`,
+`http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/` (every published
+`kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg`, unfiltered) and `/kubernetes-version`
+with the version the VM was created with (`create_vm` accepts only a version the manifest
+lists, the newest is the default). `vm-kubernetes.service` (base image, enabled, `WantedBy=multi-user.target`,
 `After=network-online.target systemd-imds-import.service systemd-sysext.service
 systemd-tpm2-setup.service`, skipped on the installer boot by
 `ConditionCredential=!vm.install-target` and on a boot with `systemd.imds=no` on the
@@ -479,6 +511,13 @@ exits and `Restart=always` brings it back every 10 s: `activating (auto-restart)
 
 Lifecycle: `InstancesMax=2` in the transfer is the minimum sysupdate.d(5) accepts, hence
 step 2 (a superseded file is removed before the refresh, never left for a later boot).
+Several served versions change nothing for the guest: `systemd-sysupdate update <kv>`
+installs the named version only ("Selected update '1.35.4' is not the newest, proceeding
+anyway" in the journal when a newer one is served), the vacuum finds nothing to remove on a
+fresh VM, and the merge sees the one file. `e2e/kubernetes_versions_test.go` creates one
+VM per published version and checks each pulled, merged and measured its own
+(`systemd-sysupdate list` shows the other as a candidate, never on disk), and that an
+unpublished version is refused by `create_vm`.
 A changed `/kubernetes-version` takes effect on the next boot: the early
 `systemd-sysext.service` still merges the old file, the unit then replaces it and
 refreshes, and PCR 13 carries only the new version because the unit measures once, after
