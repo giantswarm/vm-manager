@@ -102,9 +102,18 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
   restarts (`doc.go` has the addressing).
 - `internal/nonce` — the one nonce store (5 min TTL, single use) the IMDS hands
   to both attestors.
-- `internal/runtime/proc` — starts and supervises long-running host processes
-  (QEMU, swtpm) behind the injectable `Exec` interface: `OSExec` for the host,
-  `FakeExec` for tests, `Tail` for bounded stderr capture.
+- `internal/runtime/proc` — starts and supervises long-running host
+  processes (QEMU, swtpm) behind the injectable `Exec` interface, the
+  long-running counterpart of `host.Runner`. `SystemdExec` runs each
+  command as a transient systemd service (`systemd-run --service-type=exec
+  -p RemainAfterExit=yes`, user or system manager) that outlives
+  vm-manager and can be picked up again by `Attach` from the persisted
+  `Handle` (unit name + PID; exit via a pidfd, status from `systemctl
+  show`); `SelectLauncher` chooses it when a manager is reachable and
+  `OSExec` (plain children) otherwise. `FakeExec` is for tests (records
+  commands, the test drives exit codes and signals; it attaches by PID),
+  `Tail`/`TailFile` the bounded output capture. The integration test
+  `TestIntegrationSystemdExec` drives the host's real user manager.
 - `internal/runtime/qemu` — the VM process runtime. `Command(Spec)` is a pure
   function from a `Spec` (phase `install` or `boot`, UKI, installer DDI, target
   disk, netdevs, SMBIOS type 1, credentials as SMBIOS type 11
@@ -152,12 +161,18 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
 
 Domain packages plug in the same way as `internal/host`: a `Service` with
 context-taking methods, a field on `api.Services`, one `s.AddTool` in
-`NewMCPServer` and one route in `REST.Register` per operation, errors wrapped
-from `internal/apierr`. `cmd/serve.go` wires them in the order `internal/vm`
-documents: `storage.Detect` -> `network.NewManager` -> `qemu.ListenNotify` ->
-`tpm.New` / `qemu.New` -> `images.Load` -> `attest.New` -> `vm.New` -> `Load`,
-creates the `--default-network`, serves, and on shutdown stops every VM
-(`Close`) within `--stop-timeout` plus a 10 s grace.
+`NewMCPServer` and one route in `REST.Register` per operation, errors
+wrapped from `internal/apierr`. `cmd/serve.go` wires them in the order
+`internal/vm` documents: `storage.Detect` -> `network.NewManager` ->
+`qemu.ListenNotify` -> `proc.SelectLauncher` -> `tpm.New` / `qemu.New` ->
+`images.Load` -> `vm.New` -> `Load` (which reattaches VMs an earlier server
+left running), creates the `--default-network`, serves, and on shutdown
+leaves the VMs to the next server (`--detach-vms-on-exit`, the default with
+the systemd launcher) or stops every one (`Close`) within `--stop-timeout`.
+`e2e/restart_test.go` proves the handover end to end and prints
+`reattach_seconds`. gvisor-tap-vsock logs through
+logrus; `cmd/logrus.go` forwards it into slog and demotes its per-connection
+teardown errors to debug.
 
 ## Adding a tool
 

@@ -57,6 +57,8 @@ type harness struct {
 	metrics  *metricsRecorder
 	// attestor, when set, is the Options.Attestor of the next start.
 	attestor imds.Attestor
+	// detach is the Options.DetachOnClose of the next start.
+	detach bool
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -139,6 +141,7 @@ func (h *harness) start() {
 		Networks:         h.nets,
 		Notify:           h.notify,
 		Attestor:         h.attestor,
+		DetachOnClose:    h.detach,
 		OVMFCode:         filepath.Join(h.imageDir, "OVMF_CODE.fd"),
 		OVMFVarsTemplate: filepath.Join(h.imageDir, "OVMF_VARS.fd"),
 		Region:           "host1",

@@ -23,6 +23,10 @@ import (
 // Runtime starts QEMU processes (qemu.Runtime through QEMURuntime).
 type Runtime interface {
 	Start(ctx context.Context, spec qemu.Spec) (Instance, error)
+	// Attach picks up the QEMU an earlier vm-manager started, identified by
+	// the Handle it persisted; proc.ErrGone when nothing is left of it,
+	// proc.ErrNoReattach when the launcher cannot.
+	Attach(ctx context.Context, spec qemu.Spec, h proc.Handle) (Instance, error)
 }
 
 // Instance is a running QEMU process.
@@ -33,19 +37,29 @@ type Instance interface {
 	Stop(ctx context.Context) error
 	// Kill ends the process immediately.
 	Kill() error
+	// Detach lets go of the process without stopping it, for a shutdown
+	// that leaves the VMs to the next vm-manager.
+	Detach() error
 	// PID is the process id, what the metrics read /proc/<pid> for.
 	PID() int
+	// Handle is what the record persists for Runtime.Attach.
+	Handle() proc.Handle
 }
 
 // TPMManager starts swtpm processes (tpm.Manager through TPM).
 type TPMManager interface {
 	Start(ctx context.Context, cfg tpm.Config) (TPMInstance, error)
+	// Attach picks up the swtpm an earlier vm-manager started; the errors
+	// are those of Runtime.Attach.
+	Attach(ctx context.Context, cfg tpm.Config, h proc.Handle) (TPMInstance, error)
 }
 
 // TPMInstance is a running swtpm.
 type TPMInstance interface {
 	SocketPath() string
 	Stop(ctx context.Context) error
+	// Handle is what the record persists for TPMManager.Attach.
+	Handle() proc.Handle
 }
 
 // StorageProvider is the part of storage.Provider the service uses.

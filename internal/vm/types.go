@@ -9,6 +9,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/network"
+	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 )
 
@@ -152,6 +153,18 @@ type Paths struct {
 	SSHKey    string `json:"sshKey"`
 	UserData  string `json:"userData"`
 	Report    string `json:"report"`
+	// QEMULog is QEMU's own stdout/stderr (not the serial console); the
+	// swtpm log sits in TPMState.
+	QEMULog string `json:"qemuLog"`
+}
+
+// Processes are the host processes of the VM's current run, persisted so
+// that a restarted vm-manager can reattach to them (Load); nil while no
+// process runs. Unit is empty under the plain process launcher, whose
+// processes cannot be reattached.
+type Processes struct {
+	QEMU proc.Handle `json:"qemu"`
+	TPM  proc.Handle `json:"swtpm"`
 }
 
 // VM is the persisted record of one VM (<state>/vms/<id>/vm.json).
@@ -184,7 +197,10 @@ type VM struct {
 	ReadyAt  *time.Time `json:"readyAt,omitempty"`
 	// LastError explains a failed, stopped or degraded state.
 	LastError string `json:"lastError,omitempty"`
-	Paths     Paths  `json:"paths"`
+	// Processes are the live QEMU and swtpm, for reattaching after a
+	// vm-manager restart; nil when none runs.
+	Processes *Processes `json:"processes,omitempty"`
+	Paths     Paths      `json:"paths"`
 }
 
 // clone returns a copy the caller may hand out.
@@ -196,6 +212,10 @@ func (v *VM) clone() *VM {
 		for k, val := range v.Metadata {
 			c.Metadata[k] = val
 		}
+	}
+	if v.Processes != nil {
+		p := *v.Processes
+		c.Processes = &p
 	}
 	c.UserData = nil
 	return &c

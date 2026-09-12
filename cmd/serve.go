@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/imds"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/network"
+	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/server"
 	"github.com/giantswarm/vm-manager/internal/storage"
@@ -73,6 +75,8 @@ type serveOptions struct {
 	notifyPort     int
 	attestation    string
 	learnGolden    bool
+	launcher       string
+	detachVMs      bool
 
 	metricsEnabled          bool
 	metricsGuestSeriesLimit int
@@ -117,6 +121,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.ovmfCode, "ovmf-code", envOr("VM_MANAGER_OVMF_CODE", ovmfCode), "OVMF firmware code image VMs boot with (VM_MANAGER_OVMF_CODE)")
 	f.StringVar(&o.ovmfVars, "ovmf-vars", envOr("VM_MANAGER_OVMF_VARS", ovmfVars), "OVMF variable store template copied per VM (VM_MANAGER_OVMF_VARS)")
 	f.IntVar(&o.notifyPort, "notify-port", envInt("VM_MANAGER_NOTIFY_PORT", 0), "vsock port guests send sd_notify messages (READY=1, STATUS=) to; 0 lets the kernel pick one (VM_MANAGER_NOTIFY_PORT)")
+	f.StringVar(&o.launcher, "launcher", envOr("VM_MANAGER_LAUNCHER", string(proc.LauncherAuto)), "How QEMU and swtpm are started: systemd runs each as a transient unit (vm-manager-<id>-qemu, -swtpm) under the system manager as root or the user's own manager otherwise, so VMs survive a vm-manager restart; process runs plain children that end with vm-manager; auto picks systemd when a manager is reachable (VM_MANAGER_LAUNCHER)")
+	f.BoolVar(&o.detachVMs, "detach-vms-on-exit", envBool("VM_MANAGER_DETACH_VMS_ON_EXIT", true), "Leave running VMs to the next vm-manager on shutdown instead of stopping them; effective with the systemd launcher only, which the next start reattaches to (VM_MANAGER_DETACH_VMS_ON_EXIT)")
 	f.BoolVar(&o.metricsEnabled, "metrics-enabled", envBool("VM_MANAGER_METRICS_ENABLED", true), "Serve the Prometheus exposition at GET /metrics, outside the OAuth guard like /healthz: per-VM host metrics and the guests' systemd-report families (VM_MANAGER_METRICS_ENABLED)")
 	f.IntVar(&o.metricsGuestSeriesLimit, "metrics-guest-series-limit", envInt("VM_MANAGER_METRICS_GUEST_SERIES_LIMIT", metrics.DefaultMaxGuestSeries), "Series kept per VM from one systemd-report upload; the rest are counted in vm_guest_report_series_dropped_total (VM_MANAGER_METRICS_GUEST_SERIES_LIMIT)")
 	f.StringVar(&o.attestation, "attestation", envOr("VM_MANAGER_ATTESTATION", attestationVerify), "How guest TPM quotes are judged: verify checks signature, nonce, PCR digest, PCR 11 against the image's policy.json and PCRs 0, 2-4, 6, 7 (13 at ready) against its golden values, pinning the attestation key per VM; noop accepts any quote with a valid nonce and does not enforce user-data gating (VM_MANAGER_ATTESTATION)")
@@ -180,6 +186,12 @@ func (o *serveOptions) complete() error {
 	if o.learnGolden && o.attestation != attestationVerify {
 		return fmt.Errorf("--attestation-learn-golden needs --attestation=%s", attestationVerify)
 	}
+	if o.launcher == "" {
+		o.launcher = string(proc.LauncherAuto)
+	}
+	if !slices.Contains(proc.LauncherModes, proc.LauncherMode(o.launcher)) {
+		return fmt.Errorf("--launcher: %q is not one of %v", o.launcher, proc.LauncherModes)
+	}
 	for _, dir := range []string{o.stateDir, o.imageDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
@@ -239,8 +251,9 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err = srv.Run(ctx)
-	// The listener is down: stop the VMs (nothing could reattach to them),
-	// then the networks and the notify listener.
+	// The listener is down: leave the VMs to the next vm-manager or stop
+	// them (--detach-vms-on-exit), then the networks and the notify
+	// listener.
 	return errors.Join(err, c.close(log))
 }
 
@@ -295,12 +308,21 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 	if err != nil {
 		return nil, err
 	}
+	launcher, err := proc.SelectLauncher(proc.LauncherMode(o.launcher), log)
+	if err != nil {
+		return nil, fmt.Errorf("--launcher: %w", err)
+	}
+	detach := o.detachVMs && launcher.Persistent()
+	log.Info("vm launcher selected", "launcher", launcher.Mode(), "manager", launcher.Manager, "reason", launcher.Reason, "detachOnExit", detach)
+	if !launcher.Persistent() {
+		log.Warn("VMs run as child processes and end with vm-manager; a restart marks them stopped. Run under systemd (a user manager or as root) for VMs that survive restarts")
+	}
 	c.vm, err = vm.New(vm.Options{
 		StateDir:         o.stateDir,
 		Images:           c.images,
 		Storage:          c.storage,
-		TPM:              vm.TPM(tpm.New(tpm.Options{Logger: log})),
-		Runtime:          vm.QEMURuntime(qemu.New(qemu.Options{Logger: log, OVMFVarsTemplate: o.ovmfVars})),
+		TPM:              vm.TPM(tpm.New(tpm.Options{Exec: launcher.Exec, Logger: log})),
+		Runtime:          vm.QEMURuntime(qemu.New(qemu.Options{Exec: launcher.Exec, Logger: log, OVMFVarsTemplate: o.ovmfVars})),
 		Networks:         vm.Networks(c.networks),
 		Notify:           notifier,
 		Attestor:         attestor,
@@ -309,6 +331,7 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 		InstallTimeout:   o.installTimeout,
 		BootTimeout:      o.bootTimeout,
 		StopTimeout:      o.stopTimeout,
+		DetachOnClose:    detach,
 		Logger:           log,
 		Metrics:          reg,
 	})
@@ -366,8 +389,9 @@ func (c *components) ensureDefaultNetwork(ctx context.Context, name, cidr string
 	return nil
 }
 
-// close stops the VMs gracefully within the stop timeout, then the networks
-// and the notify listener. Safe on a partially built set.
+// close ends the VM service (detaching or stopping the VMs within the stop
+// timeout), then the networks and the notify listener. Safe on a partially
+// built set.
 func (c *components) close(log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.stopTimeout+closeGrace)
 	defer cancel()
