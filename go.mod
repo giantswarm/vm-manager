@@ -8,6 +8,8 @@ require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/giantswarm/mcp-oauth v1.3.22
 	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/google/go-tpm v0.9.8
+	github.com/google/go-tpm-tools v0.4.9
 	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9
 	github.com/mark3labs/mcp-go v1.0.0
 	github.com/mdlayher/vsock v1.3.0
