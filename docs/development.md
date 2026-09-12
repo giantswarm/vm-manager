@@ -37,9 +37,9 @@ a worker created with a `JoinConfiguration` from the control plane's
 `forward_port` 6443 with the admin kubeconfig (two Ready nodes, providerIDs
 `giantswarm-vm://cp-1` and `giantswarm-vm://w-1`), a cross-node request into a CoreDNS
 pod, and clean nodes (`systemctl --failed` empty, forwarding sysctls set, CNI links
-unmanaged by networkd). It prints `cp_ready_seconds=` and `worker_join_seconds=` (115 s
-and 52 s on the development host) and takes about 3 min; its own ceilings add up to less
-than 10 min. It needs `kubectl` on the host and internet access from the VMs (image pulls
+unmanaged by networkd). It prints `cp_ready_seconds=` and `worker_join_seconds=` (87 to
+115 s and 46 to 52 s over two runs on the development host) and takes 2.5 to 3 min; its
+own ceilings add up to less than 10 min, and the whole suite takes about 6 min. It needs `kubectl` on the host and internet access from the VMs (image pulls
 from registry.k8s.io and ghcr.io, the flannel manifest from github.com) and sets
 `VM_MANAGER_BOOT_TIMEOUT` for the server it starts, because `READY=1` waits for the
 kubeadm unit.

@@ -348,10 +348,10 @@ giantswarm-vm://cp-1}]`), `ClusterConfiguration` (`kubernetesVersion`, `networki
 the worker `JoinConfiguration` with `discovery.bootstrapToken` (`apiServerEndpoint:
 <cp ip>:6443`, the token and `caCertHashes` from `kubeadm token create
 --print-join-command` on the control plane) and the same `nodeRegistration`. Measured on
-the development host: the control plane is Ready with flannel and every pod running
-115 s after its `create_vm` (kubeadm init 55 s of that, image pulls included; installed
-boot to `READY=1` 69 s); the worker is Ready 52 s after its `create_vm` (kubeadm join
-1.2 s); the whole test takes 3 min.
+the development host (two runs): the control plane is Ready with flannel and every pod
+running 87 to 115 s after its `create_vm` (kubeadm init about 55 s of that, image pulls
+included; installed boot to `READY=1` 69 s); the worker is Ready 46 to 52 s after its
+`create_vm` (kubeadm join 1.2 s); the whole test takes 2.5 to 3 min.
 
 What sysinstall/firstboot do not cover: writing CAPI's files and units (Ignition) and
 proving integrity before secrets are released (`vm-agent attest`).
