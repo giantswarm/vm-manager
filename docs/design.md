@@ -149,7 +149,7 @@ Phase B, installed boot (every boot from now on):
    the guest reads `/kubernetes-version` from IMDS and runs
    `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
    the artifact directory is served unfiltered because its `SHA256SUMS` is signed at build
-   time), `systemd-sysext merge` measures it into PCR 13, then CAPI's unit runs `kubeadm init|join` and writes
+   time), `systemd-sysext merge` activates it (see the PCR 13 note under open points), then CAPI's unit runs `kubeadm init|join` and writes
    `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready` posts a
    second quote covering PCR 13 and the full phase path for `get_vm_attestation`.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
@@ -157,6 +157,29 @@ Phase B, installed boot (every boot from now on):
 Fast path for later: pre-install on the host with `systemd-repart` from the same
 `repart.sysinstall.d` definitions against the base DDI (needs root or `io.systemd.Repart`),
 skipping phase A when TPM-bound install credentials are not needed.
+
+### Open points found while building waves 1 and 2
+
+- **PCR 13 and sysexts.** systemd 261 measures only stub-loaded extensions
+  (`<uki>.efi.extra.d/*.sysext.raw` on the ESP) into PCR 13; extensions merged from
+  `/var/lib/extensions` are not measured. To keep the Kubernetes layer attested, either the
+  phase-A installer pulls the sysext onto the target ESP next to the UKI (a sysupdate transfer
+  with `PathRelativeTo=esp`) so the stub loads and measures it on the first installed boot, or
+  the ready-stage agent extends PCR 13 with the sysext root hash through `systemd-pcrextend`.
+  Decided in wave 3 with the attestation work.
+- **Volatile `/etc`.** The first image boots with `systemd.volatile=overlay` because
+  firstboot needs a writable `/etc`. Everything Ignition writes there is lost on reboot, so
+  Kubernetes nodes would not survive a restart. Wave 3 makes `/etc` persistent (an overlay
+  whose upper directory lives in `/var`, set up in the initrd) before the Kubernetes e2e.
+- **Host loopback alias.** The virtual network can translate `HostIP()` to the host's
+  `127.0.0.1`, which would expose vm-manager's own API to unattested guests. It is opt-in
+  per network (`EnableHostAlias`) and off for VM networks.
+- **Sysext file lifecycle.** systemd-sysext merges every `kubernetes_*.raw` it finds, so a
+  version change must remove the superseded file (the transfer uses `InstancesMax=2`, so
+  vm-manager or the guest unit deletes the old one after a successful switch).
+- **VM processes and vm-manager restarts.** v1 runs QEMU and swtpm as child processes;
+  a vm-manager restart marks VMs stopped. Running each VM as a transient systemd unit
+  (`systemd-run --scope`) is the planned fix.
 
 ## IMDS contract (Giant Swarm provider)
 
