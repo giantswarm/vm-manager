@@ -1,29 +1,35 @@
 #!/usr/bin/env bash
-# Lay out the systemd-sysupdate directories vm-manager serves under
-# http://169.254.169.254/giantswarm/v1/sysupdate/<component>/ from the split
+# Lay out one systemd-sysupdate component directory, as vm-manager serves it
+# under http://169.254.169.254/giantswarm/v1/sysupdate/<component>/, from the
 # mkosi artifacts:
 #
-#   build/sysupdate/base/
-#     <id>_<v>_<root-partuuid>.root.raw      -> /usr/lib/sysupdate.d/60-root.transfer
-#     <id>_<v>_<verity-partuuid>.verity.raw  -> 50-verity.transfer
-#     <id>_<v>.verity-sig.raw                -> 55-verity-sig.transfer
-#     <id>_<v>.efi                           -> 70-uki.transfer
-#     SHA256SUMS, SHA256SUMS.gpg
-#   build/sysupdate/kubernetes/   (empty manifest until the sysext exists)
+#   publish-sysupdate base <build> <image-id> <version> <keys>
+#     build/sysupdate/base/
+#       <id>_<v>_<root-partuuid>.root.raw      -> /usr/lib/sysupdate.d/60-root.transfer
+#       <id>_<v>_<verity-partuuid>.verity.raw  -> 50-verity.transfer
+#       <id>_<v>.verity-sig.raw                -> 55-verity-sig.transfer
+#       <id>_<v>.efi                           -> 70-uki.transfer
+#   publish-sysupdate kubernetes <build> kubernetes <version> <keys>
+#     build/sysupdate/kubernetes/
+#       kubernetes_<v>.raw                     -> /usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer
 #
-# The partition UUIDs are encoded in the file names (@u) because they are
-# derived from the verity root hash and roothash= on the UKI command line
-# only finds partitions carrying exactly those UUIDs.
+# Each directory gets SHA256SUMS and a detached SHA256SUMS.gpg (keys/gnupg),
+# which the guest verifies against /etc/systemd/import-pubring.pgp.
+#
+# The base partition UUIDs are encoded in the file names (@u) because they are
+# derived from the verity root hash and roothash= on the UKI command line only
+# finds partitions carrying exactly those UUIDs.
 set -euo pipefail
 
-build="${1:?build dir}" id="${2:?image id}" version="${3:?version}" keys="${4:?keys dir}"
+component="${1:?component (base|kubernetes)}" build="${2:?build dir}" id="${3:?image id}" version="${4:?version}" keys="${5:?keys dir}"
 name="${id}_${version}"
-img="$build/$name.raw"
-[[ -s "$img" ]] || { echo "publish-sysupdate: $img missing" >&2; exit 1; }
+out="$build/sysupdate/$component"
+
+link() { ln -f "$build/$1" "$out/$2" 2>/dev/null || cp --reflink=auto "$build/$1" "$out/$2"; }
 
 partuuid() {
-        # $1: GPT partition type name as printed by sfdisk (e.g. "Linux root (x86-64)")
-        sfdisk --json "$img" | python3 -c '
+        # $1: GPT partition type GUID as printed by sfdisk
+        sfdisk --json "$build/$name.raw" | python3 -c '
 import json, sys
 want = sys.argv[1]
 for p in json.load(sys.stdin)["partitiontable"]["partitions"]:
@@ -33,30 +39,31 @@ else:
     sys.exit(f"no partition of type {want!r}")
 ' "$1"
 }
-root_uuid="$(partuuid 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709)"
-verity_uuid="$(partuuid 2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5)"
 
-out="$build/sysupdate/base"
 rm -rf "$out"
 mkdir -p "$out"
-link() { ln -f "$build/$1" "$out/$2" 2>/dev/null || cp --reflink=auto "$build/$1" "$out/$2"; }
-link "$name.root-x86-64.raw"            "${name}_${root_uuid}.root.raw"
-link "$name.root-x86-64-verity.raw"     "${name}_${verity_uuid}.verity.raw"
-link "$name.root-x86-64-verity-sig.raw" "$name.verity-sig.raw"
-link "$name.efi"                        "$name.efi"
+case "$component" in
+base)
+        [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing" >&2; exit 1; }
+        root_uuid="$(partuuid 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709)"
+        verity_uuid="$(partuuid 2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5)"
+        link "$name.root-x86-64.raw"            "${name}_${root_uuid}.root.raw"
+        link "$name.root-x86-64-verity.raw"     "${name}_${verity_uuid}.verity.raw"
+        link "$name.root-x86-64-verity-sig.raw" "$name.verity-sig.raw"
+        link "$name.efi"                        "$name.efi"
+        ;;
+kubernetes)
+        [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing (run make kubernetes)" >&2; exit 1; }
+        link "$name.raw" "$name.raw"
+        ;;
+*)
+        echo "publish-sysupdate: unknown component $component" >&2
+        exit 1
+        ;;
+esac
 
-sign() {
-        local dir="$1"
-        # An empty directory yields an empty (still signed) manifest.
-        (cd "$dir" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n' | sort | xargs -r sha256sum >| SHA256SUMS)
-        GNUPGHOME="$keys/gnupg" gpg --batch --quiet --yes --detach-sign \
-                --output "$dir/SHA256SUMS.gpg" "$dir/SHA256SUMS"
-}
-sign "$out"
-
-k8s="$build/sysupdate/kubernetes"
-mkdir -p "$k8s"
-[[ -e "$k8s/SHA256SUMS" ]] || sign "$k8s"
+(cd "$out" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n' | sort | xargs -r sha256sum >| SHA256SUMS)
+GNUPGHOME="$keys/gnupg" gpg --batch --quiet --yes --detach-sign --output "$out/SHA256SUMS.gpg" "$out/SHA256SUMS"
 
 echo "publish-sysupdate: $out"
 sed 's/^/  /' "$out/SHA256SUMS"

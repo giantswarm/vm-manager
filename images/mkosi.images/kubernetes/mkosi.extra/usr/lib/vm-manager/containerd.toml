@@ -1,0 +1,24 @@
+# containerd configuration of the kubernetes sysext, loaded through
+# containerd.service.d/10-vm-manager.conf. Only deviations from
+# `containerd config default` of the shipped containerd (2.3, config version 4)
+# are listed; the default sandbox image (registry.k8s.io/pause:3.10.2) is the
+# one kubeadm 1.36 expects.
+version = 4
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd]
+  default_runtime_name = 'runc'
+
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+    runtime_type = 'io.containerd.runc.v2'
+
+    # cgroup v2 with the systemd cgroup driver, the kubelet default since
+    # kubeadm 1.22 (cgroupDriver: systemd).
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+      SystemdCgroup = true
+
+[plugins.'io.containerd.cri.v1.runtime'.cni]
+  # First match wins: plugins a CNI DaemonSet installs into /opt/cni/bin
+  # (writable per boot, systemd.volatile=overlay) take precedence over the
+  # reference plugins shipped in this extension.
+  bin_dirs = ['/opt/cni/bin', '/usr/lib/cni']
+  conf_dir = '/etc/cni/net.d'

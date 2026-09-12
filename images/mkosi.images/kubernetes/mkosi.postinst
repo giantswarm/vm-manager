@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Post-installation for the kubernetes sysext. $BUILDROOT is the merged overlay
+# view (base tree below, this image's changes on top); only /usr and /opt of the
+# upper layer end up in the extension.
+set -euo pipefail
+
+# The image version is the Kubernetes version. Refuse to build an extension
+# whose name lies about its content once the Arch repositories moved on.
+installed="$(basename "$(ls -d "$BUILDROOT"/var/lib/pacman/local/kubeadm-[0-9]*)")"
+installed="${installed#kubeadm-}"
+installed="${installed%-*}"
+if [[ "$installed" != "$IMAGE_VERSION" ]]; then
+        echo "kubernetes: mkosi.version says $IMAGE_VERSION but kubeadm $installed was installed; bump mkosi.images/kubernetes/mkosi.version" >&2
+        exit 1
+fi
+
+# cni-plugins installs the reference plugins to both /usr/lib/cni and
+# /opt/cni/bin. /opt stays with the base system (writable per boot through
+# systemd.volatile=overlay) so CNI DaemonSets can install their binaries into
+# /opt/cni/bin; containerd.toml searches both directories.
+rm -rf "$BUILDROOT/opt/cni"
+
+# Seed the extension-release file. mkosi appends ID, SYSEXT_ID, SYSEXT_VERSION_ID,
+# SYSEXT_SCOPE and ARCHITECTURE after this script; EXTENSION_RELOAD_MANAGER makes
+# systemd-sysext reload the service manager after the merge, so the units and
+# drop-ins shipped here are seen.
+release="$BUILDROOT/usr/lib/extension-release.d/extension-release.${IMAGE_ID}_${IMAGE_VERSION}"
+install -d "$(dirname "$release")"
+printf 'EXTENSION_RELOAD_MANAGER=1\n' >| "$release"

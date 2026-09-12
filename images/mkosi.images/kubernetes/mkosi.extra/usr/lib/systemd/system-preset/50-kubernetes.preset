@@ -1,0 +1,5 @@
+# Policy for `systemctl preset` (an image that bakes this extension in, or an
+# operator running preset-all). Starting the units on a system that merged the
+# extension at boot is done by multi-user.target.d/10-kubernetes.conf (Upholds=).
+enable containerd.service
+enable kubelet.service
