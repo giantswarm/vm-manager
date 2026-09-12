@@ -30,7 +30,7 @@ observed through the io.systemd.Metrics Varlink interface and systemd-report.
 | Network | Rootless userspace SDN via gvisor-tap-vsock embedded in vm-manager | No root, runs on laptops and GitHub Actions; IMDS served inside the stack |
 | Attestation | swtpm vTPM + measured boot; vm-manager verifies a TPM quote and gates user-data | The "shielded VM" story: only integrity-proven VMs get bootstrap secrets |
 | Kubernetes | systemd-sysext layer pulled at boot as a systemd-sysupdate component | One base image, N Kubernetes versions, measured into PCR 13 |
-| User-data executor | Go guest agent (`vm-agent`) applies the CAPI cloud-config subset (proposed default) | sysinstall/firstboot cover OS identity, not kubeadm; agent exists anyway for the quote |
+| User-data executor | Ignition in the mkosi initrd; cluster-manager sets KubeadmConfig `format: ignition` | The standard first-boot provisioner for immutable images (Flatcar, FCOS); the guest agent only attests |
 | CI | GitHub Actions with KVM for image build + boot e2e; unit/lint everywhere | Hosted runners expose /dev/kvm; no self-hosted infra to start |
 | Repo | github.com/giantswarm/vm-manager, public, team-bumblebee | Consistent with siblings |
 
@@ -99,8 +99,15 @@ mkosi project with two images:
     `http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes` into
     `/var/lib/extensions/kubernetes_@v.raw`; `/usr/lib/sysupdate.d/` for OS A/B updates from
     `.../sysupdate/base`; `/etc/systemd/import-pubring.pgp` holds the build key.
-  - `vm-agent` with `vm-agent-attest.service`, `vm-agent-bootstrap.service`,
-    `systemd-report-upload.timer` posting to `.../report`.
+  - `vm-agent` (attestation only) with `vm-agent-attest.service` in the initrd and the
+    real system, and `systemd-report-upload.timer` posting to `.../report`.
+  - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
+    Ignition with its stock `ignition-*` units (fetch, disks, mount, files, complete).
+    The UKI cmdline carries `ignition.platform.id=metal
+    ignition.config.url=http://169.254.169.254/giantswarm/v1/user-data`; vm-manager adds
+    `ignition.firstboot` through the `io.systemd.stub.kernel-cmdline-extra` SMBIOS string
+    only on the first installed boot. Ignition comes from a pinned upstream release built
+    during the image build; Arch has no official package.
 - `images/kubernetes`: sysext DDI with kubeadm, kubelet, containerd, runc, crictl,
   cni-plugins and their units; `extension-release.kubernetes` matching the base.
 
@@ -130,17 +137,20 @@ Phase A, installer boot (no persistent disk yet):
 Phase B, installed boot (every boot from now on):
 
 4. OVMF -> systemd-boot -> UKI (measured into PCR 11 with `.pcrsig`), credentials from the
-   ESP, initrd: verity root, repart grows var, systemd-imdsd early network + import
-   (hostname, ssh key, user-data -> `/run/credstore`), systemd-firstboot (machine-id,
-   hostname, locale/timezone), networkd DHCP from the virtual network.
-5. `systemd-sysupdate --component=kubernetes update` pulls the requested version; the IMDS
-   directory view lists only the version this VM was created with. `systemd-sysext merge`
-   measures it into PCR 13.
-6. `vm-agent attest`: fetches a nonce, quotes PCRs 0-7, 11, 13 with an AK, posts quote +
-   event logs. vm-manager verifies and marks the VM attested; until then `/user-data` is 403.
-7. `vm-agent bootstrap`: reads user-data through `io.systemd.InstanceMetadata`, applies the
-   cloud-config subset (`write_files`, `runcmd`, `users`, `hostname`), which runs
-   `kubeadm init|join` and writes `/run/cluster-api/bootstrap-success.complete`.
+   ESP. In the initrd: verity root, repart grows var, systemd-imdsd early network brings up
+   DHCP from the virtual network, imds import (hostname, ssh key -> `/run/credstore`).
+5. Still in the initrd, `vm-agent attest --stage=initrd` fetches a nonce, quotes PCRs 0-7
+   and 11 (phase `enter-initrd`) with an AK and posts quote + event logs. vm-manager
+   verifies and marks the VM attested; until then `/user-data` is 403.
+6. Ignition (first boot only) fetches the Ignition config from `/user-data`, runs its
+   disks/files stages, which write CAPI's files and systemd units (kubeadm config, the
+   kubeadm unit), then the initrd switches root.
+7. Real system: systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
+   `systemd-sysupdate --component=kubernetes update` pulls the requested version (the IMDS
+   directory view lists only the version this VM was created with), `systemd-sysext merge`
+   measures it into PCR 13, then CAPI's unit runs `kubeadm init|join` and writes
+   `/run/cluster-api/bootstrap-success.complete`. `vm-agent attest --stage=ready` posts a
+   second quote covering PCR 13 and the full phase path for `get_vm_attestation`.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
 
 Fast path for later: pre-install on the host with `systemd-repart` from the same
@@ -158,19 +168,21 @@ hwdb record at image build time.
 | `/hostname` | `IMDS_KEY_HOSTNAME` | VM name |
 | `/region`, `/zone` | `IMDS_KEY_REGION/ZONE` | host name, network name |
 | `/public-keys/0` | `IMDS_KEY_SSH_KEY` | first authorized key |
-| `/user-data` | `IMDS_KEY_USERDATA` | CAPI bootstrap data, gated by attestation |
+| `/user-data` | `IMDS_KEY_USERDATA` | CAPI bootstrap data as Ignition JSON, gated by attestation |
 | `/instance-id`, `/kubernetes-version`, `/metadata/<k>` | extra | plain values |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |
 | `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts |
 
 Attestation protocol: `GET /attest/nonce` returns 32 hex bytes valid 5 minutes.
-`POST /attest/quote` with JSON `{nonce, ak_pub, ek_pub, quote, signature, pcrs:{sha256:{"0":..}},
-event_log, userspace_log}` (binary fields base64). Verification: signature over the quote
-with `ak_pub`, nonce match, PCR digest matches `pcrs`, PCR 11 in the set computed with
-`systemd-measure calculate` for the image's UKI and phase path
-`enter-initrd:leave-initrd:sysinit:ready`, PCRs 0-7 and 13 equal the image policy's golden
-values recorded by `vm-manager image golden`. AK is trusted on first use in the prototype
+`POST /attest/quote` with JSON `{stage, nonce, ak_pub, ek_pub, quote, signature,
+pcrs:{sha256:{"0":..}}, event_log, userspace_log}` (binary fields base64, `stage` is
+`initrd` or `ready`). Verification: signature over the quote with `ak_pub`, nonce match,
+PCR digest matches `pcrs`, PCR 11 equals the value computed with `systemd-measure calculate`
+for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
+`enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0-7 (and 13 for `ready`)
+equal the image policy's golden values recorded by `vm-manager image golden`. Only the
+`initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
 
 ## How CAPI fits
@@ -179,10 +191,12 @@ CAPI's kubeadm bootstrap provider writes cloud-config (or Ignition) into a Secre
 an infrastructure provider to hand it to a VM that runs it and registers as a node. With
 vm-manager:
 
-1. cluster-manager (or an agent) calls `create_vm` with `user_data` set to the bootstrap
-   Secret's content, plus `kubernetes_version`, network and sizing.
-2. The VM installs (phase A), boots (phase B), attests, and only then receives the
-   user-data; `vm-agent bootstrap` runs kubeadm exactly as cloud-init would.
+1. cluster-manager (or an agent) sets KubeadmConfig `format: ignition` and calls
+   `create_vm` with `user_data` set to the bootstrap Secret's Ignition JSON, plus
+   `kubernetes_version`, network and sizing. The config should order the kubeadm unit after
+   `systemd-sysext.service`; cluster-manager can add that through `additionalConfig`.
+2. The VM installs (phase A), boots (phase B), attests from the initrd, and only then does
+   Ignition receive the user-data and write CAPI's files and units; kubeadm runs from those.
 3. The node's `providerID` is `giantswarm-vm://<vm-id>`, set via kubelet extra args in the
    KubeadmConfig; `get_vm` reports IP, attestation, and readiness so the caller can set the
    infra Machine ready when the node registers.
@@ -192,8 +206,8 @@ vm-manager:
    glue) that wraps this API is a follow-up; the prototype's e2e tests use kubeadm
    cloud-config shaped exactly like CAPI's output.
 
-What sysinstall/firstboot do not cover, and therefore needs the agent: running kubeadm,
-writing CAPI's files, and proving integrity before secrets are released.
+What sysinstall/firstboot do not cover: writing CAPI's files and units (Ignition) and
+proving integrity before secrets are released (`vm-agent attest`).
 
 ## MCP tool surface (v1)
 
@@ -208,10 +222,10 @@ require_attestation, wait_for none|installed|attested|ready), `start_vm`, `stop_
 
 | Tier | Target | Budget | Runs |
 |---|---|---|---|
-| T0 unit | every package with fakes (fake runtime, fake storage, httptest IMDS, CAPI cloud-config fixtures, go-tpm simulator) | < 30 s | every PR |
+| T0 unit | every package with fakes (fake runtime, fake storage, httptest IMDS, CAPI Ignition fixtures, go-tpm simulator) | < 30 s | every PR |
 | T1 contract | in-process MCP client over httptest against the fake runtime; REST parity via `statusFor` | < 10 s | every PR |
 | T2 image | mkosi build + `image-verify`: `systemd-dissect`, `ukify inspect`, `systemd-measure calculate` | minutes, cached | every PR touching images/ |
-| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM: install + reboot + READY, IMDS + firstboot, attestation pass and tampered fail, sysext merged, single-node kubeadm, 1 CP + 1 worker | < 90 s per test | every PR on a KVM runner, nightly full |
+| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM: install + reboot + READY, IMDS + firstboot, attestation pass and tampered fail, Ignition files + units applied, sysext merged, single-node kubeadm, 1 CP + 1 worker | < 90 s per test | every PR on a KVM runner, nightly full |
 
 Boot-time budgets are asserted in T3 and exported as metrics: installer phase to reboot
 < 60 s, installed boot to READY < 10 s.
