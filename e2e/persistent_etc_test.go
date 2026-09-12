@@ -187,12 +187,13 @@ func assertEtcPersisted(ctx context.Context, t *testing.T, g *guest, before, aft
 	require.NoError(t, err)
 	assert.Equal(t, "running", strings.TrimSpace(state.Stdout), "system state (exit %d)", state.ExitCode)
 
-	// The initrd's fsck of var on this boot tells whether the previous
-	// shutdown unmounted it cleanly: a dirty ext4 makes it replay the journal.
-	// Today it does ("recovering journal"): systemd-shutdown cannot unmount
-	// the /etc overlay, which pins var's writers; see images/README.md,
-	// "Persistent state", known limitation. Logged, not asserted, until that
-	// is solved; the data is safe (systemd-shutdown syncs before power-off).
+	// The initrd's fsck of var on this boot proves the partition was checked
+	// before it was mounted: e2fsck always ends with the "clean" summary line.
+	// A dirty ext4 additionally logs "recovering journal" first, and today it
+	// does: systemd-shutdown cannot unmount the /etc overlay, which pins var's
+	// writers; see images/README.md, "Persistent state", known limitation.
+	// That recovery is logged, not asserted, until it is solved; the data is
+	// safe (systemd-shutdown syncs before power-off).
 	setup := g.sh(ctx, "journalctl -b -o cat --no-pager -u "+etcSetupUnit)
 	t.Logf("%s on the new boot (fsck of var):\n%s", etcSetupUnit, setup)
 	assert.Contains(t, setup, "var: clean", "%s did not fsck var", etcSetupUnit)

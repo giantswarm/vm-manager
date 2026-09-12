@@ -26,7 +26,11 @@ udevadm settle --timeout=30 || true
 # What an fstab entry would do for the partition: systemd-fsck honours
 # fsck.mode=/fsck.repair=, systemd-growfs grows the file system into a
 # partition systemd-repart enlarged (x-systemd.growfs is fstab-only).
-if [ -b "$var" ] && /usr/lib/systemd/systemd-fsck "$var" && mount -t ext4 "$var" "$sysroot/var"; then
+# Every mount is guarded by mountpoint(1): a restart of the unit must not
+# stack a second, empty layer over the persistent one.
+if mountpoint -q "$sysroot/var"; then
+        :
+elif [ -b "$var" ] && /usr/lib/systemd/systemd-fsck "$var" && mount -t ext4 "$var" "$sysroot/var"; then
         /usr/lib/systemd/systemd-growfs "$sysroot/var" || true
 else
         # No var partition yet (a plain boot of the base image; systemd-repart
@@ -38,12 +42,13 @@ fi
 
 # An empty upper hides nothing: the lower is the image's /etc.
 mkdir -p "$state/upper" "$state/work"
-mount -t overlay -o "lowerdir=$sysroot/etc,upperdir=$state/upper,workdir=$state/work" overlay "$sysroot/etc"
+mountpoint -q "$sysroot/etc" ||
+        mount -t overlay -o "lowerdir=$sysroot/etc,upperdir=$state/upper,workdir=$state/work" overlay "$sysroot/etc"
 
 # bind <directory under /> <directory under /var> <mode>
 bind() {
         mkdir -p -m "$3" "$sysroot/var/$2"
-        mount --bind "$sysroot/var/$2" "$sysroot/$1"
+        mountpoint -q "$sysroot/$1" || mount --bind "$sysroot/var/$2" "$sysroot/$1"
 }
 bind root roothome 0700
 bind opt opt 0755

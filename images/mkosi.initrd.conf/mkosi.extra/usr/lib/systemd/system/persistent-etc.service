@@ -18,6 +18,10 @@ After=sysroot.mount systemd-repart.service
 Before=initrd-root-fs.target systemd-sysext-sysroot.service systemd-confext-sysroot.service
 Conflicts=shutdown.target
 Before=shutdown.target
+# A root without its persistent /etc would boot into confusing EROFS failures
+# (firstboot, sshd host keys, Ignition); stop in the emergency shell instead.
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
 
 [Service]
 Type=oneshot
