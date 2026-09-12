@@ -56,6 +56,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/host"
@@ -205,7 +206,13 @@ func Detect(ctx context.Context, logger *slog.Logger, fallbackDir string) Provid
 	return NewFileProvider(fallbackDir)
 }
 
+// probeTimeout bounds Detect's handshake with one provider socket so a
+// listening but unresponsive provider cannot stall startup.
+const probeTimeout = 3 * time.Second
+
 func probe(ctx context.Context, socket string) (*varlink.ServiceInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
 	conn, err := varlink.Dial(ctx, socket)
 	if err != nil {
 		return nil, err

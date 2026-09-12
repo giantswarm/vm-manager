@@ -113,9 +113,20 @@ type Conn struct {
 	conn *net.UnixConn
 	err  error // set once the connection is closed or broken
 
-	rbuf []byte // received bytes not yet consumed
-	oob  []byte // ancillary data buffer, reused across reads
-	fds  []int  // rights received but not yet attached to a message
+	rbuf   []byte        // received bytes not yet consumed
+	pos    int64         // stream offset of rbuf[0]
+	oob    []byte        // ancillary data buffer, reused across reads
+	rights []rightsBatch // rights received but not yet attached to a message
+}
+
+// rightsBatch is one SCM_RIGHTS payload together with the stream offset of
+// the first data byte it arrived with. Services send a message and its file
+// descriptors in one sendmsg(2), and the kernel never merges bytes carrying
+// different ancillary data into one recvmsg(2), so that offset is the first
+// byte of the message the descriptors belong to.
+type rightsBatch struct {
+	at  int64
+	fds []int
 }
 
 // Dial connects to the Varlink service listening on the AF_UNIX socket at
@@ -148,10 +159,12 @@ func (c *Conn) shutdown(cause error) error {
 		return nil
 	}
 	c.err = cause
-	for _, fd := range c.fds {
-		_ = unix.Close(fd)
+	for _, b := range c.rights {
+		for _, fd := range b.fds {
+			_ = unix.Close(fd)
+		}
 	}
-	c.fds = nil
+	c.rights = nil
 	return c.conn.Close()
 }
 
@@ -206,20 +219,30 @@ func (c *Conn) CallWithFiles(ctx context.Context, method string, params, out any
 // from fn stops the stream and is returned; if replies were still pending
 // the connection is closed. Files on stream replies are closed.
 func (c *Conn) CallMore(ctx context.Context, method string, params any, fn func(json.RawMessage) error) error {
+	return c.CallMoreWithFiles(ctx, method, params, func(raw json.RawMessage, files []*os.File) error {
+		closeFiles(files)
+		return fn(raw)
+	})
+}
+
+// CallMoreWithFiles is CallMore for streams whose replies carry file
+// descriptors: fn receives the files sent with each reply and owns them.
+func (c *Conn) CallMoreWithFiles(ctx context.Context, method string, params any, fn func(json.RawMessage, []*os.File) error) error {
 	return c.do(ctx, func() error {
 		if err := c.send(request{Method: method, Parameters: orEmpty(params), More: true}); err != nil {
 			return err
 		}
 		for {
 			r, files, err := c.receive()
-			closeFiles(files)
 			if err != nil {
+				closeFiles(files)
 				return err
 			}
 			if r.Error != "" {
+				closeFiles(files)
 				return &Error{Name: r.Error, Parameters: r.Parameters}
 			}
-			if err := fn(r.Parameters); err != nil {
+			if err := fn(r.Parameters, files); err != nil {
 				if r.Continues {
 					return err
 				}
@@ -329,8 +352,10 @@ func (c *Conn) receive() (*reply, []*os.File, error) {
 			if err := json.Unmarshal(msg, &r); err != nil {
 				return nil, nil, fmt.Errorf("varlink: malformed reply: %w", err)
 			}
+			end := c.pos + int64(i)
 			c.rbuf = append(c.rbuf[:0], c.rbuf[i+1:]...)
-			return &r, c.takeFiles(), nil
+			c.pos = end + 1
+			return &r, c.takeFiles(end), nil
 		}
 		if len(c.rbuf) > maxMessageSize {
 			return nil, nil, fmt.Errorf("varlink: reply exceeds %d bytes", maxMessageSize)
@@ -344,9 +369,10 @@ func (c *Conn) receive() (*reply, []*os.File, error) {
 // read performs one recvmsg(2), appending data to rbuf and rights to fds.
 func (c *Conn) read() error {
 	buf := make([]byte, readChunk)
+	at := c.pos + int64(len(c.rbuf))
 	n, oobn, flags, _, err := c.conn.ReadMsgUnix(buf, c.oob)
 	if oobn > 0 {
-		if cerr := c.collectRights(c.oob[:oobn]); cerr != nil {
+		if cerr := c.collectRights(c.oob[:oobn], at); cerr != nil {
 			return cerr
 		}
 	}
@@ -365,7 +391,7 @@ func (c *Conn) read() error {
 	return nil
 }
 
-func (c *Conn) collectRights(oob []byte) error {
+func (c *Conn) collectRights(oob []byte, at int64) error {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return fmt.Errorf("varlink: parse ancillary data: %w", err)
@@ -378,26 +404,31 @@ func (c *Conn) collectRights(oob []byte) error {
 		if err != nil {
 			return fmt.Errorf("varlink: parse SCM_RIGHTS: %w", err)
 		}
-		c.fds = append(c.fds, fds...)
+		c.rights = append(c.rights, rightsBatch{at: at, fds: fds})
 	}
 	return nil
 }
 
-// takeFiles wraps the pending descriptors as *os.File and clears them.
-// ReadMsgUnix receives with MSG_CMSG_CLOEXEC, so the fds are already
-// close-on-exec.
-func (c *Conn) takeFiles() []*os.File {
-	if len(c.fds) == 0 {
-		return nil
-	}
-	files := make([]*os.File, 0, len(c.fds))
-	for _, fd := range c.fds {
-		if fd < 0 {
+// takeFiles wraps the descriptors that arrived at or before stream offset
+// end (the NUL of the message just consumed) as *os.File and keeps later
+// batches for the messages they belong to. ReadMsgUnix receives with
+// MSG_CMSG_CLOEXEC, so the fds are already close-on-exec.
+func (c *Conn) takeFiles(end int64) []*os.File {
+	var files []*os.File
+	kept := c.rights[:0]
+	for _, b := range c.rights {
+		if b.at > end {
+			kept = append(kept, b)
 			continue
 		}
-		files = append(files, os.NewFile(uintptr(fd), "varlink-fd")) // #nosec G115 -- fd is a non-negative kernel-supplied descriptor
+		for _, fd := range b.fds {
+			if fd < 0 {
+				continue
+			}
+			files = append(files, os.NewFile(uintptr(fd), "varlink-fd")) // #nosec G115 -- fd is a non-negative kernel-supplied descriptor
+		}
 	}
-	c.fds = c.fds[:0]
+	c.rights = kept
 	return files
 }
 

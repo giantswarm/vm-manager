@@ -224,3 +224,48 @@ func TestDialMissingSocket(t *testing.T) {
 	_, err := varlink.Dial(context.Background(), filepath.Join(t.TempDir(), "missing.sock"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
+
+// The descriptor sent with the second of three streamed replies must be
+// handed to that reply only, not to whichever message is decoded first.
+func TestCallMoreAttributesFilesToTheirReply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.WriteFile(path, []byte("second"), 0o600))
+
+	srv := varlinktest.New(t, func(varlinktest.Call) []varlinktest.Reply {
+		f, err := os.Open(path) // #nosec G304 -- test fixture path
+		require.NoError(t, err)
+		return []varlinktest.Reply{
+			{Parameters: map[string]int{"n": 1}},
+			{Parameters: map[string]int{"n": 2}, Files: []*os.File{f}},
+			{Parameters: map[string]int{"n": 3}},
+		}
+	})
+	conn := dial(t, srv)
+
+	var seen []int
+	err := conn.CallMoreWithFiles(context.Background(), testIface+".Stream", nil, func(raw json.RawMessage, files []*os.File) error {
+		var p struct {
+			N int `json:"n"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &p))
+		seen = append(seen, p.N)
+		if p.N == 2 {
+			require.Len(t, files, 1, "reply 2 carries the descriptor")
+			data, err := io.ReadAll(files[0])
+			require.NoError(t, err)
+			assert.Equal(t, "second", string(data))
+		} else {
+			assert.Empty(t, files, "reply %d carries no descriptor", p.N)
+		}
+		closeAll(files)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2, 3}, seen)
+}
+
+func closeAll(files []*os.File) {
+	for _, f := range files {
+		_ = f.Close()
+	}
+}
