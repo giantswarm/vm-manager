@@ -1,13 +1,16 @@
-# images/ — giantswarm-vm-base
+# images/ — giantswarm-vm-base and the kubernetes sysext
 
 mkosi 27 project that builds the guest image described in
 [docs/design.md](../docs/design.md) ("Guest image", "Boot flow"): Arch Linux,
 systemd 261, an erofs root protected by signed dm-verity, a UKI with signed
-expected PCR 11 values, systemd-boot on the ESP. Everything runs unprivileged
-(mkosi's own sandbox and user namespaces), no sudo anywhere.
+expected PCR 11 values, systemd-boot on the ESP, plus the Kubernetes node stack
+as a separately versioned, signed systemd-sysext (see [Kubernetes sysext](#kubernetes-sysext)).
+Everything runs unprivileged (mkosi's own sandbox and user namespaces), no sudo anywhere.
 
 ```
-make -C images keys base verify smoke-boot     # full local cycle (~5 min cold, ~1 min warm)
+make -C images                                 # keys, base image + kubernetes sysext (one mkosi run), verify
+make -C images keys base verify-base smoke-boot  # base-only cycle (~5 min cold, ~1 min warm)
+make -C images kubernetes verify-kubernetes    # sysext only, base tree reused (~20 s warm)
 make -C images PROFILE=debug base smoke-boot   # root autologin + empty root password
 make -C images clean                           # drop build/, keep keys/
 ```
@@ -17,26 +20,25 @@ make -C images clean                           # drop build/, keep keys/
 | Path | Purpose |
 |---|---|
 | `mkosi.conf` | main image: `Format=disk`, `Bootable=yes`, systemd-boot, UKI, `Verity=signed`, `SignExpectedPcr=yes`, kernel command line, split artifacts, `mkosi vm` runtime settings |
-| `mkosi.images/base/` | the OS tree (`Format=directory`, `Output=base`): package list, `mkosi.extra/` content (units, presets, repart and sysupdate definitions, hwdb), `mkosi.postinst` (hwdb compile, PGP pubring, mask). The main image consumes it via `BaseTrees=%O/base` |
+| `mkosi.images/base/` | the OS tree (`Format=directory`, `Output=base`): package list, `mkosi.extra/` content (units, presets, repart and sysupdate definitions, hwdb), `mkosi.postinst` (hwdb compile, PGP pubring, mask). The main image and the sysext consume it via `BaseTrees=%O/base` |
+| `mkosi.images/kubernetes/` | the Kubernetes sysext (`Format=sysext`, `Overlay=yes`): package list, `mkosi.version` (= Kubernetes version), `mkosi.extra/` (drop-ins, containerd.toml, sysctl, tmpfiles, preset), `mkosi.postinst` (version guard, drops `/opt`, seeds extension-release) |
 | `mkosi.repart/` | partition definitions of the *base image*: ESP 256M, erofs root (zstd), verity hash, verity signature |
 | `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp` |
-| `scripts/` | `gen-keys`, `hwdb-update` (mkosi postinst), `publish-sysupdate`, `verify`, `smoke-boot` |
+| `scripts/` | `gen-keys`, `hwdb-update` (mkosi postinst), `publish-sysupdate <component>`, `verify` (base), `verify-kubernetes`, `smoke-boot` |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
-Adding the Kubernetes sysext later: create `mkosi.images/kubernetes/mkosi.conf` with
-`Format=sysext`, `BaseTrees=%O/base`, `Overlay=yes`, `Dependencies=base`, its
-package list (kubeadm, kubelet, containerd, ...), an `extension-release.kubernetes`
-matching the base `ID`/`IMAGE_ID`, and add `kubernetes` to `Dependencies=` in the main
-`mkosi.conf`. Verity/PCR keys and `ImageId`/`ImageVersion`/`Profiles` are passed down
-to subimages by mkosi; nothing in the base image has to move. `scripts/publish-sysupdate`
-then only needs to add `kubernetes_<kv>.raw` to `build/sysupdate/kubernetes/`.
+Make targets: `images` (one `mkosi --dependency=kubernetes build` for base tree, sysext
+and disk image), `base` (plain `mkosi build`: base tree and disk image), `kubernetes`
+(`mkosi --format=none --bootable=no --dependency=kubernetes build`: sysext on the
+existing base tree, without `--force`, which would delete the disk image outputs of the
+skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot`, `clean`.
 
 ## What is built
 
-`make base` runs `mkosi build` and `scripts/publish-sysupdate`:
+`make base` runs `mkosi build` and `scripts/publish-sysupdate base`:
 
 | Artifact | Content |
 |---|---|
@@ -47,9 +49,16 @@ then only needs to add `kubernetes_<kv>.raw` to `build/sysupdate/kubernetes/`.
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/sysupdate/kubernetes/` | empty signed manifest until the sysext exists |
-| `build/policy.json` | written by `make verify`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}` |
-| `build/base/` | the OS tree (input for the main image and for sysexts) |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}` |
+| `build/base/` | the OS tree (input for the main image and for the sysext) |
+
+`make kubernetes` (or `make images`) adds, via `scripts/publish-sysupdate kubernetes`:
+
+| Artifact | Content |
+|---|---|
+| `build/kubernetes_<kv>.raw` | the sysext DDI: root (erofs, zstd, `Verity=data`), root-verity, root-verity-sig; no ESP |
+| `build/kubernetes_<kv>.roothash` | its verity root hash |
+| `build/sysupdate/kubernetes/` | what vm-manager serves at `.../sysupdate/kubernetes/`: `kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg` |
 
 Root and verity partition UUIDs are derived from the root hash (first/last 128 bits),
 which is how `roothash=` locates them; that is why the sysupdate file names carry
@@ -58,8 +67,11 @@ the partition UUID (`@u`).
 Sizes for 0.1.0: `.raw` 646 MB (472 MB used), `.efi` 90 MB (kernel 17 MB, initrd 73 MB
 of which 61 MB is mkosi's default initrd), root erofs (zstd) 400 MB, verity 3.2 MB,
 signature 1.9 KB. A warm `make base` (nothing changed) takes ~10 s, a cold one with
-package downloads ~3 min; `make verify` ~5 s; `make smoke-boot` ~30 s wall, the guest
-reaches multi-user.target after ~7 s.
+package downloads ~3 min; `make verify-base` ~5 s; `make smoke-boot` ~30 s wall, the guest
+reaches multi-user.target after ~7 s. The kubernetes sysext for 1.36.4 is 206 MB
+(erofs zstd; 484 MB uncompressed, of which `/usr/bin` is 411 MB of Go binaries);
+`make kubernetes verify-kubernetes` on a built base tree takes ~20 s with a warm package
+cache, `make images verify` (everything, warm) ~30 s.
 
 ## Image content (mkosi.images/base/mkosi.extra)
 
@@ -99,6 +111,76 @@ reaches multi-user.target after ~7 s.
   `machines.target`. `systemd-pcrphase*` are the systemd defaults.
 - Kernel command line: `console=ttyS0,115200 systemd.volatile=overlay systemd.imds.import=yes systemd.firstboot=off`
   plus `roothash=<hash>` added by mkosi.
+- `systemd-modules-load.service.d/` and `systemd-sysctl.service.d/vm-manager.conf`:
+  `After=systemd-sysext.service`, so `modules-load.d/` and `sysctl.d/` entries of a
+  merged extension are applied (upstream has no such ordering).
+
+## Kubernetes sysext
+
+`mkosi.images/kubernetes/` builds the Kubernetes node stack as a
+[systemd-sysext](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html)
+image: an erofs `/usr` tree with signed dm-verity that systemd-sysext overlays onto the
+read-only base root at boot. It is built as `Overlay=yes` on top of `build/base`, so
+only the delta is packed, and signed with the same `keys/verity.crt` the base image
+trusts in `/usr/lib/verity.d/` (mkosi installs it there).
+
+Content (Arch packages `kubeadm kubelet kubectl containerd runc crictl cni-plugins
+conntrack-tools socat ethtool iptables`): `/usr/bin/{kubeadm,kubelet,kubectl,containerd,
+containerd-shim-runc-v2,ctr,runc,crictl,conntrack,socat,ethtool,iptables,...}`, the
+reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
+
+- `containerd.service.d/10-vm-manager.conf`: `--config /usr/lib/vm-manager/containerd.toml`
+  (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/opt/cni/bin',
+  '/usr/lib/cni']`, `conf_dir=/etc/cni/net.d`. `/opt` is deliberately *not* in the
+  extension (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): with
+  `systemd.volatile=overlay` the base root is writable per boot, so CNI DaemonSets can
+  install into `/opt/cni/bin`, which would be read-only under a sysext overlay.
+- `kubelet.service.d/20-vm-manager.conf`: `KUBELET_ARGS=--container-runtime-endpoint=unix:///run/containerd/containerd.sock`
+  (Arch's unit sources it from `/etc/kubernetes/kubelet.env`, which is not shippable),
+  `Wants=/After=network-online.target containerd.service`. `10-kubeadm.conf` comes from
+  the kubeadm package; kubeadm fills `/var/lib/kubelet/{kubeadm-flags.env,config.yaml}`.
+- `multi-user.target.d/10-kubernetes.conf`: `Upholds=containerd.service kubelet.service`.
+  This is what starts them: presets and `[Install]` symlinks cannot enable units of an
+  extension merged during boot (the boot transaction is computed before
+  `systemd-sysext.service` runs, and `.wants/` under `/usr` is read-only).
+  `system-preset/50-kubernetes.preset` still records the policy for `systemctl preset`.
+- `sysctl.d/90-kubernetes.conf` (bridge-nf-call-ip{,6}tables, IPv6 forwarding; the
+  kubelet package brings `ip_forward` and `br_netfilter`), `tmpfiles.d/kubernetes.conf`
+  (`/etc/cni/net.d`, `/opt/cni/bin`).
+- `usr/lib/extension-release.d/extension-release.kubernetes_<kv>`: `ID=arch`
+  (the base has neither `SYSEXT_LEVEL` nor `VERSION_ID`, rolling release, so ID alone
+  is matched), `SYSEXT_ID=kubernetes`, `SYSEXT_VERSION_ID=<kv>`, `SYSEXT_SCOPE=system`,
+  `ARCHITECTURE=x86-64`, `EXTENSION_RELOAD_MANAGER=1` (daemon-reload after the merge so
+  the units above are seen).
+
+Version pinning: `mkosi.images/kubernetes/mkosi.version` is the Kubernetes version and
+becomes `ImageVersion=`, the file name `kubernetes_<kv>.raw`, `SYSEXT_VERSION_ID` and the
+`@v` of the sysupdate transfer. Packages come from the Arch repositories; `mkosi.postinst`
+fails the build when the installed kubeadm is not `<kv>`, `verify-kubernetes` runs the
+extracted `kubeadm version`/`kubelet --version`. A new Kubernetes version: bump
+`mkosi.version` to what `pacman -Si kubeadm` offers, `make kubernetes verify-kubernetes`
+(rebuilds only the sysext; `make clean` if the base tree changed), publish
+`build/sysupdate/kubernetes/`. The base image is untouched by a Kubernetes bump.
+
+How the VM receives it: vm-manager serves `build/sysupdate/kubernetes/` at
+`http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/` (the directory listing must
+show `kubernetes_<kv>.raw`, `SHA256SUMS`, `SHA256SUMS.gpg`) and runs
+`systemd-sysupdate --component=kubernetes update` in the guest (the transfer in the base
+image is `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`, `Verify=yes` against
+`/etc/systemd/import-pubring.pgp`, target `/var/lib/extensions/kubernetes_@v.raw`,
+`InstancesMax=2`). `systemd-sysext.service` (enabled in the base, `Before=sysinit.target
+systemd-tmpfiles-setup.service`) merges it on the next boot, or `systemd-sysext refresh`
+does it live; the verity signature is checked against `/usr/lib/verity.d/verity.crt`.
+The kubeadm unit from CAPI's Ignition config must be ordered `After=systemd-sysext.service`
+(docs/design.md, boot flow step 7); until `kubeadm init/join` ran, `kubelet.service`
+exits and restarts every 10 s, which is expected and harmless.
+
+PCR 13: systemd-stub measures extension images it loads from the ESP
+(`<uki>.efi.extra.d/*.sysext.raw`) into PCR 13; systemd 261 does *not* measure
+extensions merged from `/var/lib/extensions`. With the sysupdate delivery used here the
+trust anchor is the verity signature (plus `SHA256SUMS.gpg` for the download); if the
+attestation policy must cover the Kubernetes version, vm-manager has to either place the
+image next to the UKI on the ESP or extend a PCR itself (`systemd-pcrextend`) after the merge.
 
 ## Keys
 
@@ -115,7 +197,7 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
 
 ## Verify and smoke boot
 
-`make verify` (`scripts/verify`, offline, unprivileged):
+`make verify` runs both scripts below. `make verify-base` (`scripts/verify`, offline, unprivileged):
 
 1. GPT via `sfdisk --json`: ESP, root, root-verity, root-verity-sig present and the
    root/verity partition UUIDs equal the two halves of the roothash.
@@ -132,6 +214,41 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    repart drop-in, and the giantswarm record in the initrd's `hwdb.bin`.
 7. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 8. Writes `build/policy.json`.
+
+`make verify-kubernetes` (`scripts/verify-kubernetes`, offline, unprivileged):
+
+1. GPT via `sfdisk --json`: root, root-verity, root-verity-sig and nothing else;
+   root/verity partition UUIDs equal the halves of `kubernetes_<kv>.roothash`.
+2. `systemd-dissect --validate --image-policy=root=signed:usr=absent` (works without
+   root, unlike plain `systemd-dissect`).
+3. Signature partition JSON: `rootHash` is ours, `certificateFingerprint` is
+   `keys/verity.crt`, and the base tree carries that certificate in `/usr/lib/verity.d/`.
+4. `dump.erofs`: compressed; `fsck.erofs --extract`: only `/usr` (plus an empty `/opt`),
+   no `/etc`, `/var`, `/usr/lib/os-release`.
+5. Exactly one `extension-release.kubernetes_<kv>`, matched against the base
+   `os-release` the way systemd-sysext(8) does (`ID`, `SYSEXT_LEVEL`/`VERSION_ID`,
+   `ARCHITECTURE`), `SYSEXT_SCOPE` includes `system`, `EXTENSION_RELOAD_MANAGER=1`.
+6. Binaries present; `kubeadm version`/`kubelet --version` (run from the extracted
+   tree) report `<kv>`.
+7. Units, drop-ins, `containerd.toml` (parsed: `SystemdCgroup`, `bin_dirs`), preset,
+   sysctl/tmpfiles files, and the base's modules-load/sysctl ordering drop-ins.
+8. Real merge: in an unprivileged user namespace (`unshare -Urm`, private mount
+   namespace, `/run` on tmpfs for systemd's lock directory) the base tree is bind-mounted
+   read-only, the extracted extension is offered as
+   `/var/lib/extensions/kubernetes_<kv>/` and `systemd-sysext --root merge` runs;
+   `status` must list it, merged `/usr/bin/kubeadm` and the drop-ins must exist next to
+   base files, and `systemd-analyze --root verify containerd.service kubelet.service
+   multi-user.target` must be clean. This exercises the directory form of the extension
+   (the DDI/verity path needs loop devices, i.e. root; it is covered by 1-3 and by
+   `--validate`). Skipped with a message if user namespaces are unavailable.
+9. The base image's `50-kubernetes.transfer`: `MatchPattern` with `@v` substituted
+   names the published file, `Path` is the `kubernetes` component, `Verify=yes`, target
+   `/var/lib/extensions`; `gpg --verify SHA256SUMS.gpg`, `sha256sum -c`.
+
+Not verified without a boot: the verity activation in the guest (kernel keyring /
+`verity.d` path), the daemon-reload and `Upholds=` start, containerd/kubelet coming up,
+the `modules-load`/`sysctl` ordering. That is what a smoke boot with the sysext in
+`/var/lib/extensions/` must watch for (see Deviations).
 
 `make smoke-boot` (`scripts/smoke-boot`): `systemd-vmspawn --image=build/smoke.raw
 --firmware=uefi --tpm=yes --console=read-only --network-user-mode` (QEMU, OVMF, swtpm)
@@ -200,3 +317,44 @@ is mounted from the disk. Serial console is `ttyS0`; ssh is reachable on AF_VSOC
 - `repart.sysinstall.d` assumes that `CopyBlocks=auto` carries the source partition
   UUIDs over to the copies (needed for `roothash=` discovery on the installed disk).
   The two-phase install is verified by the vm-manager runtime tests, not here.
+
+Kubernetes sysext:
+
+- The units of the extension are started through `Upholds=` in a
+  `multi-user.target.d/` drop-in, not through the preset file: presets and
+  `[Install]` symlinks have no effect on units that appear via a sysext merged at boot
+  (transaction already computed, `/usr` read-only). The preset file is kept as
+  documentation of the policy and for images that bake the extension in.
+- `Format=sysext` uses mkosi's built-in repart definitions, which ignore
+  `RepartDirectories=` and set no `Compression=`; the erofs would be 553 MB. mkosi
+  passes the image `Environment=` to systemd-repart, so
+  `SYSTEMD_REPART_MKFS_OPTIONS_EROFS="-zzstd -Ededupe"` in the subimage config gets the
+  compression in (206 MB). `Format=disk` with own definitions was rejected: mkosi would
+  then also edit `/usr/lib/os-release`, run depmod etc. into the overlay upper layer.
+- `Dependencies=` given on the mkosi command line *appends* to the value in
+  `mkosi.conf` (mkosi 27); hence `Dependencies=base` in the config and
+  `--dependency=kubernetes` in the Makefile, not the other way round. `mkosi --force`
+  removes the outputs of every image in the run including the main image, even with
+  `--format=none`; the `kubernetes` target therefore runs without `--force` and deletes
+  the previous `build/kubernetes_<kv>*` itself.
+- `systemd-modules-load.service` and `systemd-sysctl.service` are ordered after
+  `systemd-sysext.service` by two drop-ins in the *base* image (upstream systemd has no
+  such ordering; only `systemd-tmpfiles-setup.service` is). Without it the
+  `modules-load.d`/`sysctl.d` files of the extension would race the merge.
+- `/opt` is excluded from the extension (`mkosi.postinst` removes the `cni-plugins`
+  copy under `/opt/cni/bin`; `/usr/lib/cni` remains) so that `/opt/cni/bin` stays
+  writable for CNI DaemonSets. containerd searches `/opt/cni/bin` first, `/usr/lib/cni`
+  second.
+- The `iptables` package is already part of the base tree (`/usr/bin/iptables ->
+  xtables-nft-multi`), so it leaves no files in the overlay delta; it stays in the
+  package list to keep the extension self-describing.
+- `systemd-sysext` 261 does not deduplicate versions: with `InstancesMax=2` in
+  `50-kubernetes.transfer`, two files `kubernetes_<a>.raw` and `kubernetes_<b>.raw` in
+  `/var/lib/extensions/` would *both* be merged (verified with directory images on the
+  host; the later name wins per file). vm-manager must remove the superseded file (or
+  the transfer needs `InstancesMax=1`) before `systemd-sysext refresh`/reboot.
+- PCR 13 is only extended for extensions loaded by systemd-stub from the ESP, not for
+  `/var/lib/extensions/` merges (see Kubernetes sysext above).
+- `publish-sysupdate` no longer writes an empty signed manifest for the kubernetes
+  component on base-only builds; `build/sysupdate/kubernetes/` exists once the sysext
+  was built.
