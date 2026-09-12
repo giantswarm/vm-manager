@@ -5,7 +5,7 @@ test-race: ## Run tests with the race detector regardless of the toolchain probe
 	go test -race ./...
 
 .PHONY: test-integration
-test-integration: ## Run the integration-tagged tests: real QEMU, OVMF and swtpm on this host (skips without /dev/kvm).
+test-integration: ## Run the integration-tagged tests: real QEMU, OVMF, swtpm and the host's systemd storage provider; each skips where its dependency is absent.
 	go test -race -count=1 -tags integration -run Integration ./internal/...
 
 .PHONY: serve
