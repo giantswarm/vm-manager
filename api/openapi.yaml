@@ -5,9 +5,22 @@ info:
   description: |
     REST mirror of the vm-manager MCP tools. Every operation exists once as an
     MCP tool (served at /mcp) and once here; both call the same service and
-    return the same JSON shapes. Errors are `{"error":{"code","message"}}`
-    with a stable `code` (`not_found`, `invalid_request`, `conflict`,
-    `unsupported`, `internal_error`); MCP tool errors carry the same code.
+    return the same JSON shapes. Request bodies use the tool argument names
+    (snake_case); resources are returned as the service records them
+    (camelCase). Errors are `{"error":{"code","message"}}` with a stable
+    `code` (`not_found`, `invalid_request`, `conflict`, `unsupported`,
+    `timeout`, `vm_failed`, `internal_error`); MCP tool errors carry the same
+    code.
+
+    Lifecycle: a VM needs a network (`POST /networks`, or the `default`
+    network the server creates at startup). `POST /vms` installs the image
+    onto a fresh disk (state `installing`), reboots into it (`booting`),
+    attests from the initrd when `require_attestation` is set (`attesting`)
+    and is `ready` once the guest sent READY=1; `running` means the process
+    is up but READY never arrived within the boot timeout. `wait_for` chooses
+    how long the call blocks. `user_data` is CAPI's bootstrap Secret as
+    Ignition JSON; the IMDS releases it to the guest only after a verified
+    attestation quote.
 servers:
   - url: /api/v1
 paths:
@@ -30,6 +43,330 @@ paths:
                 $ref: "#/components/schemas/Host"
         "500":
           $ref: "#/components/responses/Error"
+  /images:
+    get:
+      operationId: listImages
+      summary: List the bootable images (MCP tool list_images)
+      responses:
+        "200":
+          description: Every image in the catalog, newest version first per id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Image"
+  /images/{ref}:
+    get:
+      operationId: getImage
+      summary: Describe one image (MCP tool get_image)
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          description: '"<id>_<version>" or the bare id for its newest version.'
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The image.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Image"
+        "404":
+          $ref: "#/components/responses/Error"
+  /networks:
+    get:
+      operationId: listNetworks
+      summary: List the virtual networks (MCP tool list_networks)
+      responses:
+        "200":
+          description: Every network with its gateway and leases, sorted by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Network"
+    post:
+      operationId: createNetwork
+      summary: Create a virtual network (MCP tool create_network)
+      description: |
+        A rootless gvisor-tap-vsock network with DHCP, DNS and the instance
+        metadata service at 169.254.169.254. Create one before creating VMs
+        unless the default network is enough.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNetworkRequest"
+      responses:
+        "201":
+          description: The network.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Network"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /networks/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getNetwork
+      summary: Describe one network (MCP tool get_network)
+      responses:
+        "200":
+          description: The network.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Network"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteNetwork
+      summary: Tear a network down (MCP tool delete_network)
+      description: Fails with `conflict` while any VM, running or stopped, is attached.
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms:
+    get:
+      operationId: listVMs
+      summary: List every VM record, oldest first (MCP tool list_vms)
+      responses:
+        "200":
+          description: The VM records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VM"
+    post:
+      operationId: createVM
+      summary: Create a VM (MCP tool create_vm)
+      description: |
+        Allocates a disk, a vTPM, a network lease and a vsock id, boots the
+        installer, reboots into the installed disk, attests, and serves
+        `user_data` once attestation passed. With `wait_for` `ready` (the
+        default) the call blocks until the guest is up, bounded by the install
+        and boot timeouts; with `none` it returns at once and `GET /vms/{id}`
+        follows the progress. When the awaited milestone fails or times out
+        the error message names the VM id, which still exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVMRequest"
+      responses:
+        "201":
+          description: The VM record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VM"
+        "400":
+          description: Invalid spec, including an image or network that does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The VM failed before the awaited milestone (`vm_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "504":
+          description: The awaited milestone was not reached in time (`timeout`); the VM keeps running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /vms/{id}:
+    parameters:
+      - $ref: "#/components/parameters/VMID"
+    get:
+      operationId: getVM
+      summary: Fetch one VM record (MCP tool get_vm)
+      responses:
+        "200":
+          description: The VM record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VM"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteVM
+      summary: Stop the VM if it runs and remove it with its disk (MCP tool delete_vm)
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/start:
+    post:
+      operationId: startVM
+      summary: Boot a stopped or failed VM from its installed disk (MCP tool start_vm)
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          $ref: "#/components/responses/VM"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/stop:
+    post:
+      operationId: stopVM
+      summary: Shut a running VM down (MCP tool stop_vm)
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          $ref: "#/components/responses/VM"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/reboot:
+    post:
+      operationId: rebootVM
+      summary: Stop, then start the VM (MCP tool reboot_vm)
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          $ref: "#/components/responses/VM"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/exec:
+    post:
+      operationId: execVM
+      summary: Run a command as root in the guest over ssh (MCP tool exec_vm)
+      description: A non-zero exit is a result (`exitCode`), not an error.
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: The command's output and exit code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/forward:
+    post:
+      operationId: forwardPort
+      summary: Expose a guest TCP port on a host loopback address (MCP tool forward_port)
+      description: The forward lives until the VM is deleted.
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardRequest"
+      responses:
+        "200":
+          description: The host address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Forward"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/console:
+    get:
+      operationId: getVMConsole
+      summary: Return the tail of the serial console (MCP tool get_vm_console)
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+        - name: lines
+          in: query
+          description: Trailing lines to return, default 100, at most 10000.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The console tail; empty before the VM produced output.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Console"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/attestation:
+    get:
+      operationId: getVMAttestation
+      summary: Return the current boot's attestation (MCP tool get_vm_attestation)
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          description: The attestation summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attestation"
+        "404":
+          $ref: "#/components/responses/Error"
+  /vms/{id}/metrics:
+    get:
+      operationId: getVMMetrics
+      summary: Return the guest's last report (MCP tool get_vm_metrics)
+      description: Host-side CPU, memory and I/O metrics land in a later release.
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          description: The last systemd-report upload, null until the guest sent one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+        "404":
+          $ref: "#/components/responses/Error"
   /openapi.yaml:
     get:
       operationId: getOpenAPI
@@ -42,6 +379,14 @@ paths:
               schema:
                 type: string
 components:
+  parameters:
+    VMID:
+      name: id
+      in: path
+      required: true
+      description: VM id as returned by POST /vms or GET /vms.
+      schema:
+        type: string
   responses:
     Error:
       description: A failed request.
@@ -49,6 +394,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    VM:
+      description: The VM record after the operation; poll GET /vms/{id} for the next state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VM"
   schemas:
     Host:
       type: object
@@ -115,6 +466,323 @@ components:
         error:
           type: string
           description: Why the tool could not be run.
+    Image:
+      type: object
+      required: [id, version, uki, disk]
+      properties:
+        id:
+          type: string
+          description: Image id, the file stem before the version (giantswarm-vm-base).
+        version:
+          type: string
+        uki:
+          type: string
+          description: Path of the unified kernel image booted in the installer phase.
+        disk:
+          type: string
+          description: Path of the base disk image copied onto the VM's disk.
+        sysupdateDir:
+          type: string
+          description: The sysupdate tree the IMDS serves; absent when none.
+        kubernetesVersions:
+          type: array
+          items:
+            type: string
+          description: Kubernetes sysext versions available, highest first.
+        policy:
+          type: object
+          description: The image's PCR policy as written by the image build; absent when none.
+    CreateNetworkRequest:
+      type: object
+      required: [name, cidr]
+      properties:
+        name:
+          type: string
+          description: A DNS label of at most 63 characters.
+        cidr:
+          type: string
+          description: IPv4 subnet, /16 to /29, outside 169.254.0.0/16; the gateway is its first address.
+        dns_search_domain:
+          type: string
+          description: DNS search domain handed to guests over DHCP.
+    NetworkSpec:
+      type: object
+      required: [name, cidr, enableIMDS]
+      properties:
+        name:
+          type: string
+        cidr:
+          type: string
+        gatewayIP:
+          type: string
+        dnsSearchDomain:
+          type: string
+        enableIMDS:
+          type: boolean
+          description: Always true for networks created through the API.
+        enableHostAlias:
+          type: boolean
+    Lease:
+      type: object
+      required: [vmID, mac, ip]
+      properties:
+        vmID:
+          type: string
+        mac:
+          type: string
+        ip:
+          type: string
+    Network:
+      type: object
+      required: [spec, gateway, leases]
+      properties:
+        spec:
+          $ref: "#/components/schemas/NetworkSpec"
+        gateway:
+          type: string
+          description: The gateway (and IMDS upstream) address.
+        leases:
+          type: array
+          items:
+            $ref: "#/components/schemas/Lease"
+    CreateVMRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: A DNS label of at most 63 characters; also the default hostname.
+        image:
+          type: string
+          description: '"<id>_<version>" or the bare id; default: the catalog''s newest image.'
+        kubernetes_version:
+          type: string
+          description: Served as /kubernetes-version; default: the newest the image offers.
+        cpus:
+          type: integer
+          default: 2
+        memory_mib:
+          type: integer
+          default: 2048
+          minimum: 256
+        disk_gib:
+          type: integer
+          default: 20
+        network:
+          type: string
+          default: default
+        user_data:
+          type: string
+          description: CAPI bootstrap data as Ignition JSON, served at /user-data only after attestation.
+        ssh_authorized_keys:
+          type: array
+          items:
+            type: string
+        hostname:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Served as /metadata/<key>.
+        require_attestation:
+          type: boolean
+          default: true
+        wait_for:
+          type: string
+          enum: [none, installed, attested, ready]
+          default: ready
+    Quote:
+      type: object
+      required: [verified, at]
+      properties:
+        verified:
+          type: boolean
+        message:
+          type: string
+        at:
+          type: string
+          format: date-time
+    Attestation:
+      type: object
+      required: [required, userDataReleased]
+      properties:
+        required:
+          type: boolean
+        userDataReleased:
+          type: boolean
+        nonceIssuedAt:
+          type: string
+          format: date-time
+        initrd:
+          $ref: "#/components/schemas/Quote"
+        ready:
+          $ref: "#/components/schemas/Quote"
+    Paths:
+      type: object
+      description: The VM's files below the state directory.
+      properties:
+        dir:
+          type: string
+        volume:
+          type: string
+        console:
+          type: string
+        tpmState:
+          type: string
+        ovmfVars:
+          type: string
+        qmpSocket:
+          type: string
+        sshKey:
+          type: string
+        userData:
+          type: string
+        report:
+          type: string
+    VM:
+      type: object
+      required: [id, name, image, cpus, memoryMiB, diskGiB, network, requireAttestation, state, cid, machineID, booted, sshPublicKey, attestation, createdAt, paths]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        image:
+          type: string
+          description: The resolved image reference.
+        kubernetesVersion:
+          type: string
+        cpus:
+          type: integer
+        memoryMiB:
+          type: integer
+        diskGiB:
+          type: integer
+        network:
+          type: string
+        sshAuthorizedKeys:
+          type: array
+          items:
+            type: string
+        hostname:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        region:
+          type: string
+        zone:
+          type: string
+        requireAttestation:
+          type: boolean
+        state:
+          type: string
+          enum: [creating, installing, booting, attesting, ready, running, stopping, stopped, failed, deleting]
+        phase:
+          type: string
+          enum: [install, boot]
+          description: Boot phase of the current or last QEMU process.
+        ip:
+          type: string
+        mac:
+          type: string
+        cid:
+          type: integer
+          description: vsock context id.
+        machineID:
+          type: string
+        booted:
+          type: boolean
+          description: Whether an installed boot ever reached READY=1.
+        status:
+          type: string
+          description: The last STATUS= the guest sent.
+        sshPublicKey:
+          type: string
+          description: vm-manager's per-VM key, the first root authorized key.
+        attestation:
+          $ref: "#/components/schemas/Attestation"
+        createdAt:
+          type: string
+          format: date-time
+        installedAt:
+          type: string
+          format: date-time
+        bootedAt:
+          type: string
+          format: date-time
+        readyAt:
+          type: string
+          format: date-time
+        lastError:
+          type: string
+          description: Why the VM is failed, stopped or degraded.
+        paths:
+          $ref: "#/components/schemas/Paths"
+    ExecRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          type: array
+          items:
+            type: string
+          description: Program and arguments.
+    ExecResult:
+      type: object
+      required: [stdout, stderr, exitCode]
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer
+    ForwardRequest:
+      type: object
+      required: [port]
+      properties:
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+    Forward:
+      type: object
+      required: [id, port, address]
+      properties:
+        id:
+          type: string
+        port:
+          type: integer
+        address:
+          type: string
+          description: Host loopback address (ip:port) the guest port is reachable on.
+    Console:
+      type: object
+      required: [id, lines, console]
+      properties:
+        id:
+          type: string
+        lines:
+          type: integer
+        console:
+          type: string
+    Metrics:
+      type: object
+      required: [id, report, note]
+      properties:
+        id:
+          type: string
+        report:
+          description: The guest's last systemd-report upload; null until the guest sent one.
+          oneOf:
+            - type: object
+            - type: string
+            - type: "null"
+        note:
+          type: string
     Error:
       type: object
       required: [error]
@@ -125,6 +793,6 @@ components:
           properties:
             code:
               type: string
-              enum: [not_found, invalid_request, conflict, unsupported, internal_error]
+              enum: [not_found, invalid_request, conflict, unsupported, timeout, vm_failed, internal_error]
             message:
               type: string
