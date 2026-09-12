@@ -5,42 +5,30 @@ spawned; each row is one agent with one deliverable and a context budget of abou
 tokens. Agents never poll: waits on CI or boots are bounded (interval + max attempts) and
 return control to the parent.
 
-## Status (2026-09-12, end of wave 3)
+## Status (2026-09-12, late)
 
-Waves 1 to 3 are merged: #1-#19 (waves 1 and 2, incl. three CI flake fixes #17-#19 for
-real races), then #20 attestation agent, #21 metrics + Prometheus, #22 quote verifier,
-#23 Ignition in the initrd (gated user-data is a retryable 503, `/user-data` left the hwdb
-table), #24 shared nonce store/AK template, #25 persistent `/etc`, #26 ssh host-key error
-precedence, #27 Kubernetes sysext pulled at boot and measured into PCR 13, #28 vsock CID
-collisions between vm-managers on one host, #29 plan status, #30 clean shutdown of the
-`/etc` overlay via an exitrd, #32 attestation end to end (units in both stages,
-`--attestation=verify` default, `image golden`, learn / golden / tamper e2e), #31 the
-Kubernetes cluster e2e from CAPI-shaped Ignition. Every PR got an automated review before
-its admin merge.
+Waves 1-3 complete. Wave 4: #33 README/design doc, install guide and systemd unit; #35 clean
+var unmount with the sysext merged (exitrd waits for the ext4 superblock); #36 multi-version
+Kubernetes sysexts (1.36.4 and 1.35.4 from the Arch archive); #37 VMs survive vm-manager
+restarts (transient systemd services, persisted notify port, state-dir lock, reattach in
+0.2 s). Row 18 (GitHub Actions image build + KVM e2e) is PR #34, in progress on the hosted
+runners. Final verification on `main` after #37: all nine e2e tests green in 593 s on the
+dev host (install 14 s, boot to READY 11-15 s, reboot 11 s, sysext pull 2 s, control plane
+Ready 83 s, worker join 45 s, attestation learn/golden/tamper 110 s, reattach 0.2 s).
 
-Last full `make e2e` on the development host (seven tests, about 6 min): install 12 s,
-installed boot to `READY=1` 11-15 s, reboot to ready 11 s, Kubernetes sysext pull 2 s,
-control plane Ready 85 s after its `create_vm`, worker joined 46 s after its own,
-attestation learn / golden / tamper 111 s in total. Pending: the var-unmount fix
-(`TestPersistentEtc` asserts that the rebooted system's fsck logs no `recovering journal`;
-#30 introduced the exitrd for it and the assertion has to stay green with the Kubernetes
-sysext merged).
-
-Wave 4 is scheduled below (rows 18-21). Follow-ups recorded by reviews and agents:
-- `images/scripts/publish-sysupdate` keeps only the last published Kubernetes version;
-  multi-version fleets need it to accumulate versions (row 21).
-- CI does not compile the `e2e` build tag (`go vet -tags e2e ./e2e/` broke twice unnoticed);
-  add it to `make test` or the workflow (wave 4, row 18).
-- ~~VMs still die with vm-manager; transient systemd units are the planned fix.~~ Done:
-  QEMU and swtpm are transient systemd services, `serve` detaches on exit and reattaches
-  on start (`e2e/restart_test.go`). Open: a system-service deployment that runs vm-manager
-  as an unprivileged user needs a user manager for that user (`loginctl enable-linger`),
-  else the launcher falls back to child processes.
-- e2e `go test` timeout is 45 m for seven sequential tests; parallelise or split when it grows.
-- PCR 12 (stub measurements of the extra command line and credentials) is neither quoted
-  nor predicted; a predicted value would put `ignition.firstboot` under the policy.
-- The muster `MCPServer` wiring for a service outside the cluster and the caller identity
-  on VM records (`requestedBy`) are not done.
+Follow-ups recorded by reviews and agents, not yet scheduled:
+- `images/scripts/fetch-kubernetes-packages` caches by version, not `pkgver-pkgrel`; a
+  republished pkgrel is never picked up on a warm cache.
+- `vm-kubernetes.service` merges with `systemd-sysext refresh` on the first boot instead of
+  starting `systemd-sysext.service`, so the manager phase does no unmerge there; starting the
+  unit would make the no-pod shutdown fully synchronous.
+- PCRs 1 and 5 (SMBIOS credentials, per-install GPT) and 12 (`ignition.firstboot`) are quoted
+  but not compared; event-log replay is the proper fix.
+- A swtpm that is alive but unreachable at reattach is treated as gone (VM runs without TPM).
+- The caller identity is only logged; VM records carry no `requestedBy` unlike agent-manager.
+- `.circleci/` is devctl-generated but CircleCI is not enabled; reconcile with the GitHub
+  Actions pipeline of row 18.
+- Nine sequential e2e tests take ~10 min; parallelise or shard when the suite grows.
 
 ## Wave 1: repo, scaffold, image, first boot
 
