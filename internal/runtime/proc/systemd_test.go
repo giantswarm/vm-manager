@@ -282,11 +282,13 @@ func TestSystemdExecAttach(t *testing.T) {
 	kills := f.calledWith("systemctl", "kill")
 	require.Len(t, kills, 1)
 	assert.Equal(t, []string{"systemctl", "--user", "kill", "--signal=SIGKILL", "vm-manager-beef-qemu.service"}, kills[0])
+	// Both launchers watch the same unit; whichever settles first releases it,
+	// so the other may only learn that the unit is gone. Either observer may be
+	// the one that saw the signal.
 	st := exitOf(t, p2)
 	assert.Equal(t, -1, st.Code)
-	assert.EqualError(t, st.Err, "signal: killed")
-	// The predecessor's watcher sees the exit too; whichever settles first
-	// releases the unit, so the other may only learn that it is gone.
+	require.Error(t, st.Err)
+	assert.True(t, st.Err.Error() == "signal: killed" || strings.Contains(st.Err.Error(), "is gone"), "unexpected exit error: %v", st.Err)
 	assert.Equal(t, -1, exitOf(t, p1).Code)
 
 	// Gone: nothing to attach to. A handle without a unit never had one.
