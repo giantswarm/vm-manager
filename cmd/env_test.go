@@ -31,4 +31,6 @@ func TestDefaultStateDir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HOME", "/home/u")
 	assert.Equal(t, "/home/u/.local/state/vm-manager", defaultStateDir())
+	t.Setenv("HOME", "")
+	assert.Equal(t, systemStateDir, defaultStateDir())
 }

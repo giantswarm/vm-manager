@@ -17,6 +17,10 @@ import (
 	"github.com/giantswarm/vm-manager/internal/server"
 )
 
+// systemStateDir is the state directory when vm-manager runs without a home
+// directory, e.g. as a systemd system service.
+const systemStateDir = "/var/lib/vm-manager"
+
 type serveOptions struct {
 	listen  string
 	mcpPath string
@@ -54,7 +58,7 @@ environment variable named next to it; flags win over the environment.`,
 	f := cmd.Flags()
 	f.StringVar(&o.listen, "listen", envOr("VM_MANAGER_LISTEN", "127.0.0.1:8080"), "Listen address; loopback by default because the API is anonymous without --enable-oauth (VM_MANAGER_LISTEN)")
 	f.StringVar(&o.mcpPath, "mcp-path", envOr("VM_MANAGER_MCP_PATH", "/mcp"), "MCP endpoint path (VM_MANAGER_MCP_PATH)")
-	f.StringVar(&o.stateDir, "state-dir", envOr("VM_MANAGER_STATE_DIR", defaultStateDir()), "Directory for VM state, consoles, vTPM state and sockets; created if missing. Default: $XDG_STATE_HOME/vm-manager, else ~/.local/state/vm-manager (VM_MANAGER_STATE_DIR)")
+	f.StringVar(&o.stateDir, "state-dir", envOr("VM_MANAGER_STATE_DIR", defaultStateDir()), "Directory for VM state, consoles, vTPM state and sockets; created if missing. Default: $XDG_STATE_HOME/vm-manager, else ~/.local/state/vm-manager, else /var/lib/vm-manager without a home directory (VM_MANAGER_STATE_DIR)")
 	f.StringVar(&o.imageDir, "image-dir", envOr("VM_MANAGER_IMAGE_DIR", ""), "Directory holding the base images, UKIs and sysext layers; default: <state-dir>/images (VM_MANAGER_IMAGE_DIR)")
 	f.StringVar(&o.networkSubnet, "network-subnet", envOr("VM_MANAGER_NETWORK_SUBNET", "192.168.127.0/24"), "CIDR of the default VM network; the gateway is its first address (VM_MANAGER_NETWORK_SUBNET)")
 	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("VM_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API, validated against the platform IdP (mcp-oauth); the caller's identity travels with every request (VM_MANAGER_OAUTH_ENABLED)")
@@ -73,14 +77,15 @@ environment variable named next to it; flags win over the environment.`,
 	return cmd
 }
 
-// defaultStateDir is $XDG_STATE_HOME/vm-manager, else ~/.local/state/vm-manager.
+// defaultStateDir is $XDG_STATE_HOME/vm-manager, else ~/.local/state/vm-manager,
+// else /var/lib/vm-manager when there is no home directory (a system service).
 func defaultStateDir() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 		return filepath.Join(xdg, "vm-manager")
 	}
 	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "/var/lib"
+	if err != nil || home == "" {
+		return systemStateDir
 	}
 	return filepath.Join(home, ".local", "state", "vm-manager")
 }
