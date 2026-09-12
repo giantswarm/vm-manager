@@ -1,0 +1,17 @@
+# Exitrd, part 2: the image's own /usr (below the sysext overlay), from
+# run-initramfs-root.mount, as the exitrd's /usr. systemd-shutdown never
+# unmounts /usr, so the exitrd's binaries and libraries stay in place while
+# it unmounts everything under /oldroot.
+[Unit]
+Description=Exitrd: the image's /usr for systemd-shutdown
+Documentation=man:systemd-shutdown(8) man:bootup(7)
+RequiresMountsFor=/run/initramfs/root
+
+[Mount]
+What=/run/initramfs/root/usr
+Where=/run/initramfs/usr
+Type=none
+Options=bind,private
+
+[Install]
+WantedBy=sysinit.target

@@ -11,6 +11,9 @@ enable vm-kubernetes.service
 enable sshd.service
 enable vm-sysinstall.service
 enable vm-report-upload.timer
+# The exitrd's view of the root file system, see run-initramfs-root.mount.
+enable run-initramfs-root.mount
+enable run-initramfs-usr.mount
 # vm-manager triggers OS and kubernetes updates itself.
 disable systemd-sysupdate.timer
 disable systemd-sysupdate-reboot.timer
