@@ -102,12 +102,16 @@ mkosi project with two images:
   - `vm-agent` (attestation only) with `vm-agent-attest.service` in the initrd and the
     real system, and `systemd-report-upload.timer` posting to `.../report`.
   - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
-    Ignition with its stock `ignition-*` units (fetch, disks, mount, files, complete).
+    Ignition with its `ignition-*` units ported from upstream's `dracut/30ignition`
+    (`ignition-fetch`, `-disks`, `-mount`, `-files` required by `ignition-complete.target`,
+    which `initrd.target` requires; the services carry
+    `ConditionKernelCommandLine=ignition.firstboot`; no fetch-offline, kargs or generator).
     The UKI cmdline carries `ignition.platform.id=metal
     ignition.config.url=http://169.254.169.254/giantswarm/v1/user-data`; vm-manager adds
     `ignition.firstboot` through the `io.systemd.stub.kernel-cmdline-extra` SMBIOS string
-    only on the first installed boot. Ignition comes from a pinned upstream release built
-    during the image build; Arch has no official package.
+    only on the first installed boot. Ignition comes from a pinned upstream tag
+    (`images/Makefile` `IGNITION_VERSION`, `scripts/build-ignition`); Arch has no official
+    package. The initrd-stage attestation unit must be ordered `Before=ignition-fetch.service`.
 - `images/kubernetes`: sysext DDI with kubeadm, kubelet, containerd, runc, crictl,
   cni-plugins and their units; `extension-release.kubernetes` matching the base.
 
@@ -141,10 +145,13 @@ Phase B, installed boot (every boot from now on):
    DHCP from the virtual network, imds import (hostname, ssh key -> `/run/credstore`).
 5. Still in the initrd, `vm-agent attest --stage=initrd` fetches a nonce, quotes PCRs 0-7
    and 11 (phase `enter-initrd`) with an AK and posts quote + event logs. vm-manager
-   verifies and marks the VM attested; until then `/user-data` is 403.
-6. Ignition (first boot only) fetches the Ignition config from `/user-data`, runs its
-   disks/files stages, which write CAPI's files and systemd units (kubeadm config, the
-   kubeadm unit), then the initrd switches root.
+   verifies and marks the VM attested; until then `/user-data` is 503 with `Retry-After`,
+   which Ignition's fetch stage retries with backoff (see the IMDS contract).
+6. Ignition (first boot only: `ignition.firstboot` on the cmdline) fetches the Ignition
+   config from `/user-data` (`ignition-fetch.service`), runs its disks, mount and files
+   stages, which write CAPI's files and systemd units (kubeadm config, the kubeadm unit)
+   into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
+   the stages run with an empty config.
 7. Real system: systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
    the guest reads `/kubernetes-version` from IMDS and runs
    `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
@@ -171,6 +178,15 @@ skipping phase A when TPM-bound install credentials are not needed.
   firstboot needs a writable `/etc`. Everything Ignition writes there is lost on reboot, so
   Kubernetes nodes would not survive a restart. Wave 3 makes `/etc` persistent (an overlay
   whose upper directory lives in `/var`, set up in the initrd) before the Kubernetes e2e.
+- **Ignition and `/var`.** The initrd mounts no var partition under `/sysroot`
+  (systemd-gpt-auto-generator only synthesizes `/sysroot/usr` there), so a file Ignition
+  writes below `/var` lands in the overlay's tmpfs upper, and the real system then skips
+  the var partition ("already populated, ignoring"). Until the persistent-`/etc` work
+  mounts var in the initrd (`ignition-files.service` is already ordered after
+  `sysroot-var.mount`), user-data must not write below `/var`; the Ignition e2e writes
+  `/etc` and units only. Without an initrd attestation agent, a VM with
+  `require_attestation: true` and user-data sits in Ignition's fetch loop until its 2-minute
+  fetch timeout and then in `emergency.target` (documented by the e2e's gated subtest).
 - **Host loopback alias.** The virtual network can translate `HostIP()` to the host's
   `127.0.0.1`, which would expose vm-manager's own API to unattested guests. It is opt-in
   per network (`EnableHostAlias`) and off for VM networks.
@@ -184,18 +200,26 @@ skipping phase A when TPM-bound install credentials are not needed.
 ## IMDS contract (Giant Swarm provider)
 
 Plain HTTP, `GET http://169.254.169.254/giantswarm/v1<key>`, text bodies, 404 with an
-empty body for unknown keys (systemd-imdsd aborts an error response that carries body
-bytes before it reaches its own 404 handling; only a bodyless 404 becomes
-`KeyNotFound`, which `systemd-imds --import` tolerates for an absent `/user-data`), 403
-for gated keys. The Go key table is the single source of truth and generates the hwdb
-record at image build time.
+empty body for unknown and unset keys (systemd-imdsd aborts an error response that
+carries body bytes before it reaches its own 404 handling; only a bodyless 404 becomes
+`KeyNotFound`, which `systemd-imds --import` tolerates for an unset key). `/user-data`
+is not an hwdb key: its client is Ignition's cmdline provider (`ignition.config.url`), not
+`systemd-imds --import`, and its status codes follow what Ignition v2.27.0 does with them:
+200 with the raw Ignition JSON once released; 503 with `Retry-After` while gated, because
+`internal/resource/http.go` (`shouldRetryHttp`) retries every status >= 500 with a 200 ms
+backoff doubling to 5 s until `--fetch-timeout` (2 min by default), whereas 403 and 404
+end the fetch stage at once (`internal/resource/url.go` `fetchFromHTTP` maps 404 to
+`ErrNotFound`, anything else to `ErrFailed`); 204 when the VM has no user-data, because an
+empty body parses as `ErrEmpty` (`config/util/config.go`), which the engine takes as "no
+config" and continues, while a 404 would drop the boot into `emergency.target`. The Go key
+table is the single source of truth and generates the hwdb record at image build time.
 
 | Key | hwdb property | Content |
 |---|---|---|
 | `/hostname` | `IMDS_KEY_HOSTNAME` | VM name |
 | `/region`, `/zone` | `IMDS_KEY_REGION/ZONE` | host name, network name |
 | `/public-keys/0` | `IMDS_KEY_SSH_KEY` | first authorized key |
-| `/user-data` | `IMDS_KEY_USERDATA` | CAPI bootstrap data as Ignition JSON, gated by attestation |
+| `/user-data` | none (Ignition's `ignition.config.url`) | CAPI bootstrap data as Ignition JSON; 503 + `Retry-After` while gated by attestation, 204 when the VM has none |
 | `/instance-id`, `/kubernetes-version`, `/metadata/<k>` | extra | plain values |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |

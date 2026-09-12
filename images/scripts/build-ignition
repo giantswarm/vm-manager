@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Build the Ignition binary for the initrd from a pinned upstream tag. Arch has
+# no Ignition package. The result lands in <dir>/tree/usr/bin/ignition and is
+# fed to the initrd through ExtraTrees= in mkosi.initrd.conf/mkosi.conf. The
+# Makefile's stamp-<tag> decides when to run this (tag bump or script change);
+# <dir>/version records what was built.
+#
+# The binary is linked dynamically against glibc, libblkid and libresolv:
+# Ignition's internal/as_user and internal/exec/util (blkid) are cgo-only, and
+# Arch ships no static libblkid. The initrd is built from the same Arch
+# packages (systemd pulls in glibc and util-linux-libs), and scripts/verify
+# checks that every NEEDED library is present there.
+set -euo pipefail
+
+dir="$(realpath -m "${1:?output dir (build/ignition)}")" version="${2:?ignition tag, e.g. v2.27.0}"
+repo="${IGNITION_REPO:-https://github.com/coreos/ignition}"
+# Absolute: the build runs inside the clone, whose top level has a file
+# named build.
+src="$dir/src" bin="$dir/tree/usr/bin/ignition"
+
+rm -rf "$src" "$dir/tree" "$dir/version"
+mkdir -p "$dir"
+git clone --quiet --depth 1 --branch "$version" "$repo" "$src"
+
+# Mirrors upstream's ./build without -buildmode=pie (the initrd needs no PIE)
+# and with the vendored modules, so no network access after the clone.
+# internal/distro settings are link-time variables; selinuxRelabel defaults
+# to true and makes the files stage abort on a root without
+# /etc/selinux/config ("failed to handle relabeling"), which Arch has not.
+(
+        cd "$src"
+        CGO_ENABLED=1 GOFLAGS=-mod=vendor GOTOOLCHAIN=local go build -trimpath \
+                -ldflags "-s -w \
+                        -X github.com/coreos/ignition/v2/internal/version.Raw=$version \
+                        -X github.com/coreos/ignition/v2/internal/distro.selinuxRelabel=false" \
+                -o "$bin" ./internal
+)
+rm -rf "$src"
+echo "$version" >| "$dir/version"
+echo "build-ignition: $("$bin" --version), $(stat -c %s "$bin") bytes, needs $(readelf -d "$bin" | awk '/NEEDED/ {gsub(/[][]/, "", $5); printf "%s ", $5}')"
