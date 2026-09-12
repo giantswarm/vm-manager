@@ -12,21 +12,10 @@ name: image
 # runner's bind-mounted temp directory because overlayfs cannot stack on the
 # container's own overlay root.
 
+# Triggered only through e2e.yml (workflow_call, whenever a change touches the
+# image inputs) or by hand: a standalone pull_request/push trigger here would
+# build the same commit a second time next to the nested build.
 on:
-  pull_request:
-    paths:
-      - images/**
-      - cmd/vm-agent/**
-      - internal/agent/**
-      - .github/workflows/image.yml
-  push:
-    branches:
-      - main
-    paths:
-      - images/**
-      - cmd/vm-agent/**
-      - internal/agent/**
-      - .github/workflows/image.yml
   workflow_dispatch:
   workflow_call:
 
