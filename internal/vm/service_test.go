@@ -1,4 +1,4 @@
-package vm
+package vm_test
 
 import (
 	"bytes"
@@ -27,6 +27,8 @@ import (
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/storage"
+	"github.com/giantswarm/vm-manager/internal/vm"
+	"github.com/giantswarm/vm-manager/internal/vm/vmtest"
 )
 
 const (
@@ -39,51 +41,46 @@ const (
 type harness struct {
 	t        *testing.T
 	ctx      context.Context
-	svc      *Service
-	ev       *events
-	clock    *fakeClock
-	rt       *fakeRuntime
-	tpm      *fakeTPM
-	store    *fakeStorage
-	nets     *fakeNetworks
-	notify   *fakeNotifier
+	svc      *vm.Service
+	ev       *vmtest.Events
+	clock    *vmtest.Clock
+	rt       *vmtest.Runtime
+	tpm      *vmtest.TPM
+	store    *vmtest.Storage
+	nets     *vmtest.Networks
+	notify   *vmtest.Notifier
 	stateDir string
 	imageDir string
-	imgs     *fakeImages
+	imgs     *vmtest.Images
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// newHarness wires a Service to fakes with one network "lan".
+// newHarness wires a vm.Service to fakes with one network "lan".
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{t: t, ctx: context.Background(), stateDir: t.TempDir(), imageDir: t.TempDir()}
-	h.ev = &events{}
-	h.clock = &fakeClock{now: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
-	h.rt = &fakeRuntime{ev: h.ev}
-	h.tpm = &fakeTPM{ev: h.ev}
-	h.store = &fakeStorage{ev: h.ev, dir: t.TempDir()}
-	h.nets = &fakeNetworks{ev: h.ev}
-	h.notify = &fakeNotifier{}
+	d := vmtest.NewDeps(t.TempDir(), time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC))
+	h.ev, h.clock, h.rt, h.tpm, h.store, h.nets, h.notify = d.Events, d.Clock, d.Runtime, d.TPM, d.Storage, d.Networks, d.Notifier
 	for _, f := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "OVMF_CODE.fd", "OVMF_VARS.fd"} {
 		require.NoError(t, os.WriteFile(filepath.Join(h.imageDir, f), []byte(f), 0o600))
 	}
-	h.imgs = &fakeImages{dir: h.imageDir, imgs: []images.Image{{
+	h.imgs = vmtest.NewImages(h.imageDir, images.Image{
 		ID: "giantswarm-vm-base", Version: "0.1.0",
 		UKI:                filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.efi"),
 		Disk:               filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.raw"),
 		KubernetesVersions: []string{"1.32.0", "1.31.2"},
-	}}}
+	})
 	h.start()
 	_, err := h.svc.CreateNetwork(h.ctx, network.Spec{Name: testNetwork, CIDR: "127.0.0.0/24"})
 	require.NoError(t, err)
 	return h
 }
 
-// start builds the Service (again) on the harness' state and fakes.
+// start builds the vm.Service (again) on the harness' state and fakes.
 func (h *harness) start() {
 	h.t.Helper()
-	svc, err := New(Options{
+	svc, err := vm.New(vm.Options{
 		StateDir:         h.stateDir,
 		Images:           h.imgs,
 		Storage:          h.store,
@@ -103,22 +100,22 @@ func (h *harness) start() {
 	h.t.Cleanup(func() { require.NoError(h.t, svc.Close(context.Background())) })
 }
 
-func (h *harness) spec(name string) Spec {
-	return Spec{Name: name, CPUs: 2, MemoryMiB: 2048, DiskGiB: 10, Network: testNetwork,
+func (h *harness) spec(name string) vm.Spec {
+	return vm.Spec{Name: name, CPUs: 2, MemoryMiB: 2048, DiskGiB: 10, Network: testNetwork,
 		UserData: []byte(`{"ignition":{"version":"3.4.0"}}`), SSHAuthorizedKeys: []string{"ssh-ed25519 AAAAuser user@laptop"},
 		Metadata: map[string]string{"role": "control-plane"}}
 }
 
-func (h *harness) create(name string) *VM {
+func (h *harness) create(name string) *vm.VM {
 	h.t.Helper()
 	v, err := h.svc.Create(h.ctx, h.spec(name))
 	require.NoError(h.t, err)
 	return v
 }
 
-func (h *harness) waitState(id string, want State) *VM {
+func (h *harness) waitState(id string, want vm.State) *vm.VM {
 	h.t.Helper()
-	var v *VM
+	var v *vm.VM
 	require.Eventually(h.t, func() bool {
 		var err error
 		v, err = h.svc.Get(id)
@@ -127,42 +124,42 @@ func (h *harness) waitState(id string, want State) *VM {
 	return v
 }
 
-func (h *harness) waitInstances(n int) *fakeInstance {
+func (h *harness) waitInstances(n int) *vmtest.Instance {
 	h.t.Helper()
-	require.Eventually(h.t, func() bool { return h.rt.count() >= n }, waitAtMost, waitEvery, "waiting for qemu start #%d", n)
-	return h.rt.at(n - 1)
+	require.Eventually(h.t, func() bool { return h.rt.Count() >= n }, waitAtMost, waitEvery, "waiting for qemu start #%d", n)
+	return h.rt.At(n - 1)
 }
 
 func (h *harness) waitTimers(n int) {
 	h.t.Helper()
-	require.Eventually(h.t, func() bool { return h.clock.timers() >= n }, waitAtMost, waitEvery, "waiting for %d timers", n)
+	require.Eventually(h.t, func() bool { return h.clock.Timers() >= n }, waitAtMost, waitEvery, "waiting for %d timers", n)
 }
 
 // install ends the installer with exit 0 and waits for phase B.
-func (h *harness) install(id string) *fakeInstance {
+func (h *harness) install(id string) *vmtest.Instance {
 	h.t.Helper()
 	h.waitInstances(1).Exit(0)
-	h.waitState(id, StateBooting)
+	h.waitState(id, vm.StateBooting)
 	return h.waitInstances(2)
 }
 
-func (h *harness) ready(id string, cid uint32) *VM {
+func (h *harness) ready(id string, cid uint32) *vm.VM {
 	h.t.Helper()
-	require.Eventually(h.t, func() bool { return h.notify.notify(cid, map[string]string{"READY": "1", "STATUS": "up"}) }, waitAtMost, waitEvery)
-	return h.waitState(id, StateReady)
+	require.Eventually(h.t, func() bool { return h.notify.Notify(cid, map[string]string{"READY": "1", "STATUS": "up"}) }, waitAtMost, waitEvery)
+	return h.waitState(id, vm.StateReady)
 }
 
-func (h *harness) lan() *fakeNetwork {
+func (h *harness) lan() *vmtest.Network {
 	n, err := h.nets.Get(testNetwork)
 	require.NoError(h.t, err)
-	return n.(*fakeNetwork)
+	return n.(*vmtest.Network)
 }
 
-func (h *harness) entry(id string) *entry {
+func (h *harness) lockOp(id string) func() {
 	h.t.Helper()
-	e, err := h.svc.entry(id)
+	unlock, err := h.svc.LockOp(id)
 	require.NoError(h.t, err)
-	return e
+	return unlock
 }
 
 // closeAsync starts Close and returns once it has begun (the closing flag is
@@ -172,9 +169,7 @@ func (h *harness) closeAsync() <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- h.svc.Close(h.ctx) }()
 	require.Eventually(h.t, func() bool {
-		h.svc.mu.Lock()
-		defer h.svc.mu.Unlock()
-		return h.svc.closing
+		return h.svc.Closing()
 	}, waitAtMost, waitEvery, "Close did not begin")
 	return done
 }
@@ -188,10 +183,10 @@ func (h *harness) awaitClose(done <-chan error) {
 		require.NoError(h.t, err)
 	case <-time.After(waitAtMost):
 		// End whatever escaped so the Cleanup Close cannot hang as well.
-		for i := 0; i < h.rt.count(); i++ {
-			h.rt.at(i).Exit(0)
+		for i := 0; i < h.rt.Count(); i++ {
+			h.rt.At(i).Exit(0)
 		}
-		h.t.Fatalf("Close did not return within %s: a process escaped it", waitAtMost)
+		h.t.Fatalf("Close did not return within %s: a Process escaped it", waitAtMost)
 	}
 }
 
@@ -200,20 +195,20 @@ func TestCreateValidation(t *testing.T) {
 	ok := h.spec("good")
 	tests := []struct {
 		name string
-		mod  func(*Spec)
+		mod  func(*vm.Spec)
 		err  error
 	}{
-		{"bad name", func(s *Spec) { s.Name = "Bad_Name" }, apierr.ErrInvalid},
-		{"no cpus", func(s *Spec) { s.CPUs = 0 }, apierr.ErrInvalid},
-		{"tiny memory", func(s *Spec) { s.MemoryMiB = 64 }, apierr.ErrInvalid},
-		{"no disk", func(s *Spec) { s.DiskGiB = 0 }, apierr.ErrInvalid},
-		{"no network", func(s *Spec) { s.Network = "" }, apierr.ErrInvalid},
-		{"unknown network", func(s *Spec) { s.Network = "nope" }, apierr.ErrInvalid},
-		{"unknown image", func(s *Spec) { s.Image = "nope" }, apierr.ErrInvalid},
-		{"unknown kubernetes version", func(s *Spec) { s.KubernetesVersion = "9.9.9" }, apierr.ErrInvalid},
-		{"bad waitFor", func(s *Spec) { s.WaitFor = "soon" }, apierr.ErrInvalid},
-		{"bad metadata key", func(s *Spec) { s.Metadata = map[string]string{"a/b": "c"} }, apierr.ErrInvalid},
-		{"multiline ssh key", func(s *Spec) { s.SSHAuthorizedKeys = []string{"a\nb"} }, apierr.ErrInvalid},
+		{"bad name", func(s *vm.Spec) { s.Name = "Bad_Name" }, apierr.ErrInvalid},
+		{"no cpus", func(s *vm.Spec) { s.CPUs = 0 }, apierr.ErrInvalid},
+		{"tiny memory", func(s *vm.Spec) { s.MemoryMiB = 64 }, apierr.ErrInvalid},
+		{"no disk", func(s *vm.Spec) { s.DiskGiB = 0 }, apierr.ErrInvalid},
+		{"no network", func(s *vm.Spec) { s.Network = "" }, apierr.ErrInvalid},
+		{"unknown network", func(s *vm.Spec) { s.Network = "nope" }, apierr.ErrInvalid},
+		{"unknown image", func(s *vm.Spec) { s.Image = "nope" }, apierr.ErrInvalid},
+		{"unknown kubernetes version", func(s *vm.Spec) { s.KubernetesVersion = "9.9.9" }, apierr.ErrInvalid},
+		{"bad waitFor", func(s *vm.Spec) { s.WaitFor = "soon" }, apierr.ErrInvalid},
+		{"bad metadata key", func(s *vm.Spec) { s.Metadata = map[string]string{"a/b": "c"} }, apierr.ErrInvalid},
+		{"multiline ssh key", func(s *vm.Spec) { s.SSHAuthorizedKeys = []string{"a\nb"} }, apierr.ErrInvalid},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,7 +219,7 @@ func TestCreateValidation(t *testing.T) {
 		})
 	}
 	assert.Empty(t, h.svc.List(), "no record survives a rejected create")
-	assert.Zero(t, h.rt.count())
+	assert.Zero(t, h.rt.Count())
 
 	v := h.create("good")
 	_, err := h.svc.Create(h.ctx, h.spec("good"))
@@ -239,20 +234,20 @@ func TestCreateValidation(t *testing.T) {
 func TestLifecycleInstallBootReady(t *testing.T) {
 	h := newHarness(t)
 	v := h.create("node1")
-	require.Equal(t, StateInstalling, v.State)
+	require.Equal(t, vm.StateInstalling, v.State)
 	assert.Equal(t, qemu.PhaseInstall, v.Phase)
 	assert.Equal(t, uint32(qemu.MinCID), v.CID)
 	assert.Equal(t, "127.0.0.2", v.IP)
 	assert.Len(t, v.MachineID, 32)
 	assert.Contains(t, v.SSHPublicKey, "ssh-ed25519 ")
-	assert.Equal(t, []string{"vm-" + v.ID + storage.VolumeSuffix}, h.store.names())
+	assert.Equal(t, []string{"vm-" + v.ID + storage.VolumeSuffix}, h.store.Names())
 	assert.FileExists(t, v.Paths.OVMFVars)
 	assert.FileExists(t, v.Paths.SSHKey)
 	assert.FileExists(t, v.Paths.UserData)
-	assert.Equal(t, 1, h.tpm.running())
+	assert.Equal(t, 1, h.tpm.Running())
 
 	// Phase A spec.
-	a := h.waitInstances(1).spec
+	a := h.waitInstances(1).Spec()
 	assert.Equal(t, qemu.PhaseInstall, a.Phase)
 	assert.Equal(t, filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.efi"), a.UKI)
 	assert.Equal(t, filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.raw"), a.Installer)
@@ -269,10 +264,10 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	assert.Equal(t, v.Paths.OVMFVars, a.OVMFVars)
 	assert.Equal(t, v.CID, a.VsockCID)
 	assert.Empty(t, a.KernelCmdlineExtra)
-	assert.False(t, h.notify.subscribed(v.CID), "phase A does not subscribe to notify")
+	assert.False(t, h.notify.Subscribed(v.CID), "phase A does not subscribe to notify")
 
 	// Phase B.
-	b := h.install(v.ID).spec
+	b := h.install(v.ID).Spec()
 	v, _ = h.svc.Get(v.ID)
 	assert.NotNil(t, v.InstalledAt)
 	assert.NotNil(t, v.BootedAt)
@@ -286,7 +281,7 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	assert.Equal(t, a.OVMFVars, b.OVMFVars)
 	assert.Equal(t, a.Credentials[qemu.CredentialMachineID], b.Credentials[qemu.CredentialMachineID])
 	assert.NotContains(t, b.Credentials, qemu.CredentialInstallTarget)
-	assert.Equal(t, 1, h.tpm.running(), "a fresh swtpm per phase, the installer's is gone")
+	assert.Equal(t, 1, h.tpm.Running(), "a fresh swtpm per phase, the installer's is gone")
 	assert.True(t, v.Attestation.UserDataReleased, "no attestation required: released at boot")
 
 	v = h.ready(v.ID, v.CID)
@@ -295,21 +290,21 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	assert.Equal(t, "up", v.Status)
 
 	// Stop, then start again without ignition.firstboot.
-	h.ev.reset()
+	h.ev.Reset()
 	v, err := h.svc.Stop(h.ctx, v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateStopped, v.State)
-	assert.Equal(t, []string{"qemu.stop", "tpm.stop"}, h.ev.list())
-	assert.Zero(t, h.tpm.running())
-	assert.False(t, h.notify.subscribed(v.CID))
+	assert.Equal(t, vm.StateStopped, v.State)
+	assert.Equal(t, []string{"qemu.stop", "tpm.stop"}, h.ev.List())
+	assert.Zero(t, h.tpm.Running())
+	assert.False(t, h.notify.Subscribed(v.CID))
 	_, err = h.svc.Stop(h.ctx, v.ID)
 	require.ErrorIs(t, err, apierr.ErrConflict)
 
 	v, err = h.svc.Start(h.ctx, v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateBooting, v.State)
+	assert.Equal(t, vm.StateBooting, v.State)
 	assert.Nil(t, v.ReadyAt)
-	c := h.waitInstances(3).spec
+	c := h.waitInstances(3).Spec()
 	assert.Empty(t, c.KernelCmdlineExtra, "ignition.firstboot only on the first installed boot")
 	_, err = h.svc.Start(h.ctx, v.ID)
 	require.ErrorIs(t, err, apierr.ErrConflict)
@@ -318,33 +313,33 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	// Reboot.
 	v, err = h.svc.Reboot(h.ctx, v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateBooting, v.State)
+	assert.Equal(t, vm.StateBooting, v.State)
 	h.waitInstances(4)
 	h.ready(v.ID, v.CID)
 
 	// Delete: stop, swtpm, lease, volume, directory, in that order.
-	h.ev.reset()
+	h.ev.Reset()
 	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
-	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.list())
+	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.List())
 	_, err = h.svc.Get(v.ID)
 	require.ErrorIs(t, err, apierr.ErrNotFound)
-	assert.Empty(t, h.store.names())
+	assert.Empty(t, h.store.Names())
 	assert.Empty(t, h.lan().Leases())
 	assert.NoDirExists(t, v.Paths.Dir)
-	assert.Zero(t, h.tpm.running())
+	assert.Zero(t, h.tpm.Running())
 	require.ErrorIs(t, h.svc.Delete(h.ctx, v.ID), apierr.ErrNotFound)
 }
 
 func TestCreateWaitForReady(t *testing.T) {
 	h := newHarness(t)
 	type result struct {
-		v   *VM
+		v   *vm.VM
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
 		s := h.spec("wait")
-		s.WaitFor = WaitReady
+		s.WaitFor = vm.WaitReady
 		v, err := h.svc.Create(h.ctx, s)
 		done <- result{v, err}
 	}()
@@ -355,11 +350,11 @@ func TestCreateWaitForReady(t *testing.T) {
 		t.Fatalf("Create returned before READY: %+v %v", r.v, r.err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	require.Eventually(t, func() bool { return h.notify.notify(inst.spec.VsockCID, map[string]string{"READY": "1"}) }, waitAtMost, waitEvery)
+	require.Eventually(t, func() bool { return h.notify.Notify(inst.Spec().VsockCID, map[string]string{"READY": "1"}) }, waitAtMost, waitEvery)
 	select {
 	case r := <-done:
 		require.NoError(t, r.err)
-		assert.Equal(t, StateReady, r.v.State)
+		assert.Equal(t, vm.StateReady, r.v.State)
 	case <-time.After(waitAtMost):
 		t.Fatal("Create did not return after READY")
 	}
@@ -368,40 +363,40 @@ func TestCreateWaitForReady(t *testing.T) {
 func TestWaitForTimeoutAndFailure(t *testing.T) {
 	h := newHarness(t)
 	done := make(chan error, 1)
-	var got *VM
+	var got *vm.VM
 	go func() {
 		s := h.spec("slow")
-		s.WaitFor = WaitInstalled
+		s.WaitFor = vm.WaitInstalled
 		var err error
 		got, err = h.svc.Create(h.ctx, s)
 		done <- err
 	}()
 	h.waitInstances(1)
 	h.waitTimers(2) // supervisor install timer + waiter deadline
-	h.clock.Advance(DefaultInstallTimeout + DefaultStopTimeout + time.Second)
+	h.clock.Advance(vm.DefaultInstallTimeout + vm.DefaultStopTimeout + time.Second)
 	// Both the install timeout (kill -> failed) and the wait deadline fire;
 	// either outcome must be reported with the record attached.
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrTimeout) || errors.Is(err, ErrFailed), "got %v", err)
+		assert.True(t, errors.Is(err, vm.ErrTimeout) || errors.Is(err, vm.ErrFailed), "got %v", err)
 		require.NotNil(t, got)
 	case <-time.After(waitAtMost):
 		t.Fatal("Create did not return")
 	}
-	h.waitState(got.ID, StateFailed)
+	h.waitState(got.ID, vm.StateFailed)
 
-	// A failure while waiting is ErrFailed with the reason.
+	// A failure while waiting is vm.ErrFailed with the reason.
 	go func() {
 		s := h.spec("broken")
-		s.WaitFor = WaitReady
+		s.WaitFor = vm.WaitReady
 		got, _ = h.svc.Create(h.ctx, s)
 		done <- nil
 	}()
 	h.waitInstances(2).Exit(7)
 	<-done
 	require.NotNil(t, got)
-	assert.Equal(t, StateFailed, got.State)
+	assert.Equal(t, vm.StateFailed, got.State)
 	assert.Contains(t, got.LastError, "installer exited")
 }
 
@@ -415,18 +410,18 @@ func TestInstallTimeoutKillsAndKeepsConsole(t *testing.T) {
 	require.NoError(t, os.WriteFile(v.Paths.Console, []byte(console.String()), 0o600))
 	h.waitInstances(1)
 	h.waitTimers(1)
-	h.clock.Advance(DefaultInstallTimeout)
-	v = h.waitState(v.ID, StateFailed)
+	h.clock.Advance(vm.DefaultInstallTimeout)
+	v = h.waitState(v.ID, vm.StateFailed)
 	assert.Contains(t, v.LastError, "installer did not finish within 5m0s")
 	assert.Contains(t, v.LastError, "console:\n")
-	assert.Equal(t, consoleTailLines, strings.Count(v.LastError, "line "), "last 40 console lines")
-	assert.Contains(t, h.ev.list(), "qemu.kill")
-	assert.Zero(t, h.tpm.running(), "swtpm stopped after the failure")
-	assert.Len(t, h.store.names(), 1, "the disk is kept for inspection")
+	assert.Equal(t, vm.ConsoleTailLines, strings.Count(v.LastError, "line "), "last 40 console lines")
+	assert.Contains(t, h.ev.List(), "qemu.kill")
+	assert.Zero(t, h.tpm.Running(), "swtpm stopped after the failure")
+	assert.Len(t, h.store.Names(), 1, "the disk is kept for inspection")
 	_, err := h.svc.Start(h.ctx, v.ID)
 	require.ErrorIs(t, err, apierr.ErrConflict, "never installed")
 	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
-	assert.Empty(t, h.store.names())
+	assert.Empty(t, h.store.Names())
 }
 
 // TestDeleteDuringInstall deletes a VM while its installer runs: the process
@@ -437,16 +432,16 @@ func TestDeleteDuringInstall(t *testing.T) {
 	v := h.create("half-installed")
 	h.waitInstances(1)
 	h.waitTimers(1)
-	require.Equal(t, 1, h.tpm.running())
-	h.ev.reset()
+	require.Equal(t, 1, h.tpm.Running())
+	h.ev.Reset()
 
 	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
 
-	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.list(),
+	assert.Equal(t, []string{"qemu.stop", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.List(),
 		"installer stopped and gone (swtpm stopped by its supervisor) before lease, volume and disk are released")
-	assert.Equal(t, 1, h.rt.count(), "the installer's exit did not start phase B")
-	assert.Zero(t, h.tpm.running())
-	assert.Empty(t, h.store.names())
+	assert.Equal(t, 1, h.rt.Count(), "the installer's exit did not start phase B")
+	assert.Zero(t, h.tpm.Running())
+	assert.Empty(t, h.store.Names())
 	assert.Empty(t, h.lan().Leases())
 	assert.NoDirExists(t, v.Paths.Dir)
 	assert.Empty(t, h.svc.List())
@@ -454,10 +449,10 @@ func TestDeleteDuringInstall(t *testing.T) {
 	require.ErrorIs(t, err, apierr.ErrNotFound)
 
 	// The install timeout fires into nothing: no supervisor is left.
-	h.clock.Advance(DefaultInstallTimeout)
+	h.clock.Advance(vm.DefaultInstallTimeout)
 	h.awaitClose(h.closeAsync())
-	assert.Equal(t, 1, h.rt.count())
-	assert.NotContains(t, h.ev.list(), "qemu.kill")
+	assert.Equal(t, 1, h.rt.Count())
+	assert.NotContains(t, h.ev.List(), "qemu.kill")
 }
 
 // TestCloseDuringInstallHandoff drives Close into the install-to-boot
@@ -471,23 +466,22 @@ func TestCloseDuringInstallHandoff(t *testing.T) {
 		inst := h.waitInstances(1)
 		// Hold the handoff's lock: the installer's exit settles (installed,
 		// no process) but boot() cannot start phase B before we let go.
-		e := h.entry(v.ID)
-		e.opMu.Lock()
+		unlock := h.lockOp(v.ID)
 		inst.Exit(0)
 		require.Eventually(t, func() bool {
 			v, err := h.svc.Get(v.ID)
 			return err == nil && v.InstalledAt != nil
 		}, waitAtMost, waitEvery, "installer exit not settled")
-		assert.Zero(t, h.tpm.running())
+		assert.Zero(t, h.tpm.Running())
 
 		done := h.closeAsync()
-		e.opMu.Unlock()
+		unlock()
 		h.awaitClose(done)
 
-		assert.Equal(t, 1, h.rt.count(), "phase B was not started once Close had begun")
+		assert.Equal(t, 1, h.rt.Count(), "phase B was not started once Close had begun")
 		v, err := h.svc.Get(v.ID)
 		require.NoError(t, err)
-		assert.Equal(t, StateStopped, v.State)
+		assert.Equal(t, vm.StateStopped, v.State)
 		assert.NotNil(t, v.InstalledAt, "the record stays startable")
 		assert.Contains(t, v.LastError, "shut down before the installed boot started")
 		_, err = h.svc.Start(h.ctx, v.ID)
@@ -501,7 +495,7 @@ func TestCloseDuringInstallHandoff(t *testing.T) {
 		v := h.create("inflight")
 		entered, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
-		h.rt.setHold(func(spec qemu.Spec) {
+		h.rt.SetHold(func(spec qemu.Spec) {
 			if spec.Phase == qemu.PhaseBoot {
 				once.Do(func() { close(entered) })
 				<-release
@@ -511,21 +505,21 @@ func TestCloseDuringInstallHandoff(t *testing.T) {
 		select {
 		case <-entered:
 		case <-time.After(waitAtMost):
-			t.Fatal("phase B start not reached")
+			t.Fatal("phase B start not Reached")
 		}
 
 		done := h.closeAsync()
 		close(release)
 		h.awaitClose(done)
 
-		assert.Equal(t, 2, h.rt.count(), "the start in flight completed")
-		ev := h.ev.list()
+		assert.Equal(t, 2, h.rt.Count(), "the start in flight completed")
+		ev := h.ev.List()
 		assert.Greater(t, lastIndex(ev, "qemu.stop"), lastIndex(ev, "qemu.start:boot"), "Close stopped the phase B it let start")
 		v, err := h.svc.Get(v.ID)
 		require.NoError(t, err)
-		assert.Equal(t, StateStopped, v.State)
-		assert.Zero(t, h.tpm.running())
-		assert.False(t, h.notify.subscribed(v.CID))
+		assert.Equal(t, vm.StateStopped, v.State)
+		assert.Zero(t, h.tpm.Running())
+		assert.False(t, h.notify.Subscribed(v.CID))
 	})
 }
 
@@ -540,27 +534,27 @@ func lastIndex(list []string, s string) int {
 
 func TestQEMUStartFailureLeavesNothing(t *testing.T) {
 	h := newHarness(t)
-	h.rt.setFailOn(func(qemu.Spec) error { return errors.New("qemu: no kvm") })
+	h.rt.SetFailOn(func(qemu.Spec) error { return errors.New("qemu: no kvm") })
 	_, err := h.svc.Create(h.ctx, h.spec("nokvm"))
 	require.ErrorContains(t, err, "no kvm")
 	assert.Empty(t, h.svc.List())
-	assert.Zero(t, h.tpm.running(), "swtpm stopped")
-	assert.Empty(t, h.store.names(), "volume deleted")
+	assert.Zero(t, h.tpm.Running(), "swtpm stopped")
+	assert.Empty(t, h.store.Names(), "volume deleted")
 	assert.Empty(t, h.lan().Leases(), "lease released")
-	dirs, _ := os.ReadDir(filepath.Join(h.stateDir, vmsDir))
+	dirs, _ := os.ReadDir(filepath.Join(h.stateDir, vm.VMsDir))
 	assert.Empty(t, dirs, "state dir removed")
-	assert.Equal(t, []string{"tpm.start", "qemu.start:install", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.list()[len(h.ev.list())-6:])
+	assert.Equal(t, []string{"tpm.start", "qemu.start:install", "tpm.stop", "net.detach", "storage.release", "storage.delete"}, h.ev.List()[len(h.ev.List())-6:])
 
-	h.tpm.startErr = errors.New("swtpm missing")
+	h.tpm.StartErr = errors.New("swtpm missing")
 	_, err = h.svc.Create(h.ctx, h.spec("notpm"))
 	require.ErrorContains(t, err, "swtpm missing")
 	assert.Empty(t, h.svc.List())
-	assert.Empty(t, h.store.names())
+	assert.Empty(t, h.store.Names())
 }
 
 func TestPhaseBStartFailure(t *testing.T) {
 	h := newHarness(t)
-	h.rt.setFailOn(func(s qemu.Spec) error {
+	h.rt.SetFailOn(func(s qemu.Spec) error {
 		if s.Phase == qemu.PhaseBoot {
 			return errors.New("boot: bad firmware")
 		}
@@ -568,19 +562,19 @@ func TestPhaseBStartFailure(t *testing.T) {
 	})
 	v := h.create("b-fails")
 	h.waitInstances(1).Exit(0)
-	v = h.waitState(v.ID, StateFailed)
+	v = h.waitState(v.ID, vm.StateFailed)
 	assert.Contains(t, v.LastError, "bad firmware")
 	assert.NotNil(t, v.InstalledAt)
-	assert.Zero(t, h.tpm.running(), "swtpm of the failed start stopped")
-	assert.False(t, h.notify.subscribed(v.CID))
-	assert.Len(t, h.store.names(), 1, "the installed disk is kept")
+	assert.Zero(t, h.tpm.Running(), "swtpm of the failed start stopped")
+	assert.False(t, h.notify.Subscribed(v.CID))
+	assert.Len(t, h.store.Names(), 1, "the installed disk is kept")
 
-	h.rt.setFailOn(nil)
+	h.rt.SetFailOn(nil)
 	v, err := h.svc.Start(h.ctx, v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateBooting, v.State)
+	assert.Equal(t, vm.StateBooting, v.State)
 	assert.Empty(t, v.LastError)
-	assert.Equal(t, 1, h.tpm.running())
+	assert.Equal(t, 1, h.tpm.Running())
 }
 
 func TestUnexpectedExitAndBootTimeout(t *testing.T) {
@@ -590,34 +584,34 @@ func TestUnexpectedExitAndBootTimeout(t *testing.T) {
 
 	// No READY within BootTimeout: degraded to running, still up.
 	h.waitTimers(1)
-	h.clock.Advance(DefaultBootTimeout)
-	v = h.waitState(v.ID, StateRunning)
+	h.clock.Advance(vm.DefaultBootTimeout)
+	v = h.waitState(v.ID, vm.StateRunning)
 	assert.Contains(t, v.LastError, "no READY=1 within 2m0s")
 	v = h.ready(v.ID, v.CID)
 	assert.Empty(t, v.LastError, "a late READY clears the note")
 
 	// Guest powers itself off.
 	inst.Exit(0)
-	v = h.waitState(v.ID, StateStopped)
+	v = h.waitState(v.ID, vm.StateStopped)
 	assert.Equal(t, "guest shut down", v.LastError)
-	assert.Zero(t, h.tpm.running())
+	assert.Zero(t, h.tpm.Running())
 
 	// Crash.
 	_, err := h.svc.Start(h.ctx, v.ID)
 	require.NoError(t, err)
 	h.waitInstances(3).Exit(1)
-	v = h.waitState(v.ID, StateFailed)
+	v = h.waitState(v.ID, vm.StateFailed)
 	assert.Contains(t, v.LastError, "qemu exited: exit status 1")
 
 	// Stop while still installing is allowed; the result cannot be started.
 	w := h.create("half")
 	_, err = h.svc.Stop(h.ctx, w.ID)
 	require.NoError(t, err)
-	w = h.waitState(w.ID, StateStopped)
+	w = h.waitState(w.ID, vm.StateStopped)
 	assert.Nil(t, w.InstalledAt)
 	_, err = h.svc.Start(h.ctx, w.ID)
 	require.ErrorIs(t, err, apierr.ErrConflict)
-	assert.Equal(t, 4, h.rt.count(), "no phase B after a stopped installer")
+	assert.Equal(t, 4, h.rt.Count(), "no phase B after a stopped installer")
 }
 
 func TestAttestationGating(t *testing.T) {
@@ -647,7 +641,7 @@ func TestAttestationGating(t *testing.T) {
 	// VM's lease address.
 	client := &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(v.IP)}}).DialContext}}
 	get := func(key string) (int, string) {
-		resp, err := client.Get("http://" + h.lan().imdsAddr + imds.BasePath + key)
+		resp, err := client.Get("http://" + h.lan().IMDSAddr + imds.BasePath + key)
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
@@ -657,7 +651,7 @@ func TestAttestationGating(t *testing.T) {
 		body, err := json.Marshal(imds.QuoteRequest{Stage: stage, Nonce: nonce, AKPub: []byte("ak"), Quote: []byte("q"),
 			Signature: []byte("s"), PCRs: map[string]map[string]string{"sha256": {"11": "00"}}})
 		require.NoError(t, err)
-		resp, err := client.Post("http://"+h.lan().imdsAddr+imds.BasePath+"/attest/quote", "application/json", bytes.NewReader(body))
+		resp, err := client.Post("http://"+h.lan().IMDSAddr+imds.BasePath+"/attest/quote", "application/json", bytes.NewReader(body))
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 		var res imds.QuoteResult
@@ -673,7 +667,7 @@ func TestAttestationGating(t *testing.T) {
 	att := h.svc.IMDSDeps().Attestor
 	nonce, err := att.Nonce(h.ctx, v.ID)
 	require.NoError(t, err)
-	v = h.waitState(v.ID, StateAttesting)
+	v = h.waitState(v.ID, vm.StateAttesting)
 	assert.NotNil(t, v.Attestation.NonceIssuedAt)
 
 	// A ready-stage quote never releases user-data.
@@ -709,7 +703,7 @@ func TestAttestationGating(t *testing.T) {
 	v, _ = h.svc.Get(v.ID)
 	assert.False(t, v.Attestation.UserDataReleased)
 	assert.Nil(t, v.Attestation.Initrd)
-	assert.Equal(t, StateBooting, v.State)
+	assert.Equal(t, vm.StateBooting, v.State)
 
 	// Reports land in memory and on disk.
 	require.NoError(t, h.svc.StoreReport(h.ctx, v.ID, json.RawMessage(`{"cpu":1}`)))
@@ -727,13 +721,13 @@ func TestPersistenceRoundTripAndLoad(t *testing.T) {
 	require.NoError(t, h.svc.StoreReport(h.ctx, v.ID, json.RawMessage(`{"a":1}`)))
 
 	// The record on disk is the snapshot.
-	var onDisk VM
-	data, err := os.ReadFile(filepath.Join(v.Paths.Dir, recordFile))
+	var onDisk vm.VM
+	data, err := os.ReadFile(filepath.Join(v.Paths.Dir, vm.RecordFile))
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(data, &onDisk))
 	assert.Equal(t, *before, onDisk)
 	var states []network.State
-	data, err = os.ReadFile(filepath.Join(h.stateDir, networksFile))
+	data, err = os.ReadFile(filepath.Join(h.stateDir, vm.NetworksFile))
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(data, &states))
 	require.Len(t, states, 1)
@@ -745,18 +739,18 @@ func TestPersistenceRoundTripAndLoad(t *testing.T) {
 	require.NoError(t, h.svc.Close(h.ctx))
 	// Close stopped the VM cleanly; put the ready record back to simulate a
 	// crash that left QEMU recorded as running.
-	require.NoError(t, writeJSON(filepath.Join(v.Paths.Dir, recordFile), onDisk))
-	h.nets = &fakeNetworks{ev: h.ev}
+	require.NoError(t, vm.WriteJSON(filepath.Join(v.Paths.Dir, vm.RecordFile), onDisk))
+	h.nets = vmtest.NewNetworks(h.ev)
 	h.start()
-	require.Len(t, h.nets.restored, 1)
-	assert.Equal(t, states, h.nets.restored[0])
+	require.Len(t, h.nets.Restored, 1)
+	assert.Equal(t, states, h.nets.Restored[0])
 	nets := h.svc.ListNetworks()
 	require.Len(t, nets, 1)
 	assert.Equal(t, v.IP, nets[0].Leases[0].IP.String())
 
 	after, err := h.svc.Get(v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateStopped, after.State)
+	assert.Equal(t, vm.StateStopped, after.State)
 	assert.Contains(t, after.LastError, "vm-manager restarted while the VM was ready")
 	assert.Equal(t, before.IP, after.IP)
 	assert.Equal(t, before.MAC, after.MAC)
@@ -771,32 +765,32 @@ func TestPersistenceRoundTripAndLoad(t *testing.T) {
 	assert.JSONEq(t, `{"ignition":{"version":"3.4.0"}}`, string(inst.UserData), "user-data reloaded")
 
 	// Start reopens the volume and boots phase B without ignition.firstboot.
-	h.ev.reset()
+	h.ev.Reset()
 	after, err = h.svc.Start(h.ctx, v.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateBooting, after.State)
-	assert.Contains(t, h.ev.list(), "storage.acquire:open")
-	assert.Empty(t, h.waitInstances(3).spec.KernelCmdlineExtra)
+	assert.Equal(t, vm.StateBooting, after.State)
+	assert.Contains(t, h.ev.List(), "storage.acquire:open")
+	assert.Empty(t, h.waitInstances(3).Spec().KernelCmdlineExtra)
 	assert.Equal(t, uint32(qemu.MinCID+1), h.create("second").CID, "CID allocation skips the restored VM")
 }
 
 func TestLoadMarksInterruptedRecords(t *testing.T) {
 	h := newHarness(t)
 	require.NoError(t, h.svc.Close(h.ctx))
-	for id, st := range map[string]State{"aaaa0001": StateCreating, "aaaa0002": StateDeleting, "aaaa0003": StateFailed} {
-		dir := filepath.Join(h.stateDir, vmsDir, id)
+	for id, st := range map[string]vm.State{"aaaa0001": vm.StateCreating, "aaaa0002": vm.StateDeleting, "aaaa0003": vm.StateFailed} {
+		dir := filepath.Join(h.stateDir, vm.VMsDir, id)
 		require.NoError(t, os.MkdirAll(dir, 0o700))
-		rec := VM{ID: id, Spec: Spec{Name: "n" + id, Network: testNetwork}, State: st, CID: 3}
+		rec := vm.VM{ID: id, Spec: vm.Spec{Name: "n" + id, Network: testNetwork}, State: st, CID: 3}
 		data, _ := json.Marshal(rec)
-		require.NoError(t, os.WriteFile(filepath.Join(dir, recordFile), data, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, vm.RecordFile), data, 0o600))
 	}
-	require.NoError(t, os.MkdirAll(filepath.Join(h.stateDir, vmsDir, "garbage"), 0o700))
-	h.nets = &fakeNetworks{ev: h.ev}
+	require.NoError(t, os.MkdirAll(filepath.Join(h.stateDir, vm.VMsDir, "garbage"), 0o700))
+	h.nets = vmtest.NewNetworks(h.ev)
 	h.start()
 	list := h.svc.List()
 	require.Len(t, list, 3)
 	for _, v := range list {
-		assert.Equal(t, StateFailed, v.State, v.ID)
+		assert.Equal(t, vm.StateFailed, v.State, v.ID)
 		if v.ID != "aaaa0003" {
 			assert.Contains(t, v.LastError, "vm-manager restarted while the VM was")
 		}
@@ -821,7 +815,7 @@ func TestNetworks(t *testing.T) {
 		names = append(names, n.Spec.Name)
 	}
 	assert.Equal(t, []string{"alpha", testNetwork}, names)
-	assert.NotEmpty(t, h.lan().imdsAddr, "IMDS served")
+	assert.NotEmpty(t, h.lan().IMDSAddr, "IMDS served")
 
 	v := h.create("user")
 	err = h.svc.DeleteNetwork(h.ctx, testNetwork)
@@ -831,7 +825,7 @@ func TestNetworks(t *testing.T) {
 	require.NoError(t, h.svc.DeleteNetwork(h.ctx, testNetwork))
 	require.NoError(t, h.svc.DeleteNetwork(h.ctx, "alpha"))
 	require.ErrorIs(t, h.svc.DeleteNetwork(h.ctx, "alpha"), apierr.ErrNotFound)
-	data, err := os.ReadFile(filepath.Join(h.stateDir, networksFile))
+	data, err := os.ReadFile(filepath.Join(h.stateDir, vm.NetworksFile))
 	require.NoError(t, err)
 	assert.JSONEq(t, "[]", string(data))
 }
@@ -934,15 +928,15 @@ func TestExecOverSSH(t *testing.T) {
 
 	hostKey := newSigner(t)
 	var got string
-	h.lan().dial = sshServer(t, v.SSHPublicKey, hostKey, func(cmd string) (string, uint32) {
+	h.lan().Dialer = sshServer(t, v.SSHPublicKey, hostKey, func(cmd string) (string, uint32) {
 		got = cmd
 		return "hello\n", 3
 	})
 	res, err := h.svc.Exec(h.ctx, v.ID, []string{"echo", "it's here", "$HOME"})
 	require.NoError(t, err)
 	assert.Equal(t, `'echo' 'it'\''s here' '$HOME'`, got)
-	assert.Equal(t, ExecResult{Stdout: "hello\n", Stderr: "warn\n", ExitCode: 3}, res)
-	pinned, err := os.ReadFile(filepath.Join(v.Paths.Dir, hostKeyFile))
+	assert.Equal(t, vm.ExecResult{Stdout: "hello\n", Stderr: "warn\n", ExitCode: 3}, res)
+	pinned, err := os.ReadFile(filepath.Join(v.Paths.Dir, vm.HostKeyFile))
 	require.NoError(t, err)
 	assert.Equal(t, ssh.MarshalAuthorizedKey(hostKey.PublicKey()), pinned)
 
@@ -950,12 +944,12 @@ func TestExecOverSSH(t *testing.T) {
 	res, err = h.svc.Exec(h.ctx, v.ID, []string{"true"})
 	require.NoError(t, err)
 	assert.Equal(t, 3, res.ExitCode)
-	h.lan().dial = sshServer(t, v.SSHPublicKey, newSigner(t), func(string) (string, uint32) { return "", 0 })
+	h.lan().Dialer = sshServer(t, v.SSHPublicKey, newSigner(t), func(string) (string, uint32) { return "", 0 })
 	_, err = h.svc.Exec(h.ctx, v.ID, []string{"true"})
 	require.ErrorContains(t, err, "host key of vm")
 
 	// A key that is not vm-manager's is rejected by the guest.
-	h.lan().dial = sshServer(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb1vUmB8Uf9DR6vHCEwe8aSU2LLyOc0vHwwmN9Gpz1Y other", hostKey, nil)
+	h.lan().Dialer = sshServer(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb1vUmB8Uf9DR6vHCEwe8aSU2LLyOc0vHwwmN9Gpz1Y other", hostKey, nil)
 	_, err = h.svc.Exec(h.ctx, v.ID, []string{"true"})
 	require.ErrorContains(t, err, "ssh ")
 
@@ -968,17 +962,17 @@ func TestExecOverSSH(t *testing.T) {
 func newSigner(t *testing.T) ssh.Signer {
 	t.Helper()
 	dir := t.TempDir()
-	_, err := generateSSHKey(filepath.Join(dir, "key"), "test")
+	_, err := vm.GenerateSSHKey(filepath.Join(dir, "key"), "test")
 	require.NoError(t, err)
-	signer, err := loadSigner(filepath.Join(dir, "key"))
+	signer, err := vm.LoadSigner(filepath.Join(dir, "key"))
 	require.NoError(t, err)
 	return signer
 }
 
 func TestOptionsDefaults(t *testing.T) {
-	_, err := New(Options{})
+	_, err := vm.New(vm.Options{})
 	require.ErrorContains(t, err, "Images, Networks, Notify, Runtime, StateDir, Storage, TPM")
-	code, vars := FindOVMF()
+	code, vars := vm.FindOVMF()
 	assert.NotEmpty(t, code)
 	assert.NotEmpty(t, vars)
 }
