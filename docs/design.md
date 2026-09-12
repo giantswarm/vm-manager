@@ -183,9 +183,12 @@ skipping phase A when TPM-bound install credentials are not needed.
 
 ## IMDS contract (Giant Swarm provider)
 
-Plain HTTP, `GET http://169.254.169.254/giantswarm/v1<key>`, text bodies, 404 for unknown
-keys, 403 for gated keys. The Go key table is the single source of truth and generates the
-hwdb record at image build time.
+Plain HTTP, `GET http://169.254.169.254/giantswarm/v1<key>`, text bodies, 404 with an
+empty body for unknown keys (systemd-imdsd aborts an error response that carries body
+bytes before it reaches its own 404 handling; only a bodyless 404 becomes
+`KeyNotFound`, which `systemd-imds --import` tolerates for an absent `/user-data`), 403
+for gated keys. The Go key table is the single source of truth and generates the hwdb
+record at image build time.
 
 | Key | hwdb property | Content |
 |---|---|---|

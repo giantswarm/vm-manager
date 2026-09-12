@@ -120,13 +120,13 @@ type Conn struct {
 }
 
 // rightsBatch is one SCM_RIGHTS payload together with the stream offset of
-// the first data byte it arrived with. Services send a message and its file
-// descriptors in one sendmsg(2), and the kernel never merges bytes carrying
-// different ancillary data into one recvmsg(2), so that offset is the first
-// byte of the message the descriptors belong to.
+// the last data byte it arrived with. Linux delivers the descriptors of a
+// message with a recvmsg(2) that may also carry earlier, descriptor-less
+// messages glued in front, but never bytes past the skb that carried them,
+// so that last byte always lies inside the message the descriptors belong to.
 type rightsBatch struct {
-	at  int64
-	fds []int
+	last int64
+	fds  []int
 }
 
 // Dial connects to the Varlink service listening on the AF_UNIX socket at
@@ -313,6 +313,15 @@ func (c *Conn) do(ctx context.Context, fn func() error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		// The only deadline ever set on the socket mirrors the context's, and
+		// the poller can fire a hair before the context's own timer. Wait for
+		// the context so the caller sees its error, not an I/O timeout.
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
@@ -372,7 +381,11 @@ func (c *Conn) read() error {
 	at := c.pos + int64(len(c.rbuf))
 	n, oobn, flags, _, err := c.conn.ReadMsgUnix(buf, c.oob)
 	if oobn > 0 {
-		if cerr := c.collectRights(c.oob[:oobn], at); cerr != nil {
+		last := at
+		if n > 0 {
+			last = at + int64(n) - 1
+		}
+		if cerr := c.collectRights(c.oob[:oobn], last); cerr != nil {
 			return cerr
 		}
 	}
@@ -391,7 +404,7 @@ func (c *Conn) read() error {
 	return nil
 }
 
-func (c *Conn) collectRights(oob []byte, at int64) error {
+func (c *Conn) collectRights(oob []byte, last int64) error {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return fmt.Errorf("varlink: parse ancillary data: %w", err)
@@ -404,20 +417,20 @@ func (c *Conn) collectRights(oob []byte, at int64) error {
 		if err != nil {
 			return fmt.Errorf("varlink: parse SCM_RIGHTS: %w", err)
 		}
-		c.rights = append(c.rights, rightsBatch{at: at, fds: fds})
+		c.rights = append(c.rights, rightsBatch{last: last, fds: fds})
 	}
 	return nil
 }
 
-// takeFiles wraps the descriptors that arrived at or before stream offset
-// end (the NUL of the message just consumed) as *os.File and keeps later
-// batches for the messages they belong to. ReadMsgUnix receives with
-// MSG_CMSG_CLOEXEC, so the fds are already close-on-exec.
+// takeFiles wraps the descriptors whose chunk ended at or before stream
+// offset end (the NUL of the message just consumed) as *os.File and keeps
+// batches that ended later for the messages they belong to. ReadMsgUnix
+// receives with MSG_CMSG_CLOEXEC, so the fds are already close-on-exec.
 func (c *Conn) takeFiles(end int64) []*os.File {
 	var files []*os.File
 	kept := c.rights[:0]
 	for _, b := range c.rights {
-		if b.at > end {
+		if b.last > end {
 			kept = append(kept, b)
 			continue
 		}

@@ -8,16 +8,29 @@ make test-integration # tests tagged `integration`: real QEMU + OVMF + swtpm on 
 make lint           # golangci-lint v2 with the pre-commit linters (gosec, goconst, govet)
 make image          # mkosi build of the guest image into images/build/ (dev keys generated on first use)
 make image-verify   # offline checks of the built image (GPT, UKI sections, expected PCR 11, hwdb, presets)
-make e2e            # tests tagged `e2e`: install + reboot + READY over vsock with the built image on KVM (skip without it)
+make e2e            # tests tagged `e2e` on KVM with the built image: install + reboot + READY over vsock, and network + IMDS through the MCP API of a real `vm-manager serve` (skip without it)
 make serve          # go run . -v serve (SERVE_ARGS="--listen 127.0.0.1:18080" to override)
 make help           # every target with its description
 ```
 
-`make e2e` prints `install_seconds=` and `boot_to_ready_seconds=` for the boot-time
-budgets of [design.md](design.md) "Testing strategy"; `VM_MANAGER_E2E_IMAGE_DIR`
-points it at artifacts built elsewhere and `VM_MANAGER_E2E_KEEP=1` keeps the
-per-test state directory (consoles, TPM state, target disk) after a pass. See
-`e2e/doc.go` for the host requirements.
+`make e2e` runs two tests. `TestInstallBoot` (`e2e/install_boot_test.go`) drives QEMU
+directly with user networking: installer boot, sysinstall onto a blank disk, installed
+boot to READY=1 and ssh over vsock; it passes `systemd.imds=no` because slirp offers no
+IMDS. `TestNetworkIMDS` (`e2e/network_imds_test.go`) builds `vm-manager`, starts
+`vm-manager serve` as a child process and drives it through the MCP endpoint:
+`create_network`, `create_vm` with `wait_for: ready`, then proves over `exec_vm` that
+the guest fetched hostname, ssh keys and instance id from the IMDS on the virtual
+network and that `systemd-imds-import.service` succeeded, that
+`systemctl is-system-running` is `running` with no failed unit, that the
+`systemd-report` upload arrived (`get_vm_metrics`), that `forward_port` serves sshd,
+and that `delete_vm`, `delete_network` and SIGTERM leave no qemu or swtpm behind.
+Both print their timings for the budgets of [design.md](design.md) "Testing strategy":
+`install_seconds=` and `boot_to_ready_seconds=` from the first, `api_create_vm_seconds=`,
+`api_install_seconds=` and `api_boot_to_ready_seconds=` from the second.
+`VM_MANAGER_E2E_IMAGE_DIR` points both at artifacts built elsewhere (default
+`images/build`) and `VM_MANAGER_E2E_KEEP=1` keeps the per-test state directory
+(consoles, TPM state, disks, the server log) after a pass. See `e2e/doc.go` for the
+host requirements.
 
 ## Layout
 

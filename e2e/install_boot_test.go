@@ -180,8 +180,8 @@ func assertSlotUUIDs(t *testing.T, h *Harness, parts []Partition) {
 
 // toleratedFailures are units that cannot succeed without the IMDS this test
 // does not provide (user networking, systemd.imds=no): the metrics upload
-// timer fires every 15 s against 169.254.169.254. The network+IMDS e2e must
-// drop this list.
+// timer fires every 15 s against 169.254.169.254. TestNetworkIMDS, which
+// serves a real IMDS, tolerates no failed unit.
 var toleratedFailures = map[string]bool{
 	"vm-report-upload.service": true,
 }
