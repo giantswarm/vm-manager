@@ -6,7 +6,8 @@
 //
 // # Keys
 //
-// The attestation key is an ECC P-256 restricted signing key (AKTemplate)
+// The attestation key is an ECC P-256 restricted signing key
+// (tpmquote.AKTemplate, shared with the verifier so both sides agree on it)
 // created once under the storage hierarchy's SRK (tpm2.ECCSRKTemplate) and
 // made persistent at AKHandle. The vTPM state of a VM survives the installer
 // boot, the installed boots and every reboot, so all quotes of one VM carry
