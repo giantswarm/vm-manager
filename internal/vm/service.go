@@ -27,8 +27,10 @@ const (
 	DefaultOVMFCode         = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 	DefaultOVMFVarsTemplate = qemu.DefaultOVMFVarsTemplate
 	DefaultInstallTimeout   = 5 * time.Minute
-	DefaultBootTimeout      = 2 * time.Minute
-	DefaultStopTimeout      = 30 * time.Second
+	// DefaultBootTimeout leaves room for the two attestation stages (90 s of
+	// IMDS retries each) plus the Kubernetes sysext pull on a slow network.
+	DefaultBootTimeout = 4 * time.Minute
+	DefaultStopTimeout = 30 * time.Second
 )
 
 // Files and directories below the state dir.
