@@ -154,6 +154,30 @@ func TestVerifierAcceptsInitrdAndReady(t *testing.T) {
 	assert.False(t, res.Verified)
 	assert.Contains(t, res.Message, "golden mismatch: pcr 13 expected "+e.policy.Golden[attest.Bank][0])
 
+	// A pcr13 entry for the VM's Kubernetes version wins over the (wrong)
+	// golden value; a version without an entry falls back to golden.
+	e.policy.PCR13 = map[string]string{"1.36.4": r.PCRs[13]}
+	e.policy.KubernetesVersion = "1.36.4"
+	res = e.submit(e.request(e.ak, imds.StageReady))
+	assert.True(t, res.Verified, res.Message)
+	assert.Contains(t, res.Message, ", pcr 13 kubernetes 1.36.4")
+	e.policy.PCR13["1.36.4"] = e.policy.Golden[attest.Bank][0]
+	res = e.submit(e.request(e.ak, imds.StageReady))
+	assert.False(t, res.Verified)
+	assert.Contains(t, res.Message, "golden mismatch: pcr 13 expected "+e.policy.Golden[attest.Bank][0]+" for kubernetes 1.36.4, got "+r.PCRs[13])
+	e.policy.KubernetesVersion = "1.35.0"
+	res = e.submit(e.request(e.ak, imds.StageReady))
+	assert.False(t, res.Verified)
+	assert.Contains(t, res.Message, "golden mismatch: pcr 13 expected "+e.policy.Golden[attest.Bank][0]+", got "+r.PCRs[13], "no pcr13 entry for 1.35.0: golden 13 applies")
+	e.policy.Golden[attest.Bank][13] = r.PCRs[13]
+	res = e.submit(e.request(e.ak, imds.StageReady))
+	assert.True(t, res.Verified, res.Message)
+	assert.NotContains(t, res.Message, "kubernetes")
+	e.policy.PCR13, e.policy.KubernetesVersion = nil, ""
+	e.policy.Golden[attest.Bank][13] = e.policy.Golden[attest.Bank][0]
+	res = e.submit(e.request(e.ak, imds.StageReady))
+	assert.False(t, res.Verified)
+
 	results := e.v.Results(vmID)
 	assert.Len(t, results, 2)
 	assert.True(t, results[imds.StageInitrd].Verified)

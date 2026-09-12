@@ -1,6 +1,7 @@
 package attest
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,10 +48,16 @@ var GoldenIndexes = append(append([]int(nil), firmwarePCRs...), PCRSysext)
 // failing the request.
 var ErrNoPolicy = errors.New("no attestation policy")
 
-// Policy is an image's policy.json as images/scripts/verify writes it and
-// `vm-manager image golden` completes it. Fields the verifier does not use
-// (uki, roothash, partitions) are ignored. Values are lowercase hex sha256
-// digests; golden entries are optional per index.
+// OSSeparator is the word systemd-pcrosseparator.service measures into PCRs
+// 0-7, 9 and 12-14 in the initrd: the first and, without a sysext, the only
+// event of PCR 13 in a boot of the image.
+const OSSeparator = "os-separator"
+
+// Policy is an image's policy.json as images/scripts/verify and
+// verify-kubernetes write it and `vm-manager image golden` completes it.
+// Fields the verifier does not use (uki, roothash, partitions) are ignored.
+// Values are lowercase hex sha256 digests; pcr13 and golden entries are
+// optional.
 //
 //	{
 //	  "image_id": "giantswarm-vm-base",
@@ -59,6 +66,7 @@ var ErrNoPolicy = errors.New("no attestation policy")
 //	    "enter-initrd": "<hex>",
 //	    "enter-initrd:leave-initrd:sysinit:ready": "<hex>"
 //	  },
+//	  "pcr13": { "1.36.4": "<hex>" },
 //	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } }
 //	}
 type Policy struct {
@@ -66,8 +74,38 @@ type Policy struct {
 	ImageVersion string `json:"image_version,omitempty"`
 	// PCR11 maps a phase path to the expected PCR 11 value.
 	PCR11 map[string]string `json:"pcr11"`
+	// PCR13 maps a Kubernetes version to the PCR 13 value a guest running
+	// that sysext quotes at the ready stage (SysextPCR of the published
+	// artifact). A version without an entry falls back to Golden.
+	PCR13 map[string]string `json:"pcr13,omitempty"`
 	// Golden maps bank -> PCR index -> value recorded on a known-good boot.
 	Golden map[string]map[int]string `json:"golden,omitempty"`
+	// KubernetesVersion selects the PCR13 entry for the VM whose quote is
+	// verified. The PolicyProvider sets it; policy.json does not carry it.
+	KubernetesVersion string `json:"-"`
+}
+
+// SysextMeasurement is the string vm-kubernetes.service measures into PCR
+// 13 after merging the Kubernetes sysext: the line `sha256sum <file>`
+// prints in /var/lib/extensions, which is also the file's line in the
+// published SHA256SUMS.
+func SysextMeasurement(sha256Hex, file string) string {
+	return strings.ToLower(sha256Hex) + "  " + file
+}
+
+// SysextPCR is the PCR 13 value of a guest that merged one sysext measured
+// as measurement: the PCR starts at zero, the initrd extends it with
+// OSSeparator and vm-kubernetes.service with the measurement, each as
+// PCR := sha256(PCR || sha256(word)). Lowercase hex; the rule
+// images/scripts/verify-kubernetes implements for policy.json.
+func SysextPCR(measurement string) string {
+	pcr := make([]byte, sha256.Size)
+	for _, word := range []string{OSSeparator, measurement} {
+		digest := sha256.Sum256([]byte(word))
+		sum := sha256.Sum256(append(pcr, digest[:]...))
+		pcr = sum[:]
+	}
+	return hex.EncodeToString(pcr)
 }
 
 // ParsePolicy decodes and validates a policy.json.
@@ -94,6 +132,14 @@ func (p Policy) Validate() error {
 			return fmt.Errorf("policy: pcr11[%q]: %w", phase, err)
 		}
 	}
+	for version, v := range p.PCR13 {
+		if version == "" {
+			return errors.New("policy: pcr13 has an entry without a kubernetes version")
+		}
+		if err := checkDigest(v); err != nil {
+			return fmt.Errorf("policy: pcr13[%q]: %w", version, err)
+		}
+	}
 	for bank, values := range p.Golden {
 		if bank != Bank {
 			return fmt.Errorf("policy: golden bank %q is not supported, only %s", bank, Bank)
@@ -114,6 +160,20 @@ func (p Policy) Validate() error {
 func (p Policy) golden(index int) (string, bool) {
 	v, ok := p.Golden[Bank][index]
 	return strings.ToLower(v), ok
+}
+
+// expected is the value a quoted PCR must have: for PCR 13 the entry of
+// the VM's Kubernetes version when the policy has one, otherwise the golden
+// value. kubernetes is the version the value belongs to, empty for a golden
+// value.
+func (p Policy) expected(index int) (want, kubernetes string, ok bool) {
+	if index == PCRSysext && p.KubernetesVersion != "" {
+		if v, ok := p.PCR13[p.KubernetesVersion]; ok {
+			return strings.ToLower(v), p.KubernetesVersion, true
+		}
+	}
+	want, ok = p.golden(index)
+	return want, "", ok
 }
 
 // PhaseFor is the phase path PCR 11 carries at a stage.

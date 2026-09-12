@@ -69,8 +69,9 @@ func (s *Service) StoreReport(ctx context.Context, vmID string, report json.RawM
 }
 
 // PolicyFor implements attest.PolicyProvider: the policy of the image the
-// VM was created from. Errors wrap attest.ErrNoPolicy when the image or its
-// policy is missing or invalid, apierr.ErrNotFound for an unknown VM.
+// VM was created from, with the VM's Kubernetes version selecting the PCR
+// 13 entry. Errors wrap attest.ErrNoPolicy when the image or its policy is
+// missing or invalid, apierr.ErrNotFound for an unknown VM.
 func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, error) {
 	v, err := s.Get(vmID)
 	if err != nil {
@@ -87,6 +88,7 @@ func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, erro
 	if err != nil {
 		return attest.Policy{}, fmt.Errorf("%w: image %s: %v", attest.ErrNoPolicy, img.Ref(), err)
 	}
+	p.KubernetesVersion = v.KubernetesVersion
 	return p, nil
 }
 
