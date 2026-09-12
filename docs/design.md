@@ -309,18 +309,49 @@ vm-manager:
 
 1. cluster-manager (or an agent) sets KubeadmConfig `format: ignition` and calls
    `create_vm` with `user_data` set to the bootstrap Secret's Ignition JSON, plus
-   `kubernetes_version`, network and sizing. The config should order the kubeadm unit after
-   `systemd-sysext.service`; cluster-manager can add that through `additionalConfig`.
+   `kubernetes_version`, network and sizing. The kubeadm unit must be ordered
+   `After=vm-kubernetes.service` (one line through `additionalConfig`): that unit pulls
+   the sysext with kubeadm, containerd and kubelet, applies its modules and sysctls and
+   waits for containerd, so kubeadm's preflight passes on the first boot.
 2. The VM installs (phase A), boots (phase B), attests from the initrd, and only then does
    Ignition receive the user-data and write CAPI's files and units; kubeadm runs from those.
-3. The node's `providerID` is `giantswarm-vm://<vm-id>`, set via kubelet extra args in the
-   KubeadmConfig; `get_vm` reports IP, attestation, and readiness so the caller can set the
-   infra Machine ready when the node registers.
-4. Control plane endpoint: v1 uses the first control plane VM's IP and a host port-forward
-   for 6443; multi control plane later uses kube-vip on a reserved IP of the network.
-5. Remediation is delete + recreate. A thin CAPI infrastructure provider (or cluster-manager
-   glue) that wraps this API is a follow-up; the prototype's e2e tests use kubeadm
-   cloud-config shaped exactly like CAPI's output.
+3. The node's `providerID` is `giantswarm-vm://<name>`, set via kubelet extra args in the
+   KubeadmConfig: user-data is fixed when `create_vm` is called and the id is only known
+   afterwards, so the caller keys it by the VM name it chooses (the Machine name);
+   `get_vm` reports IP, attestation, and readiness so the caller can set the infra Machine
+   ready when the node registers.
+4. Control plane endpoint: v1 uses the first control plane VM's IP (kubeadm's default
+   advertise address; no `controlPlaneEndpoint`) and a host port-forward for 6443, with
+   `apiServer.certSANs: [127.0.0.1, localhost]` so the admin kubeconfig works through
+   `forward_port`; multi control plane later uses kube-vip on a reserved IP of the network.
+5. `READY=1` is sent when the boot transaction is complete, and the kubeadm unit is part
+   of it: a VM with user-data reaches `ready` only after `kubeadm init|join` succeeded,
+   which makes `get_vm` state `ready` the bootstrap signal. The server's `--boot-timeout`
+   (default 2 min) must cover kubeadm init with its image pulls, or the VM is reported
+   `running` with a `lastError` although nothing failed; the caller should either raise it
+   or use `wait_for: installed` and poll.
+6. Remediation is delete + recreate. A thin CAPI infrastructure provider (or cluster-manager
+   glue) that wraps this API is a follow-up.
+
+Proven by `e2e/kubernetes_cluster_test.go` (`make e2e`), which runs exactly this through
+the MCP API. The user-data is Ignition 3.4.0 with two files and one enabled unit, the
+shape of CAPI's `bootstrap/kubeadm/internal/ignition/clc/templates`: `/etc/kubeadm.yml`
+(0640, the kubeadm config), `/etc/kubeadm.sh` (0700: `kubeadm init|join --config
+/etc/kubeadm.yml`, then `/run/cluster-api/bootstrap-success.complete`, then the config is
+moved to `/tmp`) and `kubeadm.service` (`Type=oneshot`,
+`ConditionPathExists=/etc/kubeadm.yml`, `After=network-online.target vm-kubernetes.service`,
+`WantedBy=multi-user.target`). The kubeadm config is `kubeadm.k8s.io/v1beta4`: for the
+control plane `InitConfiguration` (`nodeRegistration.criSocket:
+unix:///run/containerd/containerd.sock`, `kubeletExtraArgs: [{name: provider-id, value:
+giantswarm-vm://cp-1}]`), `ClusterConfiguration` (`kubernetesVersion`, `networking.podSubnet:
+10.244.0.0/16`, the SANs above) and `KubeletConfiguration` (`cgroupDriver: systemd`); for
+the worker `JoinConfiguration` with `discovery.bootstrapToken` (`apiServerEndpoint:
+<cp ip>:6443`, the token and `caCertHashes` from `kubeadm token create
+--print-join-command` on the control plane) and the same `nodeRegistration`. Measured on
+the development host: the control plane is Ready with flannel and every pod running
+115 s after its `create_vm` (kubeadm init 55 s of that, image pulls included; installed
+boot to `READY=1` 69 s); the worker is Ready 52 s after its `create_vm` (kubeadm join
+1.2 s); the whole test takes 3 min.
 
 What sysinstall/firstboot do not cover: writing CAPI's files and units (Ignition) and
 proving integrity before secrets are released (`vm-agent attest`).
