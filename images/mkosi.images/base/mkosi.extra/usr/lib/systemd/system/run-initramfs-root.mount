@@ -1,0 +1,23 @@
+# Exitrd, part 1 (the rest is tmpfiles.d/vm-manager-exitrd.conf): the root
+# file system as it is below every mount stacked on it, a private,
+# non-recursive bind of /. run-initramfs-usr.mount binds its usr/ to
+# /run/initramfs/usr, the /usr the exitrd's systemd-shutdown runs from. It
+# must not run from the /usr the system sees: that is the sysext overlay
+# whose lower layer is the Kubernetes image on var (loop device plus verity),
+# and a process running from that overlay pins it, and through it var, the
+# same way PID 1 pins the /etc overlay. Mounts below /run/initramfs are
+# extrinsic (systemd.mount(5)): the manager leaves them alone at shutdown.
+# private: a later mount on / (the sysext merge) must not propagate into
+# the copy.
+[Unit]
+Description=Exitrd: the root file system below its overlays
+Documentation=man:systemd-shutdown(8) man:bootup(7)
+
+[Mount]
+What=/
+Where=/run/initramfs/root
+Type=none
+Options=bind,private
+
+[Install]
+WantedBy=sysinit.target

@@ -197,7 +197,10 @@ skipping phase A when TPM-bound install credentials are not needed.
   overlay on `/sysroot/etc` whose upper and work directories are `/var/lib/etc-overlay/`,
   plus `/root` and `/opt` as bind mounts from var, before `initrd-root-fs.target`; the root
   stays the read-only verity erofs. Firstboot's output, the machine ID, SSH host keys,
-  enabled units and whatever Ignition writes to `/etc` survive reboots
+  enabled units and whatever Ignition writes to `/etc` survive reboots, and var is unmounted
+  cleanly at shutdown: systemd-shutdown's exitrd (`tmpfiles.d/vm-manager-exitrd.conf`,
+  `run-initramfs-{root,usr}.mount`) releases the `/etc` overlay and the Kubernetes sysext's
+  `/usr` overlay, both pinned by PID 1's own mappings, which keep var's superblock alive
   (`e2e/persistent_etc_test.go`; details in `images/README.md`, "Persistent state").
 - **Ignition and `/var`.** Solved by the same change: the var partition is mounted on
   `/sysroot/var` before `initrd-root-fs.target`, and `ignition-files.service` runs after

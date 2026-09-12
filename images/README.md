@@ -103,6 +103,10 @@ cache, `make images verify` (everything, warm) ~30 s.
   together with the `/etc` overlay and the `/root` and `/opt` bind mounts.
   `tmpfiles.d/vm-manager.conf` recreates `/var/empty` (sshd), `/var/lock` and
   `/var/log/journal` on it; the rest comes from systemd's own tmpfiles catalog.
+- `tmpfiles.d/vm-manager-exitrd.conf`, `run-initramfs-root.mount` and `run-initramfs-usr.mount`
+  populate `/run/initramfs` with the exitrd that lets systemd-shutdown(8) release the `/etc`
+  and `/usr` overlays and unmount var cleanly at power-off, see
+  [Persistent state](#persistent-state).
 - `vm-sysinstall.service` (enabled, `ConditionCredential=vm.install-target`,
   `ImportCredential=vm.* firstboot.* ssh.* system.*`) runs `/usr/lib/vm-manager/sysinstall`:
   reads the target from `$CREDENTIALS_DIRECTORY/vm.install-target`, finds the booted
@@ -250,19 +254,35 @@ fills for `systemd.volatile=`.
   under `/var/lib/etc-overlay/upper`, `/root` and `/opt` are bound from the partition.
 - systemd-gpt-auto-generator(8) finds `/var` already mounted on the host and does nothing;
   systemd-confext-sysroot.service(8), ordered after the unit, sees `/sysroot/var/lib/confexts`.
-- Known limitation, shutdown: var is not unmounted cleanly at power-off; the next boot's
-  `systemd-fsck` (run by the script before mounting) replays the journal ("var:
-  recovering journal", logged by `e2e/persistent_etc_test.go`). systemd-shutdown(8)
-  syncs before it powers off, so nothing is lost, but it cannot get rid of the overlay:
-  the service manager treats `/etc` as extrinsic and leaves it mounted, and unmounting
-  the overlay fails with EBUSY without any process holding a file in it (verified with
-  an `etc.mount.d` drop-in that opted it into `umount.target`, and by hand with every
-  stoppable service stopped; an overlay on a tmpfs upper behaves the same). While the
-  overlay exists it pins the writers of var's ext4, so neither unmounting nor
-  systemd-shutdown's read-only remount of `/var` can succeed. Overlayfs itself does not
-  pin the upper *mount* (verified on the host). To be tracked down with a debug
-  `systemd-shutdown`; candidates are mount-namespace peers of `/etc` in sandboxed
-  services (`PrivateMounts=`/`ProtectSystem=`) that survive into the final phase.
+- Shutdown: the overlays are what stand between systemd-shutdown(8) and a clean var. The
+  service manager treats `/etc` and `/usr` as extrinsic and never unmounts them (it does
+  unmount `/var`, `/root` and `/opt` at `umount.target`), and systemd-shutdown's own
+  `umount /etc` fails with EBUSY without any open file: glibc keeps `/etc/ld.so.cache`
+  mmap'd for the lifetime of every process, a mapping through overlayfs pins the overlay
+  mount (the backing file holds the user-visible path since Linux 6.6), and PID 1 is the
+  process that survives. The Kubernetes sysext adds a second pin of the same kind: its
+  overlay on `/usr` has the image on var as a lower layer (loop device plus dm-verity), and
+  PID 1 runs from that overlay, so neither the verity nor the loop device can be detached.
+  While an overlay with a layer on var exists, var's ext4 superblock stays alive with a
+  dirty journal, and the next boot's fsck logs `var: recovering journal`. The fix is
+  systemd's exitrd (bootup(7)): `tmpfiles.d/vm-manager-exitrd.conf` populates
+  `/run/initramfs` on every boot with an `/etc/initrd-release` marker, a `lib64` symlink
+  and a `shutdown` script that re-executes `/usr/lib/systemd/systemd-shutdown`;
+  `run-initramfs-root.mount` and `run-initramfs-usr.mount` (enabled by the preset) bind
+  the root file system below its overlays (a private, non-recursive bind of `/`) and its
+  `usr/` as the exitrd's `/usr`, so that the exitrd runs the image's own binaries, not the
+  sysext overlay's. systemd-shutdown pivots into it after its own unmount loop gave up; the
+  fresh instance has no `/etc/ld.so.cache` to map and nothing from the `/usr` overlay, so
+  nothing pins the overlays any more: its unmount loop releases them, detaches the verity
+  and loop devices, and var's superblock is put cleanly before power-off. Mounts below
+  `/run/initramfs` are extrinsic to the manager and skipped by systemd-shutdown's first
+  instance (`nonunmountable_path`), so the exitrd survives until the pivot.
+  `e2e/persistent_etc_test.go` asserts that the rebooted system's fsck output has no
+  `recovering journal`. Diagnosed with a debug `systemd-shutdown` and a `system-shutdown/`
+  hook dumping `/proc/self/mountinfo` and the survivors in the final phase (only PID 1 and
+  kernel threads; `jbd2/vda8-8` still alive), and reproduced on the host: an `mmap` through
+  an overlayfs whose fd is closed makes `umount` of the overlay EBUSY, a mapping reached
+  through a symlink to a file outside the overlay does not.
 
 ## Kubernetes sysext
 

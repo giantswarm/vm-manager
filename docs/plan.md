@@ -21,8 +21,6 @@ Follow-ups recorded by reviews and agents, not yet scheduled:
   multi-version fleets need it to accumulate versions.
 - CI does not compile the `e2e` build tag (`go vet -tags e2e ./e2e/` broke twice unnoticed);
   add it to `make test` or the workflow (wave 4, row 18).
-- var is not unmounted cleanly at power-off (the `/etc` overlay pins it; journal replay on
-  the next boot, data is synced).
 - VMs still die with vm-manager; transient systemd units are the planned fix.
 - e2e `go test` timeout is 45 m for seven sequential tests; parallelise or split when it grows.
 

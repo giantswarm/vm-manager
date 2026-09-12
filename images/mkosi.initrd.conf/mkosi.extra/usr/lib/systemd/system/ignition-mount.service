@@ -1,9 +1,8 @@
 # Ported from Ignition's dracut/30ignition/ignition-mount.service: mounts the
 # file systems the config declares under /sysroot for the files stage and
 # unmounts them (ExecStop=) before the switch root. No remount-sysroot
-# service: /sysroot is writable through the overlay systemd-volatile-root
-# sets up (or the persistent /etc overlay that replaces it), which is why this
-# stage is ordered after it.
+# service: the writable parts of /sysroot are the mounts persistent-etc.service
+# sets up, which is why this stage is ordered after it.
 [Unit]
 Description=Ignition (mount)
 Documentation=https://coreos.github.io/ignition/
@@ -19,7 +18,7 @@ Before=initrd-switch-root.target
 After=network.target
 
 Requires=initrd-root-fs.target
-After=initrd-root-fs.target systemd-volatile-root.service
+After=initrd-root-fs.target persistent-etc.service
 
 OnFailure=emergency.target
 OnFailureJobMode=replace-irreversibly

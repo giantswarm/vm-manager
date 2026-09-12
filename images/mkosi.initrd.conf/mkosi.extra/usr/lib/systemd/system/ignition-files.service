@@ -1,13 +1,11 @@
 # Ported from Ignition's dracut/30ignition/ignition-files.service: writes the
 # config's files, systemd units and presets into /sysroot (--root). Ordered
-# after the root overlay (systemd-volatile-root.service today, the persistent
-# /etc overlay unit once it exists: anything that prepares /sysroot before
-# initrd-root-fs.target is covered) and after sysroot-var.mount, so that files
-# below /var land on the var partition once the initrd mounts it there. Until
-# then a write below /var would go to the overlay's tmpfs upper and make
-# systemd-gpt-auto-generator skip the var partition ("already populated").
-# Before initrd-parse-etc.service, so what Ignition drops into /sysroot/etc is
-# seen when the generators run against the real root.
+# after persistent-etc.service, which mounts the var partition on /sysroot/var
+# and the persistent overlay on /sysroot/etc, so that files below /var and /etc
+# land on the var partition; the rest of the root is the read-only verity
+# erofs (EROFS for a config that writes there). Before initrd-parse-etc.service,
+# so what Ignition drops into /sysroot/etc is seen when the generators run
+# against the real root.
 [Unit]
 Description=Ignition (files)
 Documentation=https://coreos.github.io/ignition/
@@ -17,7 +15,7 @@ ConditionKernelCommandLine=ignition.firstboot
 Before=ignition-complete.target
 
 After=ignition-mount.service
-After=initrd-root-fs.target systemd-volatile-root.service sysroot-var.mount
+After=initrd-root-fs.target persistent-etc.service
 Before=initrd-parse-etc.service
 
 OnFailure=emergency.target
