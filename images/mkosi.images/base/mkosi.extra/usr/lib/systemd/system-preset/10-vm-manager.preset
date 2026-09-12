@@ -1,0 +1,22 @@
+# Unit policy of giantswarm-vm-base. mkosi runs `systemctl preset-all` in every
+# image it builds (the base tree and the disk image), so enablement has to be
+# expressed as presets rather than as symlinks created in a post-install script.
+enable systemd-networkd.service
+enable systemd-networkd-wait-online.service
+enable systemd-resolved.service
+enable systemd-timesyncd.service
+enable systemd-imdsd.socket
+enable systemd-sysext.service
+enable sshd.service
+enable vm-sysinstall.service
+enable vm-report-upload.timer
+# vm-manager triggers OS and kubernetes updates itself.
+disable systemd-sysupdate.timer
+disable systemd-sysupdate-reboot.timer
+# Not part of a single-purpose VM image.
+disable systemd-homed.service
+disable systemd-homed-activate.service
+disable machines.target
+disable remote-cryptsetup.target
+disable remote-integritysetup.target
+disable remote-veritysetup.target

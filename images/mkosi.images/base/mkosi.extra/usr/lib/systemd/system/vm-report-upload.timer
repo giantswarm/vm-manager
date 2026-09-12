@@ -1,0 +1,10 @@
+[Unit]
+Description=Upload systemd-report metrics to vm-manager every 15 s
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

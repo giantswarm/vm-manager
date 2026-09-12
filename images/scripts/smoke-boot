@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Headless sanity boot of the built image with systemd-vmspawn (QEMU, OVMF,
+# swtpm, user-mode networking). The VM powers itself off once startup has
+# finished; we assert from the captured console log that multi-user.target was
+# reached. The two-phase sysinstall flow is exercised by vm-manager's own tests.
+#
+# `mkosi vm` is not used because mkosi 27 unconditionally passes
+# file.aio=io_uring to QEMU, which fails on hosts with kernel.io_uring_disabled;
+# systemd-vmspawn probes for io_uring support and falls back.
+set -euo pipefail
+
+build="${1:?build dir}" id="${2:?image id}" version="${3:?version}" profile="${4:-}"
+name="${id}_${version}"
+img="$build/$name.raw"
+disk="$build/smoke.raw"
+log="$build/smoke.log"
+timeout="${SMOKE_TIMEOUT:-180}"
+
+[[ -s "$img" ]] || { echo "smoke-boot: $img missing, run make base" >&2; exit 1; }
+
+# Throw-away copy of the image, grown so systemd-repart can create var on
+# first boot (what happens on the installed disk as well).
+cp --reflink=auto --sparse=always "$img" "$disk"
+truncate -s 8G "$disk"
+
+# Boot-time credentials (SMBIOS type 11):
+#  - a fixed machine ID so repart's var partition UUID matches what
+#    systemd-gpt-auto-generator expects (the same thing vm-manager does)
+#  - an extra unit + a drop-in that pulls it into multi-user.target: it waits
+#    for startup to finish and powers the VM off.
+creds="$build/smoke-creds"
+rm -rf "$creds"
+mkdir -p "$creds"
+cat >| "$creds/systemd.extra-unit.vm-smoke-poweroff.service" <<'EOF'
+[Unit]
+Description=smoke-boot: power off after startup finished
+
+[Service]
+Type=exec
+ExecStart=sh -c 'systemctl is-system-running --wait >/dev/null; echo "smoke-boot: startup finished, powering off"; systemctl poweroff'
+EOF
+cat >| "$creds/systemd.unit-dropin.multi-user.target" <<'EOF'
+[Unit]
+Wants=vm-smoke-poweroff.service
+EOF
+
+args=(
+        --image="$disk"
+        --firmware=uefi
+        --tpm=yes
+        --console=read-only
+        --network-user-mode
+        --register=no
+        --ram=2G
+        --set-credential=system.machine_id:5e2d1c0b9a8f4e3d8c7b6a5f4e3d2c1b
+        --load-credential=systemd.extra-unit.vm-smoke-poweroff.service:"$creds/systemd.extra-unit.vm-smoke-poweroff.service"
+        --load-credential=systemd.unit-dropin.multi-user.target:"$creds/systemd.unit-dropin.multi-user.target"
+)
+
+echo "smoke-boot: systemd-vmspawn ${args[*]} (timeout ${timeout}s, log $log, profile '${profile:-default}')"
+set +e
+timeout --foreground "$timeout" systemd-vmspawn "${args[@]}" </dev/null 2>&1 | tee "$log" | tail -n 40
+rc=${PIPESTATUS[0]}
+set -e
+rm -f "$disk" "$disk".efinvramstate*
+
+if /usr/bin/grep -q "Reached target.*Multi-User System" "$log"; then
+        echo "smoke-boot: OK, multi-user.target reached (vmspawn exit $rc)"
+elif [[ -n "$profile" ]] && /usr/bin/grep -q "login:" "$log"; then
+        echo "smoke-boot: OK, login prompt reached (vmspawn exit $rc)"
+else
+        echo "smoke-boot: FAILED, no multi-user target in $log (vmspawn exit $rc)" >&2
+        exit 1
+fi

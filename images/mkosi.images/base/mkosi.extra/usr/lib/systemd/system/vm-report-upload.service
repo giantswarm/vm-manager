@@ -1,0 +1,10 @@
+[Unit]
+Description=Upload systemd-report metrics to vm-manager
+Documentation=man:systemd-report(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# systemd-report is experimental in systemd 261; plain HTTP, no client cert.
+ExecStart=/usr/lib/systemd/systemd-report upload --url=http://169.254.169.254/giantswarm/v1/report --key=- --network-timeout=5

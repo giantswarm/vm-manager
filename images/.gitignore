@@ -1,0 +1,6 @@
+# build outputs and local dev keys are never committed
+/build/
+/keys/
+/mkosi.cache/
+/mkosi.local.conf
+/mkosi.local/

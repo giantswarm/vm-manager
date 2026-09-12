@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Generate the git-ignored development signing keys for the image build:
+#   verity.key/.crt        signs the dm-verity root hash (Verity=signed)
+#   pcr.key/.crt           signs the expected PCR 11 values in the UKI (.pcrsig)
+#   gnupg/, import-pubring.pgp
+#                          PGP key for SHA256SUMS.gpg of sysupdate transfers; the
+#                          public keyring is baked into the image as
+#                          /etc/systemd/import-pubring.pgp
+# In CI these are generated per build; developers keep them in images/keys/.
+set -euo pipefail
+
+keys="${1:?usage: gen-keys <keys-dir>}"
+mkdir -p "$keys"
+chmod 0700 "$keys"
+
+x509() {
+        local name="$1" cn="$2"
+        [[ -s "$keys/$name.key" && -s "$keys/$name.crt" ]] && return 0
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+                -subj "/CN=$cn/" \
+                -keyout "$keys/$name.key" -out "$keys/$name.crt" 2>/dev/null
+        echo "gen-keys: created $keys/$name.{key,crt}"
+}
+x509 verity "vm-manager dev verity signing key"
+x509 pcr "vm-manager dev PCR signing key"
+
+if [[ ! -s "$keys/import-pubring.pgp" ]]; then
+        export GNUPGHOME="$keys/gnupg"
+        mkdir -p "$GNUPGHOME"
+        chmod 0700 "$GNUPGHOME"
+        gpg --batch --quiet --passphrase '' --quick-generate-key \
+                'vm-manager dev image signing <dev-images@giantswarm.io>' rsa3072 sign never
+        # Binary keyring (not armored): systemd-pull passes it to gpg --keyring.
+        gpg --batch --quiet --export >| "$keys/import-pubring.pgp"
+        echo "gen-keys: created $keys/import-pubring.pgp"
+fi
+
+echo "gen-keys: keys in $keys are for development only, never commit them"

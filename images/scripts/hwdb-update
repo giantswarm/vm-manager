@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# mkosi post-installation script (image and initrd): compile hwdb.bin so it
+# contains /usr/lib/udev/hwdb.d/45-imds-giantswarm.hwdb. Keep the binary
+# database in /usr only; the pacman hook may have written a stale /etc copy.
+set -euo pipefail
+systemd-hwdb --usr --root="$BUILDROOT" update --strict
+rm -f "$BUILDROOT/etc/udev/hwdb.bin"

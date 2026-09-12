@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Post-installation for the base OS tree. $BUILDROOT is the image root,
+# $SRCDIR is images/ (mkosi build sources).
+set -euo pipefail
+
+# hwdb with the giantswarm IMDS provider record.
+"$SRCDIR/scripts/hwdb-update"
+
+# Public key trusted for SHA256SUMS.gpg of sysupdate transfers.
+install -Dm0644 "$SRCDIR/keys/import-pubring.pgp" "$BUILDROOT/etc/systemd/import-pubring.pgp"
+
+# resolved stub resolver.
+ln -sfn ../run/systemd/resolve/stub-resolv.conf "$BUILDROOT/etc/resolv.conf"
+
+# Unit enablement lives in usr/lib/systemd/system-preset/10-vm-manager.preset
+# (mkosi applies presets in every image). Masks survive preset-all, so the
+# stock interactive installer is masked here; vm-sysinstall.service replaces it.
+systemctl --root="$BUILDROOT" mask systemd-sysinstall.service
