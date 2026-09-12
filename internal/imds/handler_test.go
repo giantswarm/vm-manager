@@ -145,6 +145,9 @@ func TestHandlerPlainKeys(t *testing.T) {
 		inst   Instance
 		status int
 		body   string
+		// muxNotFound marks a path outside the key table: the ServeMux
+		// answers that 404 itself, with its own body.
+		muxNotFound bool
 	}{
 		{name: "hostname", path: "/hostname", inst: inst, status: 200, body: "worker-1.example"},
 		{name: "hostname falls back to name", path: "/hostname", inst: Instance{Name: "worker-1"}, status: 200, body: "worker-1"},
@@ -163,7 +166,7 @@ func TestHandlerPlainKeys(t *testing.T) {
 		{name: "metadata", path: "/metadata/role", inst: inst, status: 200, body: "worker"},
 		{name: "metadata explicitly empty", path: "/metadata/empty", inst: inst, status: 200, body: ""},
 		{name: "metadata missing", path: "/metadata/nope", inst: inst, status: 404},
-		{name: "unknown key", path: "/nope", inst: inst, status: 404},
+		{name: "unknown key", path: "/nope", inst: inst, status: 404, muxNotFound: true},
 		{name: "value with newline kept verbatim", path: "/metadata/multi", inst: Instance{Metadata: map[string]string{"multi": "a\nb\n"}}, status: 200, body: "a\nb\n"},
 	}
 	for _, tc := range tests {
@@ -174,6 +177,11 @@ func TestHandlerPlainKeys(t *testing.T) {
 			if tc.status == http.StatusOK {
 				assert.Equal(t, tc.body, rec.Body.String())
 				assert.Equal(t, len(tc.body), rec.Body.Len())
+			} else if !tc.muxNotFound {
+				// systemd-imdsd aborts a >= 300 response as soon as it
+				// carries body bytes and never reaches its 404 handling.
+				assert.Empty(t, rec.Body.String(), "a 404 must have no body")
+				assert.Equal(t, "0", rec.Header().Get("Content-Length"))
 			}
 		})
 	}
@@ -233,6 +241,9 @@ func TestHandlerUserDataGating(t *testing.T) {
 		inst.UserData = nil
 		rec := newFixture(t, inst).do(t, http.MethodGet, "/user-data", "", "")
 		assert.Equal(t, http.StatusNotFound, rec.Code)
+		// `systemd-imds --import` tolerates KeyNotFound for user-data, which
+		// systemd-imdsd only reports for a bodyless 404.
+		assert.Empty(t, rec.Body.String(), "a 404 must have no body")
 	})
 
 	t.Run("gated until released", func(t *testing.T) {
