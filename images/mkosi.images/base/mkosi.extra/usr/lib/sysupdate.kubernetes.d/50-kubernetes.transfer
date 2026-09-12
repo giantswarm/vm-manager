@@ -1,0 +1,18 @@
+# Kubernetes sysext, pulled as a separate sysupdate component:
+#   systemd-sysupdate --component=kubernetes update
+# vm-manager's IMDS directory lists only the version the VM was created with.
+# SHA256SUMS.gpg is verified against /etc/systemd/import-pubring.pgp.
+[Transfer]
+Verify=yes
+
+[Source]
+Type=url-file
+Path=http://169.254.169.254/giantswarm/v1/sysupdate/kubernetes/
+MatchPattern=kubernetes_@v.raw
+
+[Target]
+Type=regular-file
+Path=/var/lib/extensions
+MatchPattern=kubernetes_@v.raw
+Mode=0644
+InstancesMax=2

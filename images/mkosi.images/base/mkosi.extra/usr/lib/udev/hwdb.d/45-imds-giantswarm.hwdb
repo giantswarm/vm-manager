@@ -1,0 +1,15 @@
+# systemd-imdsd provider record for VMs run by vm-manager.
+# Matched against /sys/class/dmi/id/modalias; vm-manager starts QEMU with
+# -smbios type=1,manufacturer=GiantSwarm,product=vm-manager.
+# Keys follow the IMDS contract in docs/design.md (the Go key table is the
+# source of truth; keep this file in sync).
+
+dmi:*:svnGiantSwarm:*
+ IMDS_VENDOR=giantswarm
+ IMDS_DATA_URL=http://169.254.169.254/giantswarm/v1
+ IMDS_ADDRESS_IPV4=169.254.169.254
+ IMDS_KEY_HOSTNAME=/hostname
+ IMDS_KEY_REGION=/region
+ IMDS_KEY_ZONE=/zone
+ IMDS_KEY_SSH_KEY=/public-keys/0
+ IMDS_KEY_USERDATA=/user-data

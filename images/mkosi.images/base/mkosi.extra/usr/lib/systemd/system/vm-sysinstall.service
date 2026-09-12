@@ -1,0 +1,21 @@
+[Unit]
+Description=Install the booted OS onto the vm-manager target disk
+Documentation=man:systemd-sysinstall(8)
+# vm-manager passes vm.install-target (a /dev/disk/by-id path) through SMBIOS
+# type 11 only for the installer boot; every other boot skips this unit.
+ConditionCredential=vm.install-target
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service local-fs.target systemd-tpm2-setup.service systemd-imds-import.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/vm-manager/sysinstall
+ImportCredential=vm.*
+ImportCredential=firstboot.*
+ImportCredential=ssh.*
+ImportCredential=system.*
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# DHCP on every ethernet link (the virtio NIC vm-manager attaches).
+[Match]
+Type=ether
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+UseHostname=no

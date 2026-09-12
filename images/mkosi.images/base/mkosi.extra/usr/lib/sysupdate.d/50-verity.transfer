@@ -1,0 +1,18 @@
+# A/B update of the OS from vm-manager's IMDS (sysupdate.d(5) Example 1).
+# The partition UUID is encoded in the file name so that roothash= on the new
+# UKI's command line finds the new root and verity partitions.
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=url-file
+Path=http://169.254.169.254/giantswarm/v1/sysupdate/base/
+MatchPattern=giantswarm-vm-base_@v_@u.verity.raw
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=giantswarm-vm-base_@v_verity
+MatchPartitionType=root-verity
+PartitionFlags=0
+ReadOnly=1

@@ -1,0 +1,15 @@
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=url-file
+Path=http://169.254.169.254/giantswarm/v1/sysupdate/base/
+MatchPattern=giantswarm-vm-base_@v_@u.root.raw
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=giantswarm-vm-base_@v
+MatchPartitionType=root
+PartitionFlags=0
+ReadOnly=1

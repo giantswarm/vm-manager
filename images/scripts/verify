@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Offline verification of the built base image. No root, no boot. Writes
+# build/policy.json with the image identity and the expected PCR 11 values
+# per boot phase path (what vm-manager's attestation compares TPM quotes to).
+set -euo pipefail
+
+build="${1:?build dir}" id="${2:?image id}" version="${3:?version}" keys="${4:?keys dir}"
+name="${id}_${version}"
+img="$build/$name.raw"
+uki="$build/$name.efi"
+initrd="$build/$name.initrd"
+rootfs="$build/$name.root-x86-64.raw"
+policy="$build/policy.json"
+sysupdate="$build/sysupdate/base"
+modalias='dmi:bvnEDK2:bvr2025.02:bd02/02/2025:br0.0:svnGiantSwarm:pnvm-manager:pvrpc-q35-10.0:rvnGiantSwarm:rnvm-manager:rvr:cvnQEMU:ct1:cvrpc-q35-10.0:sku:'
+
+tmp="$(mktemp -d)"
+trap 'chmod -R u+rwX "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+fail() { echo "verify: FAIL: $*" >&2; exit 1; }
+ok() { echo "verify: ok: $*"; }
+
+for f in "$img" "$uki" "$initrd" "$rootfs" "$build/$name.roothash" "$sysupdate/SHA256SUMS.gpg"; do
+        [[ -s "$f" ]] || fail "$f missing (run make base)"
+done
+
+# 1. Partition table: ESP, root, verity, verity signature. systemd-dissect
+#    needs a user namespace from nsresourced even for --json, which is not
+#    available unprivileged here, so read the GPT with sfdisk and map the
+#    x86-64 type GUIDs to their repart.d(5) designators.
+roothash="$(tr -d '\n' <"$build/$name.roothash")"
+[[ ${#roothash} -eq 64 ]] || fail "roothash $roothash is not a sha256"
+sfdisk --json "$img" >| "$tmp/sfdisk.json"
+python3 - "$tmp/sfdisk.json" "$tmp/partitions.json" "$roothash" <<'EOF'
+import json, sys
+types = {
+    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B": "esp",
+    "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709": "root",
+    "2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5": "root-verity",
+    "41092B05-9FC8-4523-994F-2DEF0408B176": "root-verity-sig",
+}
+parts = {}
+for p in json.load(open(sys.argv[1]))["partitiontable"]["partitions"]:
+    d = types.get(p["type"].upper())
+    if d:
+        parts[d] = {"uuid": p["uuid"].lower(), "label": p.get("name"), "sectors": p["size"]}
+missing = [x for x in types.values() if x not in parts]
+if missing:
+    sys.exit(f"verify: FAIL: partition table lacks {missing}, got {sorted(parts)}")
+roothash = sys.argv[3]
+def uuid_hex(u): return u.replace("-", "")
+if uuid_hex(parts["root"]["uuid"]) != roothash[:32] or uuid_hex(parts["root-verity"]["uuid"]) != roothash[32:]:
+    sys.exit("verify: FAIL: root/verity partition UUIDs are not derived from the roothash")
+json.dump(parts, open(sys.argv[2], "w"))
+print("verify: ok: partitions " + ", ".join(f"{k}={v['uuid']}" for k, v in parts.items()))
+print("verify: ok: root/verity partition UUIDs match roothash halves")
+EOF
+
+# 2. UKI carries signed expected PCR policy (.pcrsig) and the public key (.pcrpkey).
+ukify inspect "$uki" >| "$tmp/ukify.txt"
+for sec in .linux .initrd .cmdline .osrel .pcrsig .pcrpkey; do
+        /usr/bin/grep -q "^$sec:" "$tmp/ukify.txt" || fail "UKI lacks section $sec"
+done
+ok "UKI has .pcrsig and .pcrpkey ($(/usr/bin/grep -c '^\.' "$tmp/ukify.txt") sections)"
+/usr/bin/grep -q "roothash=$roothash" "$tmp/ukify.txt" || fail "UKI cmdline does not pin roothash=$roothash"
+ok "UKI cmdline pins roothash=$roothash"
+
+# 3. Expected PCR 11 per phase path, recomputed from the UKI sections with
+#    systemd-measure (independently of the .pcrsig ukify embedded).
+mkdir -p "$tmp/sections"
+python3 - "$uki" "$tmp/sections" <<'EOF'
+import pathlib, sys
+import pefile
+pe = pefile.PE(sys.argv[1], fast_load=True)
+out = pathlib.Path(sys.argv[2])
+measured = {".linux", ".osrel", ".cmdline", ".initrd", ".ucode", ".splash", ".dtb",
+            ".uname", ".sbat", ".pcrpkey", ".profile", ".dtbauto", ".hwids"}
+for s in pe.sections:
+    n = s.Name.rstrip(b"\0").decode()
+    if n in measured:
+        (out / n[1:]).write_bytes(s.get_data(length=s.Misc_VirtualSize))
+EOF
+measure_args=()
+for f in "$tmp"/sections/*; do measure_args+=("--$(basename "$f")=$f"); done
+/usr/lib/systemd/systemd-measure calculate "${measure_args[@]}" --bank=sha256 \
+        --phase=enter-initrd \
+        --phase=enter-initrd:leave-initrd \
+        --phase=enter-initrd:leave-initrd:sysinit \
+        --phase=enter-initrd:leave-initrd:sysinit:ready \
+        --json=short >| "$tmp/pcr11.json"
+python3 - "$tmp/pcr11.json" <<'EOF'
+import json, sys
+for e in json.load(open(sys.argv[1]))["sha256"]:
+    print(f"verify: PCR 11 [{e['phase']}] = {e['hash']}")
+EOF
+
+# 4. hwdb in the root file system knows the giantswarm IMDS provider.
+#    fsck.erofs --extract=DIR --path=/x extracts the *contents* of /x into DIR.
+extract() {
+        mkdir -p "$tmp/root$1"
+        fsck.erofs --extract="$tmp/root$1" --no-preserve-owner --no-preserve-perms --path="$1" "$rootfs" >/dev/null 2>&1 \
+                || fail "cannot extract $1 from $rootfs"
+}
+extract /usr/lib/udev
+[[ -s "$tmp/root/usr/lib/udev/hwdb.bin" ]] || fail "hwdb.bin not found in $rootfs"
+systemd-hwdb --root="$tmp/root" query "$modalias" >| "$tmp/hwdb.txt"
+/usr/bin/grep -qx 'IMDS_VENDOR=giantswarm' "$tmp/hwdb.txt" || fail "hwdb query returned: $(tr '\n' ' ' <"$tmp/hwdb.txt")"
+ok "hwdb(root): $(/usr/bin/grep -c '^IMDS_' "$tmp/hwdb.txt") IMDS_* properties, IMDS_VENDOR=giantswarm"
+
+# 5. Unit state in the image.
+extract /etc
+extract /usr/lib/systemd/system
+is_enabled() { systemctl --root="$tmp/root" is-enabled "$1" 2>/dev/null || true; }
+[[ "$(is_enabled vm-sysinstall.service)" == enabled ]] || fail "vm-sysinstall.service is not enabled"
+[[ "$(is_enabled systemd-sysinstall.service)" == masked ]] || fail "stock systemd-sysinstall.service is not masked"
+[[ "$(is_enabled systemd-sysupdate.timer)" != enabled ]] || fail "systemd-sysupdate.timer must stay off"
+for u in systemd-networkd.service systemd-resolved.service systemd-imdsd.socket sshd.service systemd-sysext.service vm-report-upload.timer; do
+        [[ "$(is_enabled "$u")" == enabled ]] || fail "$u is not enabled"
+done
+[[ "$(is_enabled systemd-homed.service)" != enabled ]] || fail "systemd-homed.service should be disabled"
+ok "vm-sysinstall.service enabled, systemd-sysinstall.service masked, sysupdate timer off"
+[[ -s "$tmp/root/etc/systemd/import-pubring.pgp" ]] || fail "/etc/systemd/import-pubring.pgp missing"
+cmp -s "$tmp/root/etc/systemd/import-pubring.pgp" "$keys/import-pubring.pgp" || fail "import-pubring.pgp differs from $keys"
+ok "/etc/systemd/import-pubring.pgp matches the dev key"
+
+# 6. Initrd: networkd + imdsd + generator + our hwdb record.
+zstd -dc "$initrd" 2>/dev/null | cpio -t 2>/dev/null >| "$tmp/initrd.lst" || true
+for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-imdsd usr/lib/systemd/systemd-imds \
+         usr/lib/systemd/system-generators/systemd-imds-generator \
+         usr/lib/systemd/system/systemd-imdsd.socket usr/lib/systemd/system/systemd-imds-early-network.service \
+         usr/lib/systemd/system/systemd-imds-import.service usr/lib/udev/hwdb.bin \
+         usr/lib/systemd/system/systemd-repart.service.d/vm-manager.conf; do
+        /usr/bin/grep -qx "$f" "$tmp/initrd.lst" || fail "initrd lacks $f"
+done
+mkdir -p "$tmp/initrd"
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/udev/hwdb.bin 2>/dev/null) || true
+systemd-hwdb --root="$tmp/initrd" query "$modalias" | /usr/bin/grep -qx 'IMDS_VENDOR=giantswarm' || fail "initrd hwdb lacks the giantswarm record"
+ok "initrd: networkd, imdsd, imds generator and giantswarm hwdb record present"
+
+# 7. sysupdate directory: manifest signature and checksums.
+GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$keys/import-pubring.pgp" \
+        --verify "$sysupdate/SHA256SUMS.gpg" "$sysupdate/SHA256SUMS" 2>/dev/null || fail "SHA256SUMS.gpg does not verify"
+(cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
+ok "sysupdate/base: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifacts"
+
+# 8. policy.json
+python3 - "$policy" "$id" "$version" "$roothash" "$tmp/pcr11.json" "$tmp/partitions.json" "$uki" <<'EOF'
+import json, os, sys
+policy, image_id, version, roothash, pcr11, partitions, uki = sys.argv[1:]
+parts = {k: v["uuid"] for k, v in json.load(open(partitions)).items()}
+out = {
+    "image_id": image_id,
+    "image_version": version,
+    "uki": os.path.basename(uki),
+    "roothash": roothash,
+    "partitions": parts,
+    "pcr11": {e["phase"]: e["hash"] for e in json.load(open(pcr11))["sha256"]},
+}
+json.dump(out, open(policy, "w"), indent=2)
+open(policy, "a").write("\n")
+print(f"verify: wrote {policy}")
+EOF
+echo "verify: PASS"

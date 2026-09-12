@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Wrapper around systemd-sysinstall run by vm-sysinstall.service.
+#
+# Reads the target block device from the vm.install-target credential and
+# forwards every firstboot.*, ssh.authorized_keys.root and system.machine_id
+# credential to the installed system (systemd-sysinstall encrypts them with
+# the TPM and places them next to the UKI on the target ESP).
+set -euo pipefail
+shopt -s nullglob
+
+creds="${CREDENTIALS_DIRECTORY:?vm-sysinstall: no credentials directory}"
+target="$(tr -d '\n' <"$creds/vm.install-target")"
+[[ -n "$target" ]] || { echo "vm-sysinstall: vm.install-target is empty" >&2; exit 1; }
+
+# The UKI to install is the one we booted from. vm-manager boots the installer
+# with -kernel <uki>, so systemd-stub cannot tell us its path on disk; find it
+# on the booted image's ESP (gpt-auto mounts it on /efi or /boot) and prefer
+# the file matching our IMAGE_ID/IMAGE_VERSION.
+# shellcheck source=/dev/null
+. /usr/lib/os-release
+uki=""
+for esp in /efi /boot /boot/efi; do
+        [[ -d "$esp/EFI/Linux" ]] || continue
+        candidates=("$esp/EFI/Linux/${IMAGE_ID}_${IMAGE_VERSION}"*.efi)
+        (( ${#candidates[@]} == 0 )) && candidates=("$esp"/EFI/Linux/*.efi)
+        if (( ${#candidates[@]} == 1 )); then
+                uki="${candidates[0]}"
+                break
+        elif (( ${#candidates[@]} > 1 )); then
+                echo "vm-sysinstall: ambiguous UKIs in $esp/EFI/Linux: ${candidates[*]}" >&2
+                exit 1
+        fi
+done
+[[ -n "$uki" ]] || { echo "vm-sysinstall: no UKI found on the booted ESP" >&2; exit 1; }
+
+args=(
+        --erase=yes
+        --confirm=no
+        --welcome=no
+        --chrome=no
+        --variables=yes
+        --reboot=yes
+        --kernel="$uki"
+)
+for cred in "$creds"/firstboot.* "$creds"/ssh.authorized_keys.root "$creds"/system.machine_id; do
+        [[ -f "$cred" ]] && args+=(--load-credential="$(basename "$cred"):$cred")
+done
+
+echo "vm-sysinstall: installing $uki onto $target (${#args[@]} arguments)"
+exec systemd-sysinstall "$target" "${args[@]}"
