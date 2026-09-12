@@ -65,7 +65,7 @@ func TestKubernetesSysext(t *testing.T) {
 	sums := readSHA256SUMS(t, filepath.Join(image.Dir, "sysupdate", "kubernetes", "SHA256SUMS"))
 	policy := readPolicy(t, filepath.Join(image.Dir, "policy.json"))
 
-	srv := startServer(ctx, t, dir, image.Dir)
+	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 
 	var img images.Image
