@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
@@ -160,9 +161,12 @@ type Instance struct {
 	ev   *Events
 	exit chan proc.ExitStatus
 	once sync.Once
+	// Pid is what PID returns; 0 (no process to read) unless a test sets it.
+	Pid int
 }
 
 func (i *Instance) Wait() <-chan proc.ExitStatus { return i.exit }
+func (i *Instance) PID() int                     { return i.Pid }
 
 func (i *Instance) Stop(context.Context) error {
 	i.ev.Add("qemu.stop")
@@ -400,11 +404,19 @@ type Network struct {
 	// Dialer replaces Dial when set (the ssh test plugs a server in).
 	Dialer   func(ctx context.Context, addr string) (net.Conn, error)
 	IMDSAddr string
+	// Sent and Received are the counters Stats reports; tests set them.
+	Sent, Received atomic.Uint64
 }
 
 func (n *Network) Name() string          { return n.spec.Name }
 func (n *Network) Spec() network.Spec    { return n.spec }
 func (n *Network) GatewayIP() netip.Addr { return n.prefix.Addr().Next() }
+
+func (n *Network) Stats() network.Stats {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return network.Stats{BytesSent: n.Sent.Load(), BytesReceived: n.Received.Load(), Attachments: len(n.leases)}
+}
 
 func (n *Network) Leases() []network.Lease {
 	n.mu.Lock()

@@ -354,19 +354,46 @@ paths:
   /vms/{id}/metrics:
     get:
       operationId: getVMMetrics
-      summary: Return the guest's last report (MCP tool get_vm_metrics)
-      description: Host-side CPU, memory and I/O metrics land in a later release.
+      summary: Per-VM metrics (MCP tool get_vm_metrics)
+      description: |
+        The host's view of the VM (state, attestation, QEMU CPU time and resident
+        memory, disk size, phase durations, its network's counters) and a summary
+        of the guest's last systemd-report upload. Every series is also on the
+        Prometheus exposition at GET /metrics (outside /api/v1 and the OAuth guard).
       parameters:
         - $ref: "#/components/parameters/VMID"
       responses:
         "200":
-          description: The last systemd-report upload, null until the guest sent one.
+          description: The metrics summary.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Metrics"
         "404":
           $ref: "#/components/responses/Error"
+  /vms/{id}/report:
+    get:
+      operationId: getVMReport
+      summary: The guest's last systemd-report upload in full (REST only)
+      description: |
+        The JSON body systemd-report upload POSTed to the IMDS, re-indented. Not
+        mirrored as an MCP tool because a report is hundreds of kilobytes;
+        get_vm_metrics carries a summary and links here as raw_report_url.
+      parameters:
+        - $ref: "#/components/parameters/VMID"
+      responses:
+        "200":
+          description: The report as uploaded.
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Unknown VM, or no upload yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /openapi.yaml:
     get:
       operationId: getOpenAPI
@@ -771,18 +798,99 @@ components:
           type: string
     Metrics:
       type: object
-      required: [id, report, note]
+      required: [id, host, guest]
       properties:
         id:
           type: string
-        report:
-          description: The guest's last systemd-report upload; null until the guest sent one.
+        host:
+          type: object
+          description: What the host knows about the VM without the guest's help.
+          required: [state, attestation, disk_bytes, network]
+          properties:
+            state:
+              type: string
+            attestation:
+              type: string
+              enum: [disabled, pending, released, failed]
+            pid:
+              type: integer
+              description: The QEMU process; absent when none runs.
+            cpu_seconds:
+              type: number
+              description: CPU time of the QEMU process; absent when none runs.
+            memory_rss_bytes:
+              type: integer
+              description: Resident memory of the QEMU process; absent when none runs.
+            disk_bytes:
+              type: integer
+              description: Provisioned size of the VM's volume.
+            install_seconds:
+              type: number
+              description: Creation to the end of the installer boot; absent until installed.
+            boot_to_ready_seconds:
+              type: number
+              description: Start of the current installed boot to READY=1; absent until ready.
+            network:
+              type: object
+              description: The VM's network; the counters are per network, shared by every VM on it.
+              required: [name, bytes_sent, bytes_received, leases]
+              properties:
+                name:
+                  type: string
+                bytes_sent:
+                  type: integer
+                bytes_received:
+                  type: integer
+                leases:
+                  type: integer
+        guest:
+          description: Summary of the guest's last systemd-report upload; null until the guest sent one.
           oneOf:
-            - type: object
-            - type: string
             - type: "null"
+            - type: object
+              required: [received_at, report_age_seconds, families, series, series_exported, series_dropped, sample]
+              properties:
+                received_at:
+                  type: string
+                  format: date-time
+                generated_at:
+                  type: string
+                  format: date-time
+                  description: The report's own timestamp when it parsed.
+                report_age_seconds:
+                  type: number
+                families:
+                  type: integer
+                  description: Distinct family names in the report.
+                series:
+                  type: integer
+                  description: Entries in the report.
+                series_exported:
+                  type: integer
+                  description: Entries on /metrics; the difference to series is series_dropped.
+                series_dropped:
+                  type: integer
+                sample:
+                  type: array
+                  description: The first entries of the report as uploaded.
+                  items:
+                    type: object
+                    required: [name, value]
+                    properties:
+                      name:
+                        type: string
+                      object:
+                        type: string
+                      fields:
+                        type: object
+                        additionalProperties: true
+                      value: {}
+        raw_report_url:
+          type: string
+          description: Path of the verbatim upload (GET /vms/{id}/report); absent until the guest sent one.
         note:
           type: string
+          description: Why guest is null.
     Error:
       type: object
       required: [error]

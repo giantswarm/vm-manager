@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/host"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 )
 
 // bareHost is a host without any of the VM prerequisites.
@@ -41,6 +43,8 @@ func TestProbesAndRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status)
 	status, _ = get("/readyz")
 	assert.Equal(t, http.StatusOK, status, "readiness is the listener, not the host prerequisites")
+	status, _ = get("/metrics")
+	assert.Equal(t, http.StatusNotFound, status, "no exposition unless configured")
 	status, ctype := get("/api/v1/host")
 	assert.Equal(t, http.StatusOK, status, "an unready host is still described")
 	assert.Equal(t, "application/json", ctype)
@@ -57,6 +61,24 @@ func TestProbesAndRoutes(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "the MCP endpoint is mounted at the default path")
+}
+
+func TestMetricsMounted(t *testing.T) {
+	svc := bareHost(t)
+	reg := metrics.New(metrics.Options{Version: "test", ProcRoot: t.TempDir()})
+	srv, err := New(Config{Addr: "127.0.0.1:0", Metrics: reg.Handler()}, svc, api.NewMCPServer(svc, "test"), nil)
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
+	assert.Contains(t, string(body), `vm_manager_build_info{commit="",go_version="`)
+	assert.Contains(t, string(body), `version="test"} 1`)
 }
 
 func TestRunStopsOnContext(t *testing.T) {

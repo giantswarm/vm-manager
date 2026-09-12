@@ -52,14 +52,60 @@ type harness struct {
 	stateDir string
 	imageDir string
 	imgs     *vmtest.Images
+	metrics  *metricsRecorder
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// metricsRecorder is the harness' vm.Metrics: it keeps what the service
+// reports so the tests can assert the hooks fire on the right transitions.
+type metricsRecorder struct {
+	mu        sync.Mutex
+	installs  []time.Duration
+	boots     []time.Duration
+	forgotten []string
+	reports   map[string]json.RawMessage
+}
+
+func (m *metricsRecorder) StoreReport(_ context.Context, id string, raw json.RawMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reports == nil {
+		m.reports = make(map[string]json.RawMessage)
+	}
+	m.reports[id] = raw
+	return nil
+}
+
+func (m *metricsRecorder) ObserveInstall(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.installs = append(m.installs, d)
+}
+
+func (m *metricsRecorder) ObserveBootToReady(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.boots = append(m.boots, d)
+}
+
+func (m *metricsRecorder) ForgetVM(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forgotten = append(m.forgotten, id)
+}
+
+func (m *metricsRecorder) snapshot() (installs, boots []time.Duration, forgotten []string, reports map[string]json.RawMessage) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]time.Duration(nil), m.installs...), append([]time.Duration(nil), m.boots...),
+		append([]string(nil), m.forgotten...), m.reports
+}
+
 // newHarness wires a vm.Service to fakes with one network "lan".
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{t: t, ctx: context.Background(), stateDir: t.TempDir(), imageDir: t.TempDir()}
+	h := &harness{t: t, ctx: context.Background(), stateDir: t.TempDir(), imageDir: t.TempDir(), metrics: &metricsRecorder{}}
 	d := vmtest.NewDeps(t.TempDir(), time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC))
 	h.ev, h.clock, h.rt, h.tpm, h.store, h.nets, h.notify = d.Events, d.Clock, d.Runtime, d.TPM, d.Storage, d.Networks, d.Notifier
 	for _, f := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "OVMF_CODE.fd", "OVMF_VARS.fd"} {
@@ -93,6 +139,7 @@ func (h *harness) start() {
 		Region:           "host1",
 		Logger:           quiet(),
 		Clock:            h.clock,
+		Metrics:          h.metrics,
 	})
 	require.NoError(h.t, err)
 	require.NoError(h.t, svc.Load(h.ctx))
@@ -328,6 +375,12 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	assert.NoDirExists(t, v.Paths.Dir)
 	assert.Zero(t, h.tpm.Running())
 	require.ErrorIs(t, h.svc.Delete(h.ctx, v.ID), apierr.ErrNotFound)
+
+	// The metrics hooks saw one install, every READY=1 and the deletion.
+	installs, boots, forgotten, _ := h.metrics.snapshot()
+	assert.Len(t, installs, 1)
+	assert.Len(t, boots, 3, "first boot, start and reboot each reached READY=1")
+	assert.Equal(t, []string{v.ID}, forgotten)
 }
 
 func TestCreateWaitForReady(t *testing.T) {
@@ -705,12 +758,14 @@ func TestAttestationGating(t *testing.T) {
 	assert.Nil(t, v.Attestation.Initrd)
 	assert.Equal(t, vm.StateBooting, v.State)
 
-	// Reports land in memory and on disk.
+	// Reports land in memory, on disk and in the metrics registry.
 	require.NoError(t, h.svc.StoreReport(h.ctx, v.ID, json.RawMessage(`{"cpu":1}`)))
 	rep, err := h.svc.Report(v.ID)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"cpu":1}`, string(rep))
 	assert.FileExists(t, v.Paths.Report)
+	_, _, _, reports := h.metrics.snapshot()
+	assert.JSONEq(t, `{"cpu":1}`, string(reports[v.ID]))
 }
 
 func TestPersistenceRoundTripAndLoad(t *testing.T) {

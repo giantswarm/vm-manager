@@ -64,6 +64,8 @@ func (h *REST) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+Prefix+"/vms/{id}/console", h.getVMConsole)
 	mux.HandleFunc("GET "+Prefix+"/vms/{id}/attestation", h.getVMAttestation)
 	mux.HandleFunc("GET "+Prefix+"/vms/{id}/metrics", h.getVMMetrics)
+	// The raw report has no MCP twin: a systemd-report is hundreds of KB.
+	mux.HandleFunc("GET "+Prefix+"/vms/{id}/report", h.getVMReport)
 
 	// Everything else under the prefix answers with the JSON error body.
 	mux.HandleFunc(Prefix+"/", h.notFound)
@@ -192,6 +194,22 @@ func (h *REST) getVMAttestation(w http.ResponseWriter, r *http.Request) {
 func (h *REST) getVMMetrics(w http.ResponseWriter, r *http.Request) {
 	res, err := h.svc.metrics(r.PathValue("id"))
 	h.respond(w, http.StatusOK, res, err)
+}
+
+// getVMReport serves the guest's last upload, re-encoded (indented, HTML
+// escaped) rather than echoed byte for byte since the guest wrote it. The
+// IMDS only stores valid JSON; anything else is served as a JSON string.
+func (h *REST) getVMReport(w http.ResponseWriter, r *http.Request) {
+	report, err := h.svc.report(r.PathValue("id"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if json.Valid(report) {
+		writeJSON(w, http.StatusOK, json.RawMessage(report))
+		return
+	}
+	writeJSON(w, http.StatusOK, string(report))
 }
 
 func (h *REST) notFound(w http.ResponseWriter, r *http.Request) {

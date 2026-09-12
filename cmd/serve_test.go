@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -34,14 +36,16 @@ func TestServeWiring(t *testing.T) {
 	require.NoError(t, ln.Close())
 
 	o := &serveOptions{
-		listen:         addr,
-		mcpPath:        "/mcp",
-		stateDir:       stateDir,
-		networkSubnet:  "192.168.221.0/24",
-		defaultNetwork: "default",
-		installTimeout: vm.DefaultInstallTimeout,
-		bootTimeout:    vm.DefaultBootTimeout,
-		stopTimeout:    2 * time.Second,
+		listen:                  addr,
+		mcpPath:                 "/mcp",
+		stateDir:                stateDir,
+		networkSubnet:           "192.168.221.0/24",
+		defaultNetwork:          "default",
+		installTimeout:          vm.DefaultInstallTimeout,
+		bootTimeout:             vm.DefaultBootTimeout,
+		stopTimeout:             2 * time.Second,
+		metricsEnabled:          true,
+		metricsGuestSeriesLimit: metrics.DefaultMaxGuestSeries,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -72,6 +76,14 @@ func TestServeWiring(t *testing.T) {
 	assert.JSONEq(t, "[]", string(body), "an empty image dir is a warning, not an error")
 	assert.DirExists(t, filepath.Join(stateDir, imagesSubdir), "the default image dir is created")
 
+	resp, err = http.Get("http://" + addr + "/metrics")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `vm_manager_network_leases{network="default"} 0`, "the host collector scrapes the VM service")
+	assert.Contains(t, string(body), `vm_manager_vms{state="ready"} 0`)
+
 	cancel()
 	select {
 	case err := <-done:
@@ -96,6 +108,22 @@ func TestServeWiring(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// TestNewComponentsFailureCleansUp makes the image catalog fail to load: the
+// components built before it are closed and the error is returned, not a
+// nil dereference in the deferred close.
+func TestNewComponentsFailureCleansUp(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "vmm-fail")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	notADir := filepath.Join(stateDir, "images-file")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o600))
+	o := &serveOptions{stateDir: stateDir, imageDir: notADir, networkSubnet: "192.168.222.0/24", defaultNetwork: "default", stopTimeout: time.Second}
+
+	c, err := newComponents(context.Background(), o, metrics.New(metrics.Options{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.ErrorContains(t, err, "load images")
+	assert.Nil(t, c)
+}
+
 func TestServeOptionsComplete(t *testing.T) {
 	base := func() *serveOptions {
 		return &serveOptions{stateDir: t.TempDir(), networkSubnet: "10.0.0.0/24", defaultNetwork: "default"}
@@ -115,4 +143,11 @@ func TestServeOptionsComplete(t *testing.T) {
 	o = base()
 	o.defaultNetwork = ""
 	assert.ErrorContains(t, o.complete(), "--default-network")
+
+	o = base()
+	require.NoError(t, o.complete())
+	assert.Equal(t, metrics.DefaultMaxGuestSeries, o.metricsGuestSeriesLimit, "an unset limit is the default")
+	o = base()
+	o.metricsGuestSeriesLimit = -1
+	assert.ErrorContains(t, o.complete(), "--metrics-guest-series-limit")
 }

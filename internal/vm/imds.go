@@ -45,16 +45,26 @@ func instanceOf(e *entry) imds.Instance {
 }
 
 // StoreReport implements imds.ReportSink: the last upload is kept in memory
-// and as report.json for the metrics package.
-func (s *Service) StoreReport(_ context.Context, vmID string, report json.RawMessage) error {
+// and as report.json, then handed to the metrics registry. A report the
+// registry cannot parse is still stored, so GET /vms/{id}/report shows what
+// the guest sent.
+func (s *Service) StoreReport(ctx context.Context, vmID string, report json.RawMessage) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	e, err := s.lookup(vmID)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	e.report = append([]byte(nil), report...)
-	return writeAtomic(e.rec.Paths.Report, e.report, 0o600)
+	err = writeAtomic(e.rec.Paths.Report, e.report, 0o600)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := s.opts.Metrics.StoreReport(ctx, vmID, report); err != nil {
+		s.log.Warn("guest report not exported as metrics", "id", vmID, "err", err)
+	}
+	return nil
 }
 
 // recordingAttestor wraps the configured Attestor and writes its verdicts

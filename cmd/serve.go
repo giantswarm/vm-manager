@@ -19,6 +19,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/server"
@@ -55,6 +56,9 @@ type serveOptions struct {
 	ovmfCode       string
 	ovmfVars       string
 	notifyPort     int
+
+	metricsEnabled          bool
+	metricsGuestSeriesLimit int
 
 	oauthEnabled                  bool
 	oauthBaseURL                  string
@@ -96,6 +100,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.ovmfCode, "ovmf-code", envOr("VM_MANAGER_OVMF_CODE", ovmfCode), "OVMF firmware code image VMs boot with (VM_MANAGER_OVMF_CODE)")
 	f.StringVar(&o.ovmfVars, "ovmf-vars", envOr("VM_MANAGER_OVMF_VARS", ovmfVars), "OVMF variable store template copied per VM (VM_MANAGER_OVMF_VARS)")
 	f.IntVar(&o.notifyPort, "notify-port", envInt("VM_MANAGER_NOTIFY_PORT", 0), "vsock port guests send sd_notify messages (READY=1, STATUS=) to; 0 lets the kernel pick one (VM_MANAGER_NOTIFY_PORT)")
+	f.BoolVar(&o.metricsEnabled, "metrics-enabled", envBool("VM_MANAGER_METRICS_ENABLED", true), "Serve the Prometheus exposition at GET /metrics, outside the OAuth guard like /healthz: per-VM host metrics and the guests' systemd-report families (VM_MANAGER_METRICS_ENABLED)")
+	f.IntVar(&o.metricsGuestSeriesLimit, "metrics-guest-series-limit", envInt("VM_MANAGER_METRICS_GUEST_SERIES_LIMIT", metrics.DefaultMaxGuestSeries), "Series kept per VM from one systemd-report upload; the rest are counted in vm_guest_report_series_dropped_total (VM_MANAGER_METRICS_GUEST_SERIES_LIMIT)")
 	f.BoolVar(&o.oauthEnabled, "enable-oauth", envBool("VM_MANAGER_OAUTH_ENABLED", false), "Require an OAuth 2.1 bearer token on the MCP endpoint and the REST API, validated against the platform IdP (mcp-oauth); the caller's identity travels with every request (VM_MANAGER_OAUTH_ENABLED)")
 	f.StringVar(&o.oauthBaseURL, "oauth-base-url", envOr("VM_MANAGER_OAUTH_BASE_URL", ""), "Public base URL of this server: the issuer of its OAuth metadata, https or loopback http (VM_MANAGER_OAUTH_BASE_URL)")
 	f.StringVar(&o.oauthProvider, "oauth-provider", envOr("VM_MANAGER_OAUTH_PROVIDER", server.ProviderDex), "Identity provider: dex or google (VM_MANAGER_OAUTH_PROVIDER)")
@@ -140,6 +146,12 @@ func (o *serveOptions) complete() error {
 	if o.notifyPort < 0 || o.notifyPort > math.MaxUint32 {
 		return fmt.Errorf("--notify-port: %d is not a vsock port", o.notifyPort)
 	}
+	if o.metricsGuestSeriesLimit == 0 {
+		o.metricsGuestSeriesLimit = metrics.DefaultMaxGuestSeries
+	}
+	if o.metricsGuestSeriesLimit < 1 {
+		return fmt.Errorf("--metrics-guest-series-limit: %d must be at least 1", o.metricsGuestSeriesLimit)
+	}
 	for _, dir := range []string{o.stateDir, o.imageDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
@@ -155,13 +167,24 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	bridgeLogrus(log)
 
-	c, err := newComponents(ctx, o, log)
+	reg := metrics.New(metrics.Options{
+		Version:        version,
+		Commit:         buildCommit,
+		States:         vm.StateNames(),
+		MaxGuestSeries: o.metricsGuestSeriesLimit,
+		Logger:         log,
+	})
+	c, err := newComponents(ctx, o, reg, log)
 	if err != nil {
 		return err
 	}
+	reg.SetSource(c.vm)
 
-	svc := api.Services{Host: host.New(host.Options{Logger: log}), VM: c.vm, Images: c.images}
+	svc := api.Services{Host: host.New(host.Options{Logger: log}), VM: c.vm, Images: c.images, Metrics: reg}
 	cfg := server.Config{Addr: o.listen, MCPPath: o.mcpPath}
+	if o.metricsEnabled {
+		cfg.Metrics = reg.Handler()
+	}
 	if o.oauthEnabled {
 		cfg.OAuth = &server.OAuthConfig{
 			BaseURL:                       o.oauthBaseURL,
@@ -183,7 +206,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return errors.Join(err, c.close(log))
 	}
 	log.Info("vm-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath,
-		"stateDir", o.stateDir, "imageDir", o.imageDir, "oauth", o.oauthEnabled)
+		"stateDir", o.stateDir, "imageDir", o.imageDir, "oauth", o.oauthEnabled, "metrics", o.metricsEnabled)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -206,8 +229,10 @@ type components struct {
 	stopTimeout time.Duration
 }
 
-func newComponents(ctx context.Context, o *serveOptions, log *slog.Logger) (c *components, err error) {
-	c = &components{stopTimeout: o.stopTimeout}
+func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, log *slog.Logger) (_ *components, err error) {
+	// c is a local, not the named result: the error returns below hand back
+	// nil, and the deferred close must still see the partially built set.
+	c := &components{stopTimeout: o.stopTimeout}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, c.close(log))
@@ -252,6 +277,7 @@ func newComponents(ctx context.Context, o *serveOptions, log *slog.Logger) (c *c
 		BootTimeout:      o.bootTimeout,
 		StopTimeout:      o.stopTimeout,
 		Logger:           log,
+		Metrics:          reg,
 	})
 	if err != nil {
 		return nil, err

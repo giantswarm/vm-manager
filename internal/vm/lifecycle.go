@@ -437,6 +437,9 @@ func (s *Service) onNotify(e *entry, n qemu.Notification) {
 			e.rec.ReadyAt = s.now()
 			e.rec.Booted = true
 			e.rec.LastError = ""
+			if e.rec.BootedAt != nil {
+				s.opts.Metrics.ObserveBootToReady(e.rec.ReadyAt.Sub(*e.rec.BootedAt))
+			}
 			s.log.Info("vm ready", "id", e.rec.ID)
 		}
 	}
@@ -464,6 +467,7 @@ func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout tim
 		e.rec.State = StateStopped
 	case p.phase == qemu.PhaseInstall && prev == StateInstalling && exit.Code == 0 && !p.timedOut:
 		e.rec.InstalledAt = s.now()
+		s.opts.Metrics.ObserveInstall(e.rec.InstalledAt.Sub(e.rec.CreatedAt))
 		installed = true
 	case p.phase == qemu.PhaseInstall && prev == StateInstalling:
 		e.rec.State = StateFailed
@@ -702,6 +706,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	delete(s.vms, id)
 	s.broadcastLocked()
 	s.mu.Unlock()
+	s.opts.Metrics.ForgetVM(id)
 	s.log.Info("vm deleted", "id", id)
 	return s.persistNetworks()
 }

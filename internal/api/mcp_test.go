@@ -21,6 +21,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/server"
 	"github.com/giantswarm/vm-manager/internal/vm"
 	"github.com/giantswarm/vm-manager/internal/vm/vmtest"
@@ -62,6 +63,9 @@ func newServices(t *testing.T) api.Services {
 	require.NoError(t, err)
 
 	d := vmtest.NewDeps(t.TempDir(), time.Now())
+	// The fakes' QEMU has no PID, so the registry never reads procfs; an
+	// empty root keeps it off the host's /proc regardless.
+	reg := metrics.New(metrics.Options{States: vm.StateNames(), ProcRoot: t.TempDir(), Logger: quiet})
 	svc, err := vm.New(vm.Options{
 		StateDir:         t.TempDir(),
 		Images:           catalog,
@@ -75,15 +79,26 @@ func newServices(t *testing.T) api.Services {
 		Region:           "host1",
 		Logger:           quiet,
 		Clock:            d.Clock,
+		Metrics:          reg,
 	})
 	require.NoError(t, err)
 	require.NoError(t, svc.Load(context.Background()))
 	t.Cleanup(func() { require.NoError(t, svc.Close(context.Background())) })
+	reg.SetSource(svc)
 	return api.Services{
-		Host:   host.New(host.Options{Runner: host.RunnerFunc(fakeTools), Root: t.TempDir()}),
-		VM:     svc,
-		Images: catalog,
+		Host:    host.New(host.Options{Runner: host.RunnerFunc(fakeTools), Root: t.TempDir()}),
+		VM:      svc,
+		Images:  catalog,
+		Metrics: reg,
 	}
+}
+
+// guestReport is the systemd 261 report fixture of the metrics package.
+func guestReport(t *testing.T) json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "metrics", "testdata", "report.json"))
+	require.NoError(t, err)
+	return raw
 }
 
 func newTestServer(t *testing.T) (*httptest.Server, api.Services) {
@@ -169,7 +184,7 @@ func getJSON(t *testing.T, url string, out any) int {
 // delete_network against the fake runtime; every result must match the REST
 // body of the same operation.
 func TestMCPContract(t *testing.T) {
-	ts, _ := newTestServer(t)
+	ts, svc := newTestServer(t)
 	s, initRes := newMCPSession(t, ts.URL)
 	ctx := context.Background()
 
@@ -279,10 +294,27 @@ func TestMCPContract(t *testing.T) {
 	var console api.ConsoleResponse
 	s.call(api.ToolGetVMConsole, map[string]any{"id": v.ID, "lines": 5}, &console)
 	assert.Equal(t, api.ConsoleResponse{ID: v.ID, Lines: 5}, console, "no console output yet")
-	var metrics api.MetricsResponse
-	s.call(api.ToolGetVMMetrics, map[string]any{"id": v.ID}, &metrics)
-	assert.Equal(t, api.MetricsNote, metrics.Note)
-	assert.Equal(t, json.RawMessage("null"), metrics.Report)
+	var m api.MetricsResponse
+	s.call(api.ToolGetVMMetrics, map[string]any{"id": v.ID}, &m)
+	assert.Equal(t, string(vm.StateInstalling), m.Host.State)
+	assert.Equal(t, metrics.AttestationPending, m.Host.Attestation)
+	assert.Equal(t, int64(api.DefaultDiskGiB)<<30, m.Host.DiskBytes)
+	assert.Equal(t, metrics.NetworkMetrics{Name: testNetwork, Leases: 1}, m.Host.Network)
+	assert.Nil(t, m.Host.CPUSeconds, "the fake QEMU has no process to read")
+	assert.Nil(t, m.Guest, "no upload yet")
+	assert.Empty(t, m.RawReportURL)
+	assert.Equal(t, api.MetricsNote, m.Note)
+	require.NoError(t, svc.VM.StoreReport(context.Background(), v.ID, guestReport(t)))
+	var reported api.MetricsResponse
+	s.call(api.ToolGetVMMetrics, map[string]any{"id": v.ID}, &reported)
+	require.NotNil(t, reported.Guest, "the upload is summarized")
+	assert.Equal(t, 22, reported.Guest.Families)
+	assert.Equal(t, 137, reported.Guest.Series)
+	assert.Equal(t, 137, reported.Guest.SeriesExported)
+	assert.Len(t, reported.Guest.Sample, metrics.SampleSize)
+	assert.Equal(t, "io.systemd.Manager.ActiveTimestamp", reported.Guest.Sample[0].Name)
+	assert.Equal(t, api.Prefix+"/vms/"+v.ID+"/report", reported.RawReportURL)
+	assert.Empty(t, reported.Note)
 	var att vm.Attestation
 	s.call(api.ToolGetVMAttestation, map[string]any{"id": v.ID}, &att)
 	assert.True(t, att.Required)

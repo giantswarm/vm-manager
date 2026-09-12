@@ -1,5 +1,6 @@
 // Package server assembles the single HTTP listener: health endpoints, the
-// REST API, and the MCP streamable-HTTP endpoint (optionally behind OAuth).
+// Prometheus exposition, the REST API, and the MCP streamable-HTTP endpoint
+// (the latter two optionally behind OAuth).
 package server
 
 import (
@@ -25,6 +26,12 @@ type Config struct {
 	// and every call carries the caller's identity. Off: anonymous — only for
 	// a listener nothing but a trusted proxy or the local user can reach.
 	OAuth *OAuthConfig
+	// Metrics, when set, is served at GET /metrics outside the OAuth guard
+	// like the probes: Prometheus scrapers do not do OAuth flows, and the
+	// exposition holds no secrets (VM ids, names, states, counters).
+	// Operators who need it private firewall the path or disable it with
+	// --metrics-enabled=false.
+	Metrics http.Handler
 }
 
 // Server is the assembled HTTP server.
@@ -48,6 +55,9 @@ func New(cfg Config, svc api.Services, mcpSrv *mcpserver.MCPServer, log *slog.Lo
 	// GET /api/v1/host, so clients can render what is missing instead of
 	// getting connection errors from an unready server.
 	mux.HandleFunc("GET /readyz", ok)
+	if cfg.Metrics != nil {
+		mux.Handle("GET /metrics", cfg.Metrics)
+	}
 
 	s := &Server{log: log}
 	if cfg.OAuth != nil {

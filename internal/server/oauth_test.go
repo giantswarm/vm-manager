@@ -28,6 +28,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/identity"
+	"github.com/giantswarm/vm-manager/internal/metrics"
 )
 
 // fakeIdP is a minimal OIDC issuer on https://localhost: discovery document
@@ -244,7 +245,8 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	idp := newFakeIdP(t)
 	svc := bareHost(t)
 	cfg := idp.config()
-	srv, err := New(Config{Addr: "127.0.0.1:0", OAuth: &cfg}, svc, api.NewMCPServer(svc, "test"), quiet())
+	exposition := metrics.New(metrics.Options{ProcRoot: t.TempDir()}).Handler()
+	srv, err := New(Config{Addr: "127.0.0.1:0", OAuth: &cfg, Metrics: exposition}, svc, api.NewMCPServer(svc, "test"), quiet())
 	require.NoError(t, err)
 	t.Cleanup(func() { srv.oauth.shutdown(context.Background()) })
 	ts := httptest.NewServer(srv.Handler())
@@ -267,6 +269,7 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/healthz", ""))
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/readyz", ""))
+	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/metrics", ""), "the exposition is scraped without a token")
 	assert.Equal(t, http.StatusUnauthorized, status(http.MethodGet, "/api/v1/host", ""), "REST needs a token")
 	assert.Equal(t, http.StatusUnauthorized, status(http.MethodGet, "/api/v1/openapi.yaml", ""))
 	assert.Equal(t, http.StatusUnauthorized, status(http.MethodPost, "/mcp", ""), "MCP needs a token")

@@ -96,6 +96,9 @@ type Options struct {
 	Logger *slog.Logger
 	// Clock drives timeouts; nil uses SystemClock.
 	Clock Clock
+	// Metrics receives report uploads, phase durations and deletions; nil
+	// discards them.
+	Metrics Metrics
 }
 
 func (o *Options) defaults() error {
@@ -141,6 +144,9 @@ func (o *Options) defaults() error {
 	}
 	if o.Clock == nil {
 		o.Clock = SystemClock{}
+	}
+	if o.Metrics == nil {
+		o.Metrics = noMetrics{}
 	}
 	return nil
 }
