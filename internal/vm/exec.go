@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -65,14 +66,36 @@ func (s *Service) Exec(ctx context.Context, id string, cmd []string) (ExecResult
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 
+	// The handshake runs in the transport's goroutines, so a host key
+	// rejection can race with the peer tearing the connection down and
+	// NewClientConn may report the transport error instead. Remember the
+	// rejection and prefer it: it is the cause.
+	var (
+		hostKeyMu  sync.Mutex
+		hostKeyErr error
+	)
+	pin := s.pinHostKey(e)
 	cfg := &ssh.ClientConfig{
-		User:            sshUser,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: s.pinHostKey(e),
-		Timeout:         sshTimeout,
+		User: sshUser,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			err := pin(hostname, remote, key)
+			if err != nil {
+				hostKeyMu.Lock()
+				hostKeyErr = err
+				hostKeyMu.Unlock()
+			}
+			return err
+		},
+		Timeout: sshTimeout,
 	}
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
+		hostKeyMu.Lock()
+		if hostKeyErr != nil {
+			err = hostKeyErr
+		}
+		hostKeyMu.Unlock()
 		return ExecResult{}, fmt.Errorf("ssh %s: %w", addr, err)
 	}
 	client := ssh.NewClient(c, chans, reqs)
