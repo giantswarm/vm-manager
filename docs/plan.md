@@ -83,6 +83,17 @@ Order: (12 ∥ 12b ∥ 13 ∥ 14) -> 13b -> 15 -> (16 ∥ 17).
 
 Order: (18 ∥ 19 ∥ 20 ∥ 21); 20 and 21 touch different packages than 19 (docs only).
 
+## Wave 5 (proposed, not approved)
+
+| # | Deliverable | Inputs | Est. | Returns |
+|---|---|---|---|---|
+| 22 | Agent-platform wiring: a muster `MCPServer` resource pointing at a vm-manager host (external URL, OAuth via Dex, `agent-platform.giantswarm.io/tool-group: agent-platform`), values block and route in the agent-platform chart, smoke through muster as `x_vm-manager_*` | agent-platform values conventions, a reachable host | ~70k | PR links in agent-platform, tool list seen through muster |
+| 23 | CAPI infrastructure provider sketch for cluster-manager: `VMManagerMachine`/`VMManagerCluster` mapping to `create_vm` with the bootstrap secret as user-data, providerID by VM name, control-plane endpoint via kube-vip; one kind-hosted CAPI management cluster creating a two-node workload cluster on this host | docs/design.md "How CAPI fits", the proven Ignition shape | ~120k | design doc + a working spike or a precise gap list |
+| 24 | Event-log replay in the verifier: parse the firmware and systemd logs the agent already sends, replay PCRs 0-7, 11-13 and explain each mismatch; compare PCRs 1, 5 and 12 by event content instead of excluding them | quotes and logs from the e2e, systemd-pcrlock as reference | ~90k | PR link, rejection messages naming the event |
+| 25 | Production keys and image distribution: signing keys out of the build dir (offline signing of verity, PCR policy and SHA256SUMS), images published as OCI artifacts and pulled with `importctl pull-oci`/`systemd-import`, sysupdate of the base image (A/B) exercised end to end with a second image version | sysupdate transfers already in the image, gsoci registry | ~100k | PR link, an in-place OS update e2e |
+| 26 | Secure Boot: OVMF secboot firmware with Giant Swarm keys enrolled, UKI signed with sbsign, PCR 7 policy; attestation golden values per firmware | mkosi `SecureBoot=` options, PR #32's firmware tamper test | ~80k | PR link, e2e |
+| 27 | Multi-host and capacity: `get_host` per host, scheduling across hosts, tap/bridge network backend for line-rate guests | network backend interface, host inventory | ~120k | design + first backend |
+
 Follow-ups outside the prototype: CAPI infrastructure provider / cluster-manager glue,
 agent-platform wiring (muster MCPServer CR pointing at the host), a predicted PCR 12,
 tap/bridge network backend, host-side pre-install fast path, EK-certified attestation
