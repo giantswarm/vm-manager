@@ -1,0 +1,54 @@
+#!/bin/sh
+# Mounts the writable parts of the root file system under /sysroot before the
+# initrd hands over (persistent-etc.service, initrd only):
+#
+#   /var   the var partition (fsck, mount, grow), a tmpfs when there is none
+#   /etc   overlayfs: lower = the image's /etc, upper/work = /var/lib/etc-overlay
+#   /root  bind mount of /var/roothome (tmpfiles.d provision.conf writes
+#          /root/.ssh/authorized_keys from the ssh.authorized_keys.root credential)
+#   /opt   bind mount of /var/opt (CNI DaemonSets install into /opt/cni/bin)
+#
+# Everything else stays the read-only, dm-verity protected erofs root. See
+# images/README.md, "Persistent state".
+set -eu
+
+sysroot=/sysroot
+var=/dev/disk/by-partlabel/var
+state=$sysroot/var/lib/etc-overlay
+
+# systemd-gpt-auto-generator mounts var only on the host; in the initrd the
+# partition is found by the label systemd-repart derives from its type. The
+# by-partlabel link appears once udev has processed the partition, which sits
+# on the disk the root was found on: settle so that a missing link means a
+# missing partition, not a race with udev.
+udevadm settle --timeout=30 || true
+
+# What an fstab entry would do for the partition: systemd-fsck honours
+# fsck.mode=/fsck.repair=, systemd-growfs grows the file system into a
+# partition systemd-repart enlarged (x-systemd.growfs is fstab-only).
+# Every mount is guarded by mountpoint(1): a restart of the unit must not
+# stack a second, empty layer over the persistent one.
+if mountpoint -q "$sysroot/var"; then
+        :
+elif [ -b "$var" ] && /usr/lib/systemd/systemd-fsck "$var" && mount -t ext4 "$var" "$sysroot/var"; then
+        /usr/lib/systemd/systemd-growfs "$sysroot/var" || true
+else
+        # No var partition yet (a plain boot of the base image; systemd-repart
+        # creates it on the host, the next boot is persistent) or one that
+        # cannot be mounted: keep the boot working and reachable on a tmpfs.
+        echo "persistent-etc: no usable var partition at $var, /var and /etc are volatile this boot" >&2
+        mount -t tmpfs -o mode=0755 tmpfs "$sysroot/var"
+fi
+
+# An empty upper hides nothing: the lower is the image's /etc.
+mkdir -p "$state/upper" "$state/work"
+mountpoint -q "$sysroot/etc" ||
+        mount -t overlay -o "lowerdir=$sysroot/etc,upperdir=$state/upper,workdir=$state/work" overlay "$sysroot/etc"
+
+# bind <directory under /> <directory under /var> <mode>
+bind() {
+        mkdir -p -m "$3" "$sysroot/var/$2"
+        mountpoint -q "$sysroot/$1" || mount --bind "$sysroot/var/$2" "$sysroot/$1"
+}
+bind root roothome 0700
+bind opt opt 0755
