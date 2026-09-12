@@ -57,7 +57,9 @@ const (
 	// flannelManifest is the CNI: its default pod network is podCIDR, and
 	// its DaemonSet installs the plugin binary into /opt/cni/bin, the bind
 	// mount from var of images/README.md "Persistent state".
-	flannelManifest = "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+	// Pinned: releases/latest is a moving target and an unrelated flannel
+	// change must not fail this test.
+	flannelManifest = "https://github.com/flannel-io/flannel/releases/download/v0.28.9/kube-flannel.yml"
 	// corednsReadyPort is CoreDNS's ready plugin, reachable on the pod IP:
 	// the cross-node proof of the pod network needs no extra image.
 	corednsReadyPort = 8181
@@ -151,7 +153,9 @@ func TestKubernetesCluster(t *testing.T) {
 	_, testKey := generateSSHKey(t, dir)
 
 	t.Setenv("VM_MANAGER_BOOT_TIMEOUT", clusterBootTimeout.String())
-	srv := startServer(ctx, t, dir, image.Dir)
+	// Attestation verifies by default; the shared image dir carries no golden
+	// values, so learn them (the initrd quote and the AK pin are still enforced).
+	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 	var img images.Image
 	m.call(ctx, api.ToolGetImage, map[string]any{"ref": imageID}, &img)
@@ -387,7 +391,22 @@ func kubeadmSeconds(ctx context.Context, g *guest) float64 {
 // kubeconfig kubeadm wrote, and logs the image it runs.
 func applyCNI(ctx context.Context, t *testing.T, g *guest) {
 	t.Helper()
-	out := g.sh(ctx, kubectlInGuest+" apply -f "+flannelManifest)
+	// The manifest comes from GitHub through the VM's NAT: retry a few times
+	// so a slow or flaky download does not fail the cluster test.
+	var out string
+	for attempt := 1; ; attempt++ {
+		res, err := g.run(ctx, kubectlInGuest+" apply -f "+flannelManifest)
+		if err == nil && res.ExitCode == 0 {
+			out = res.Stdout
+			break
+		}
+		if attempt == 3 {
+			require.NoError(t, err)
+			require.Zero(t, res.ExitCode, "kubectl apply flannel: %s%s", res.Stdout, res.Stderr)
+		}
+		t.Logf("kubectl apply flannel attempt %d failed (err=%v, exit %d): %s%s", attempt, err, res.ExitCode, res.Stdout, res.Stderr)
+		time.Sleep(10 * time.Second)
+	}
 	t.Logf("kubectl apply -f %s:\n%s", flannelManifest, out)
 	image := g.sh(ctx, kubectlInGuest+" -n kube-flannel get daemonset kube-flannel-ds -o 'jsonpath={.spec.template.spec.containers[0].image}'")
 	t.Logf("cni image: %s", image)
