@@ -1,0 +1,130 @@
+openapi: 3.1.0
+info:
+  title: vm-manager API
+  version: v1
+  description: |
+    REST mirror of the vm-manager MCP tools. Every operation exists once as an
+    MCP tool (served at /mcp) and once here; both call the same service and
+    return the same JSON shapes. Errors are `{"error":{"code","message"}}`
+    with a stable `code` (`not_found`, `invalid_request`, `conflict`,
+    `unsupported`, `internal_error`); MCP tool errors carry the same code.
+servers:
+  - url: /api/v1
+paths:
+  /host:
+    get:
+      operationId: getHost
+      summary: Report the KVM host's capabilities (MCP tool get_host)
+      description: |
+        Hostname, kernel, CPUs and memory; whether /dev/kvm and
+        /dev/vhost-vsock are accessible; the qemu-system-x86_64, swtpm and
+        systemd versions; the OVMF firmware image found; the systemd storage
+        providers present; and `ready` with the list of `missing`
+        prerequisites. Call it before creating VMs.
+      responses:
+        "200":
+          description: The host report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+        "500":
+          $ref: "#/components/responses/Error"
+  /openapi.yaml:
+    get:
+      operationId: getOpenAPI
+      summary: This document
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+components:
+  responses:
+    Error:
+      description: A failed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Host:
+      type: object
+      required: [hostname, kernel, cpus, memoryBytes, kvm, vhostVsock, qemu, swtpm, systemd, storageProviders, ready]
+      properties:
+        hostname:
+          type: string
+        kernel:
+          type: string
+          description: Running kernel release; empty when unreadable.
+        cpus:
+          type: integer
+          description: Logical CPUs available to vm-manager.
+        memoryBytes:
+          type: integer
+          format: int64
+          description: MemTotal from /proc/meminfo.
+        kvm:
+          $ref: "#/components/schemas/Device"
+        vhostVsock:
+          $ref: "#/components/schemas/Device"
+        qemu:
+          $ref: "#/components/schemas/Tool"
+        swtpm:
+          $ref: "#/components/schemas/Tool"
+        systemd:
+          $ref: "#/components/schemas/Tool"
+        ovmfCode:
+          type: string
+          description: Path of the OVMF firmware code image VMs boot with; absent when none is found.
+        storageProviders:
+          type: array
+          items:
+            type: string
+          description: io.systemd.StorageProvider sockets present (e.g. fs, block).
+        ready:
+          type: boolean
+          description: True when every prerequisite of creating a VM is met.
+        missing:
+          type: array
+          items:
+            type: string
+          description: Prerequisites that are not met; absent when ready.
+    Device:
+      type: object
+      required: [path, accessible]
+      properties:
+        path:
+          type: string
+        accessible:
+          type: boolean
+          description: Whether vm-manager can open the device read-write.
+        error:
+          type: string
+          description: Why it is not accessible.
+    Tool:
+      type: object
+      required: [found]
+      properties:
+        found:
+          type: boolean
+        version:
+          type: string
+        error:
+          type: string
+          description: Why the tool could not be run.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [not_found, invalid_request, conflict, unsupported, internal_error]
+            message:
+              type: string

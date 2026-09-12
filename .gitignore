@@ -11,3 +11,6 @@
 *.tpmstate/
 *.efinvramstate
 coverage.out
+/vm-manager-*
+.idea/
+.vscode/
