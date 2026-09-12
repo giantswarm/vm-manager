@@ -85,7 +85,49 @@ func readAK(tpm transport.TPM) (*AK, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode public 0x%x: %w", uint32(AKHandle), err)
 	}
+	if err := matchesAKTemplate(pub); err != nil {
+		return nil, fmt.Errorf("%w at 0x%x: %w", ErrForeignAK, uint32(AKHandle), err)
+	}
 	return &AK{Handle: AKHandle, Name: rsp.Name, Public: *pub, PublicBytes: tpm2.Marshal(pub)}, nil
+}
+
+// ErrForeignAK is returned when AKHandle holds a key that was not created
+// from AKTemplate: reused or cloned TPM state, or another tool's key. The
+// agent refuses to quote with it rather than adopt an unknown key; clearing
+// the TPM state (a new VM) is the remedy.
+var ErrForeignAK = errors.New("persistent object is not the vm-manager attestation key")
+
+// matchesAKTemplate checks the immutable parts of a public area against
+// AKTemplate: algorithm, name algorithm, attributes and the ECC parameters
+// (curve, scheme, hash). The unique field is the key itself and differs.
+func matchesAKTemplate(pub *tpm2.TPMTPublic) error {
+	switch {
+	case pub.Type != AKTemplate.Type:
+		return fmt.Errorf("type %v, want %v", pub.Type, AKTemplate.Type)
+	case pub.NameAlg != AKTemplate.NameAlg:
+		return fmt.Errorf("name algorithm %v, want %v", pub.NameAlg, AKTemplate.NameAlg)
+	case pub.ObjectAttributes != AKTemplate.ObjectAttributes:
+		return fmt.Errorf("attributes %+v, want %+v", pub.ObjectAttributes, AKTemplate.ObjectAttributes)
+	}
+	got, err := pub.Parameters.ECCDetail()
+	if err != nil {
+		return fmt.Errorf("ecc parameters: %w", err)
+	}
+	want, _ := AKTemplate.Parameters.ECCDetail()
+	switch {
+	case got.CurveID != want.CurveID:
+		return fmt.Errorf("curve %v, want %v", got.CurveID, want.CurveID)
+	case got.Scheme.Scheme != want.Scheme.Scheme:
+		return fmt.Errorf("scheme %v, want %v", got.Scheme.Scheme, want.Scheme.Scheme)
+	}
+	gotHash, err := got.Scheme.Details.ECDSA()
+	if err != nil {
+		return fmt.Errorf("scheme details: %w", err)
+	}
+	if gotHash.HashAlg != tpm2.TPMAlgSHA256 {
+		return fmt.Errorf("scheme hash %v, want %v", gotHash.HashAlg, tpm2.TPMAlgSHA256)
+	}
+	return nil
 }
 
 // createAK creates the AK under a transient SRK and persists it at AKHandle.

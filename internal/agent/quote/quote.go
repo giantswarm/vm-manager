@@ -30,6 +30,7 @@ package quote
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/google/go-tpm/tpm2"
@@ -185,13 +186,25 @@ type nopCloser struct{ transport.TPM }
 func (nopCloser) Close() error { return nil }
 
 // readOptional returns the file's bytes, or nil when it does not exist.
+// maxEventLogBytes bounds one event log; real logs are tens of kilobytes,
+// and the initrd has little memory to spare for a pathological one.
+const maxEventLogBytes = 4 << 20
+
 func readOptional(path string) ([]byte, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- fixed kernel/systemd log paths, overridden only by tests
+	f, err := os.Open(path) // #nosec G304 -- fixed kernel/systemd log paths, overridden only by tests
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read event log %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxEventLogBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read event log %s: %w", path, err)
+	}
+	if len(data) > maxEventLogBytes {
+		return nil, fmt.Errorf("read event log %s: larger than %d bytes", path, maxEventLogBytes)
 	}
 	return data, nil
 }

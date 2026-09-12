@@ -251,3 +251,56 @@ func TestOpenMissingDevice(t *testing.T) {
 	_, err = Build(Options{Device: filepath.Join(t.TempDir(), "tpmrm0")}, imds.StageInitrd, nonce)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
+
+// A key at AKHandle that was not created from AKTemplate must not be adopted.
+func TestEnsureAKRefusesForeignKey(t *testing.T) {
+	sim := transport.FromReadWriter(newSimulator(t))
+	srk, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.TPMRHOwner,
+		InPublic:      tpm2.New2B(tpm2.ECCSRKTemplate),
+	}.Execute(sim)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tpm2.FlushContext{FlushHandle: srk.ObjectHandle}.Execute(sim) })
+
+	foreign := AKTemplate
+	foreign.ObjectAttributes.Restricted = false // an unrestricted signing key
+	created, err := tpm2.Create{
+		ParentHandle: tpm2.NamedHandle{Handle: srk.ObjectHandle, Name: srk.Name},
+		InPublic:     tpm2.New2B(foreign),
+	}.Execute(sim)
+	require.NoError(t, err)
+	loaded, err := tpm2.Load{
+		ParentHandle: tpm2.NamedHandle{Handle: srk.ObjectHandle, Name: srk.Name},
+		InPrivate:    created.OutPrivate,
+		InPublic:     created.OutPublic,
+	}.Execute(sim)
+	require.NoError(t, err)
+	_, err = tpm2.EvictControl{
+		Auth:             tpm2.TPMRHOwner,
+		ObjectHandle:     tpm2.NamedHandle{Handle: loaded.ObjectHandle, Name: loaded.Name},
+		PersistentHandle: AKHandle,
+	}.Execute(sim)
+	require.NoError(t, err)
+
+	_, err = EnsureAK(sim)
+	require.ErrorIs(t, err, ErrForeignAK)
+	assert.ErrorContains(t, err, "attributes")
+}
+
+func TestReadOptionalBoundsTheEventLog(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big")
+	require.NoError(t, os.WriteFile(big, make([]byte, maxEventLogBytes+1), 0o600))
+	_, err := readOptional(big)
+	require.ErrorContains(t, err, "larger than")
+
+	small := filepath.Join(dir, "small")
+	require.NoError(t, os.WriteFile(small, []byte("log"), 0o600))
+	data, err := readOptional(small)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("log"), data)
+
+	data, err = readOptional(filepath.Join(dir, "missing"))
+	require.NoError(t, err)
+	assert.Nil(t, data)
+}
