@@ -27,6 +27,22 @@ and that `delete_vm`, `delete_network` and SIGTERM leave no qemu or swtpm behind
 Both print their timings for the budgets of [design.md](design.md) "Testing strategy":
 `install_seconds=` and `boot_to_ready_seconds=` from the first, `api_create_vm_seconds=`,
 `api_install_seconds=` and `api_boot_to_ready_seconds=` from the second.
+
+`TestKubernetesCluster` (`e2e/kubernetes_cluster_test.go`) is the CAPI path of
+[design.md](design.md) "How CAPI fits" through the MCP API: `create_vm` of a control
+plane with CAPI-shaped Ignition user-data (`kubeadm init` from `/etc/kubeadm.yml` in a
+`kubeadm.service` ordered `After=vm-kubernetes.service`), flannel applied from inside,
+a worker created with a `JoinConfiguration` from the control plane's
+`kubeadm token create --print-join-command`, the host's `kubectl` against
+`forward_port` 6443 with the admin kubeconfig (two Ready nodes, providerIDs
+`giantswarm-vm://cp-1` and `giantswarm-vm://w-1`), a cross-node request into a CoreDNS
+pod, and clean nodes (`systemctl --failed` empty, forwarding sysctls set, CNI links
+unmanaged by networkd). It prints `cp_ready_seconds=` and `worker_join_seconds=` (87 to
+115 s and 46 to 52 s over two runs on the development host) and takes 2.5 to 3 min; its
+own ceilings add up to less than 10 min, and the whole suite takes about 6 min. It needs `kubectl` on the host and internet access from the VMs (image pulls
+from registry.k8s.io and ghcr.io, the flannel manifest from github.com) and sets
+`VM_MANAGER_BOOT_TIMEOUT` for the server it starts, because `READY=1` waits for the
+kubeadm unit.
 `VM_MANAGER_E2E_IMAGE_DIR` points both at artifacts built elsewhere (default
 `images/build`) and `VM_MANAGER_E2E_KEEP=1` keeps the per-test state directory
 (consoles, TPM state, disks, the server log) after a pass. See `e2e/doc.go` for the

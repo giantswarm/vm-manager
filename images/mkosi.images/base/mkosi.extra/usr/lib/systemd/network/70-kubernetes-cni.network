@@ -1,0 +1,17 @@
+# Links the Kubernetes node stack creates and configures itself: the host end
+# of every pod's veth pair (veth<id> from the reference bridge plugin behind
+# flannel, cali* from Calico, lxc* from Cilium) and dummy devices such as
+# kube-proxy's kube-ipvs0. Both are Type=ether, so without this file
+# 80-vm-manager.network would manage them, and networkd detaches a managed
+# link from a master its .network does not name (systemd.network(5),
+# KeepMaster=): every pod veth left cni0, the bridge went down and no pod had
+# a route to the API server or the kubelet's probes (e2e/kubernetes_cluster_test.go).
+# Bridges, vxlan and ipip devices (cni0, flannel.1, tunl0) carry their own
+# Type= and are not matched by 80-vm-manager.network. systemd-nspawn's ve-*
+# and vb-* veths stay with the 80-container-*.network files systemd ships.
+[Match]
+Driver=veth dummy
+Name=!ve-* vb-*
+
+[Link]
+Unmanaged=yes
