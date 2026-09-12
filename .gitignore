@@ -1,0 +1,13 @@
+/vm-manager
+/bin/
+/dist/
+/images/*/mkosi.output/
+/images/*/mkosi.cache/
+/images/*/mkosi.builddir/
+/images/keys/
+*.raw
+*.efi
+*.qcow2
+*.tpmstate/
+*.efinvramstate
+coverage.out
