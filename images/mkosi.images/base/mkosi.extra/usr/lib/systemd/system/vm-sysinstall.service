@@ -10,6 +10,12 @@ After=systemd-udev-settle.service local-fs.target systemd-tpm2-setup.service sys
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/vm-manager/sysinstall
+# systemd tools running as a service log straight to the journal. The
+# installer system is discarded on reboot and its serial console is the one
+# artifact vm-manager keeps, so systemd-sysinstall, systemd-repart and
+# bootctl (varlink children inheriting the environment) log to stderr and
+# thereby to the console as well.
+Environment=SYSTEMD_LOG_TARGET=console
 ImportCredential=vm.*
 ImportCredential=firstboot.*
 ImportCredential=ssh.*

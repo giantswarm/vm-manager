@@ -12,26 +12,74 @@ creds="${CREDENTIALS_DIRECTORY:?vm-sysinstall: no credentials directory}"
 target="$(tr -d '\n' <"$creds/vm.install-target")"
 [[ -n "$target" ]] || { echo "vm-sysinstall: vm.install-target is empty" >&2; exit 1; }
 
-# The UKI to install is the one we booted from. vm-manager boots the installer
-# with -kernel <uki>, so systemd-stub cannot tell us its path on disk; find it
-# on the booted image's ESP (gpt-auto mounts it on /efi or /boot) and prefer
-# the file matching our IMAGE_ID/IMAGE_VERSION.
+# The UKI to install is the one we booted from: the copy on the ESP of the
+# installer image, preferring the file matching our IMAGE_ID/IMAGE_VERSION.
+#
+# vm-manager boots the installer with -kernel <uki>. systemd-stub then has no
+# partition to record in LoaderDevicePartUUID, and systemd-gpt-auto-generator
+# mounts no ESP at all rather than one it cannot prove it booted from. So the
+# gpt-auto mount points are tried first (a boot through systemd-boot from the
+# image) and otherwise every ESP that is not on the target disk (which may
+# carry the ESP of an earlier install) is mounted read-only and searched.
 # shellcheck source=/dev/null
 . /usr/lib/os-release
 uki=""
-for esp in /efi /boot /boot/efi; do
-        [[ -d "$esp/EFI/Linux" ]] || continue
-        candidates=("$esp/EFI/Linux/${IMAGE_ID}_${IMAGE_VERSION}"*.efi)
-        (( ${#candidates[@]} == 0 )) && candidates=("$esp"/EFI/Linux/*.efi)
-        if (( ${#candidates[@]} == 1 )); then
-                uki="${candidates[0]}"
-                break
-        elif (( ${#candidates[@]} > 1 )); then
-                echo "vm-sysinstall: ambiguous UKIs in $esp/EFI/Linux: ${candidates[*]}" >&2
+
+# find_uki DIR sets uki to the single UKI under DIR/EFI/Linux, fails when
+# there is none, and aborts when the choice is ambiguous.
+find_uki() {
+        local dir="$1" candidates
+        [[ -d "$dir/EFI/Linux" ]] || return 1
+        candidates=("$dir/EFI/Linux/${IMAGE_ID}_${IMAGE_VERSION}"*.efi)
+        (( ${#candidates[@]} == 0 )) && candidates=("$dir"/EFI/Linux/*.efi)
+        if (( ${#candidates[@]} > 1 )); then
+                echo "vm-sysinstall: ambiguous UKIs in $dir/EFI/Linux: ${candidates[*]}" >&2
                 exit 1
         fi
+        (( ${#candidates[@]} == 1 )) || return 1
+        uki="${candidates[0]}"
+}
+
+for esp in /efi /boot /boot/efi; do
+        find_uki "$esp" && break
 done
+
+if [[ -z "$uki" ]]; then
+        esp_type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+        target_disk="$(lsblk -dnpo NAME "$target")"
+        n=0
+        while IFS= read -r line; do
+                [[ "$line" =~ NAME=\"([^\"]*)\".*PARTTYPE=\"([^\"]*)\".*PKNAME=\"([^\"]*)\" ]] || continue
+                dev="${BASH_REMATCH[1]}" parttype="${BASH_REMATCH[2]}" parent="${BASH_REMATCH[3]}"
+                [[ "${parttype,,}" == "$esp_type" && "$parent" != "$target_disk" ]] || continue
+                mnt="/run/vm-sysinstall/esp$((n++))"
+                mkdir -p "$mnt"
+                if ! mount -t vfat -o ro "$dev" "$mnt"; then
+                        echo "vm-sysinstall: cannot mount ESP $dev, skipping" >&2
+                        continue
+                fi
+                echo "vm-sysinstall: searching ESP $dev for the booted UKI"
+                find_uki "$mnt" && break
+                umount "$mnt"
+        done < <(lsblk -npP -o NAME,PARTTYPE,PKNAME)
+fi
 [[ -n "$uki" ]] || { echo "vm-sysinstall: no UKI found on the booted ESP" >&2; exit 1; }
+
+# systemd-sysinstall runs kernel-install and `bootctl install` against the
+# target it has just written and dissected: the read-only erofs root with the
+# target ESP mounted on /boot. Both read install.conf from
+# $KERNEL_INSTALL_CONF_ROOT on this system and bootctl persists the entry
+# token it derived (IMAGE_ID, the image has no machine ID) to the same path
+# inside the target root, which under the default /etc/kernel fails with
+# EROFS; the ESP is the only writable place there. So the conf root points
+# into the ESP, and this system's /boot (empty in the image, nothing mounts
+# it during the installer boot) carries layout=uki on a tmpfs: without it
+# kernel-install assumes Type #1 entries and puts the UKI and its credentials
+# into an entry directory instead of EFI/Linux/, where sysupdate expects them.
+export KERNEL_INSTALL_CONF_ROOT=/boot/kernel-install
+mount -t tmpfs -o mode=0755 tmpfs /boot
+mkdir -p "$KERNEL_INSTALL_CONF_ROOT"
+printf 'layout=uki\n' >"$KERNEL_INSTALL_CONF_ROOT/install.conf"
 
 args=(
         --erase=yes
@@ -39,7 +87,7 @@ args=(
         --welcome=no
         --chrome=no
         --variables=yes
-        --reboot=yes
+        --reboot=no
         --kernel="$uki"
 )
 for cred in "$creds"/firstboot.* "$creds"/ssh.authorized_keys.root "$creds"/system.machine_id; do
@@ -47,4 +95,10 @@ for cred in "$creds"/firstboot.* "$creds"/ssh.authorized_keys.root "$creds"/syst
 done
 
 echo "vm-sysinstall: installing $uki onto $target (${#args[@]} arguments)"
-exec systemd-sysinstall "$target" "${args[@]}"
+systemd-sysinstall "$target" "${args[@]}"
+
+# --reboot=yes asks logind (io.systemd.Shutdown), which cannot run on the
+# read-only installer root; systemctl falls back to PID 1 when logind is
+# absent.
+echo "vm-sysinstall: installation complete, rebooting"
+exec systemctl reboot

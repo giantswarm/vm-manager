@@ -82,16 +82,28 @@ cache, `make images verify` (everything, warm) ~30 s.
 - `/usr/lib/repart.sysinstall.d/`: target layout for `systemd-sysinstall`: ESP 512M,
   root A / verity A / verity-sig A with `CopyBlocks=auto` and labels `%M_%A[...]`
   (`giantswarm-vm-base_0.1.0`, `_verity`, `_verity_sig`), empty B slots labelled `_empty`
-  with the same fixed sizes (2G / 64M / 4M), `var` (ext4, `SizeMinBytes=1G`, rest of the disk).
-- `/usr/lib/repart.d/30-var.conf`: boot-time repart creates var if missing (plain
-  smoke boot of the base image; it is then mounted from the next boot on, since
-  systemd-gpt-auto-generator already ran) or grows it. On the installed disk var exists
-  before the first boot. A drop-in disables `systemd-repart.service` when the
+  with the same fixed sizes (2G / 64M; signature partitions are always 16K, see
+  "Deviations"), `var` (ext4, `SizeMinBytes=1G`, rest of the disk). systemd-sysinstall
+  defers the `_empty` partitions (their space stays reserved, var is partition 8); the
+  installed system's first boot creates them from `/usr/lib/repart.d/`.
+- `/usr/lib/repart.d/`: boot-time repart on the root disk. `10-`/`11-`/`12-` are
+  size-less matchers that claim the existing A slots (repart matches by type in
+  definition order), `20-`/`21-`/`22-` and `30-var.conf` are symlinks to the sysinstall
+  definitions: on the installed disk the first boot creates the `_empty` B slots that
+  systemd-sysinstall deferred; on a plain smoke boot of the base image it creates B slots
+  and var (var is then mounted from the next boot on, since systemd-gpt-auto-generator
+  already ran) and grows var. A drop-in disables `systemd-repart.service` when the
   `vm.install-target` credential is present (installer boot, read-only root disk).
+- `/var` is empty in the image (`RemoveFiles=/var/*`): systemd-gpt-auto-generator mounts
+  the var partition (UUID keyed by the machine ID, found through
+  `/run/systemd/volatile-root` under the overlay) only over an empty directory.
+  `tmpfiles.d/vm-manager.conf` recreates `/var/empty` (sshd), `/var/lock` and
+  `/var/log/journal` on it; the rest comes from systemd's own tmpfiles catalog.
 - `vm-sysinstall.service` (enabled, `ConditionCredential=vm.install-target`,
   `ImportCredential=vm.* firstboot.* ssh.* system.*`) runs `/usr/lib/vm-manager/sysinstall`:
   reads the target from `$CREDENTIALS_DIRECTORY/vm.install-target`, finds the booted
-  UKI on the ESP (`/efi/EFI/Linux/giantswarm-vm-base_<v>.efi`), forwards every
+  UKI on the installer image's ESP (`EFI/Linux/giantswarm-vm-base_<v>.efi`; the ESP is
+  mounted read-only by the script itself, see "Deviations"), forwards every
   `firstboot.*`, `ssh.authorized_keys.root`, `system.machine_id` credential with
   `--load-credential=` and executes
   `systemd-sysinstall $TARGET --erase=yes --confirm=no --welcome=no --chrome=no --variables=yes --reboot=yes --kernel=<uki>`.
@@ -312,11 +324,57 @@ is mounted from the disk. Serial console is `ttyS0`; ssh is reachable on AF_VSOC
   main image (`BaseTrees=%O/base`) rather than two sibling images; this is what lets a
   sysext subimage overlay the identical base tree.
 - The B slots in `repart.sysinstall.d` and the A slots have fixed sizes (2G root, 64M
-  verity, 4M signature) because sysupdate needs pre-existing, equally sized slots;
+  verity; systemd-repart sizes every verity signature partition to its fixed 16K
+  `VERITY_SIG_SIZE` whatever the definition says) because sysupdate needs pre-existing,
+  equally sized slots;
   `CopyBlocks=auto` sizes are not known before install time.
 - `repart.sysinstall.d` assumes that `CopyBlocks=auto` carries the source partition
   UUIDs over to the copies (needed for `roothash=` discovery on the installed disk).
-  The two-phase install is verified by the vm-manager runtime tests, not here.
+  The two-phase install is verified by `make e2e` at the repo root
+  (`e2e/install_boot_test.go`), which also checks these UUIDs, not here.
+- The installer boot runs without the volatile overlay: a drop-in in the initrd
+  (`systemd-volatile-root.service.d/vm-manager.conf`, `ConditionCredential=!vm.install-target`)
+  skips `systemd-volatile-root.service` when the install credential is present.
+  `CopyBlocks=auto` makes systemd-repart resolve the source partitions from the block
+  device behind `/usr`, and under `systemd.volatile=overlay` that is an overlayfs with
+  no block device ("Failed to resolve automatic CopyBlocks= path for partition type
+  root"). On the plain verity root it walks from `/dev/mapper/root` to the data and
+  hash partitions and copies their UUIDs. The installed system keeps the overlay.
+- `/usr/lib/vm-manager/sysinstall` exports `KERNEL_INSTALL_CONF_ROOT=/boot/kernel-install`
+  and puts `layout=uki` there on a tmpfs over the installer's (empty) `/boot`.
+  systemd-sysinstall dissects the freshly written target (erofs root, target ESP on
+  `/boot` because the image's `/boot` and `/efi` are both empty and dissect prefers
+  `/boot`; gpt-auto mounts the ESP on `/efi` at runtime) and runs kernel-install and
+  `bootctl install` against it. Both read `install.conf` from the conf root on the
+  installer side, and bootctl persists the entry token it derived (IMAGE_ID, the image
+  has no machine ID) to the same path inside the target root, which under the default
+  `/etc/kernel` fails with EROFS; the target ESP is the only writable place there.
+  Without `layout=uki` kernel-install assumes Type #1 entries and installs the UKI and
+  its sealed credentials into `<esp>/giantswarm-vm-base/` with a `loader/entries/*.conf`
+  instead of `EFI/Linux/<uki>.efi` plus `<uki>.efi.extra.d/*.cred`, where sysupdate and
+  systemd-stub expect them. Consequence: `<esp>/kernel-install/entry-token` exists on
+  installed disks. To be dropped once bootctl tolerates a read-only root for a token
+  derived from os-release.
+- `systemd-firstboot.service.d/vm-manager.conf` applies the static hostname to the
+  running kernel (`ExecStartPost=` writing `/proc/sys/kernel/hostname`): with the volatile
+  `/etc`, the `/etc/hostname` that systemd-firstboot writes from `firstboot.hostname`
+  never reaches PID 1, which read it before firstboot ran, and the file is gone again by
+  the next boot; without the drop-in the hostname stays `DEFAULT_HOSTNAME` (`archlinux`)
+  unless a separate `system.hostname` credential is passed on every boot.
+- `/usr/lib/vm-manager/sysinstall` passes `--reboot=no` and reboots with
+  `systemctl reboot` itself: sysinstall's own reboot asks logind
+  (`io.systemd.Shutdown`), which cannot start on the read-only installer root
+  (`ReadWritePaths=/etc`, `StateDirectory=` under `/var`); systemctl falls back to PID 1.
+  The same read-only root makes `sshd`, `systemd-timesyncd`, `systemd-tpm2-setup` and
+  `systemd-networkd-persistent-storage` fail during the installer boot, which is
+  harmless there (credential sealing uses the SRK from the initrd's early TPM setup).
+- `/usr/lib/vm-manager/sysinstall` mounts the installer image's ESP itself instead of
+  relying on `/efi` from systemd-gpt-auto-generator: with `-kernel <uki>` (direct boot)
+  systemd-stub has no partition to record in `LoaderDevicePartUUID`, and gpt-auto then
+  mounts no ESP rather than one it cannot prove it booted from. The script tries
+  `/efi`, `/boot`, `/boot/efi` first (a boot through systemd-boot from the image) and
+  otherwise mounts every ESP that is not on the target disk read-only under
+  `/run/vm-sysinstall/` and searches it for `EFI/Linux/<IMAGE_ID>_<IMAGE_VERSION>*.efi`.
 
 Kubernetes sysext:
 
