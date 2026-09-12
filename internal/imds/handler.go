@@ -25,8 +25,13 @@ const (
 	// maxJSONBody bounds /attest/quote (event logs) and /report uploads.
 	maxJSONBody = 8 << 20
 
-	// userDataGatedBody is the one-line 403 reason while /user-data is locked.
+	// userDataGatedBody is the one-line reason sent with the 503 while
+	// /user-data is locked. Ignition discards it; it is for people with curl.
 	userDataGatedBody = "user-data is released after the initrd-stage attestation verifies"
+	// userDataRetryAfter is the Retry-After header of that 503, in seconds.
+	// Ignition uses its own backoff (200 ms doubling to 5 s); this is for
+	// clients that honour the header.
+	userDataRetryAfter = "2"
 )
 
 // Deps is what Handler serves from. Resolver, Attestor, Reports and Artifacts
@@ -186,12 +191,22 @@ func (s *server) metadata(w http.ResponseWriter, r *http.Request, inst Instance)
 	writeText(w, http.StatusOK, v)
 }
 
+// userData serves Ignition's config URL (ignition.config.url on the kernel
+// command line; the key is not in the hwdb, so systemd-imds --import never
+// asks for it). The status codes follow what Ignition v2.27.0 does with them
+// (internal/resource/http.go shouldRetryHttp, internal/resource/url.go
+// fetchFromHTTP, config/util/config.go GetConfigVersion): every status >= 500
+// is retried with 200 ms..5 s backoff until --fetch-timeout, so a gated
+// /user-data is 503; a 204 (empty body) parses as ErrEmpty, "no config", and
+// the stages run with an empty config, whereas 404 (ErrNotFound) and 403
+// (ErrFailed) fail the fetch stage and drop the boot into emergency.target.
 func (s *server) userData(w http.ResponseWriter, _ *http.Request, inst Instance) {
 	switch {
 	case len(inst.UserData) == 0:
-		notFound(w)
+		noContent(w)
 	case !inst.UserDataReleased:
-		writeText(w, http.StatusForbidden, userDataGatedBody)
+		w.Header().Set("Retry-After", userDataRetryAfter)
+		writeText(w, http.StatusServiceUnavailable, userDataGatedBody)
 	default:
 		writeText(w, http.StatusOK, string(inst.UserData))
 	}
@@ -315,13 +330,21 @@ func statusFor(err error) int {
 // a response with status >= 300 delivers body bytes, and that curl write
 // error wins over its own 404 handling, so the guest sees a generic
 // io.systemd.System error instead of io.systemd.InstanceMetadata.KeyNotFound.
-// Only the latter lets `systemd-imds --import` treat an absent /user-data as
-// "nothing to import"; with a body systemd-imds-import.service fails and the
-// guest boots degraded.
+// Only the latter lets `systemd-imds --import` skip an unset hwdb key (an
+// empty /zone, say) as "nothing to import"; with a body
+// systemd-imds-import.service fails and the guest boots degraded.
 func notFound(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", textPlain)
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusNotFound)
+}
+
+// noContent answers 204: the key exists, this VM has nothing for it. Used for
+// /user-data, where Ignition needs a success status with an empty body to
+// proceed without a config (see userData).
+func noContent(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", textPlain)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // writeText answers with a plain-text body exactly as given: no trailing

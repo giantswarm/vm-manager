@@ -23,10 +23,10 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.images/base/` | the OS tree (`Format=directory`, `Output=base`): package list, `mkosi.extra/` content (units, presets, repart and sysupdate definitions, hwdb), `mkosi.postinst` (hwdb compile, PGP pubring, mask). The main image and the sysext consume it via `BaseTrees=%O/base` |
 | `mkosi.images/kubernetes/` | the Kubernetes sysext (`Format=sysext`, `Overlay=yes`): package list, `mkosi.version` (= Kubernetes version), `mkosi.extra/` (drop-ins, containerd.toml, sysctl, tmpfiles, preset), `mkosi.postinst` (version guard, drops `/opt`, seeds extension-release) |
 | `mkosi.repart/` | partition definitions of the *base image*: ESP 256M, erofs root (zstd), verity hash, verity signature |
-| `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in |
+| `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp` |
-| `scripts/` | `gen-keys`, `hwdb-update` (mkosi postinst), `publish-sysupdate <component>`, `verify` (base), `verify-kubernetes`, `smoke-boot` |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>`, `verify` (base), `verify-kubernetes`, `smoke-boot` |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -51,6 +51,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
 | `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `vm-manager image golden` adds `golden: {sha256: {"0": hex, ..., "7": hex, "13": hex}}` (PCRs 0-7 and 13 of a known-good boot), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]` and PCRs 0-7 (and 13 at the ready stage) with `golden` |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
+| `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
 `make kubernetes` (or `make images`) adds, via `scripts/publish-sysupdate kubernetes`:
 
@@ -64,8 +65,8 @@ Root and verity partition UUIDs are derived from the root hash (first/last 128 b
 which is how `roothash=` locates them; that is why the sysupdate file names carry
 the partition UUID (`@u`).
 
-Sizes for 0.1.0: `.raw` 646 MB (472 MB used), `.efi` 90 MB (kernel 17 MB, initrd 73 MB
-of which 61 MB is mkosi's default initrd), root erofs (zstd) 400 MB, verity 3.2 MB,
+Sizes for 0.1.0: `.raw` 646 MB (472 MB used), `.efi` 97 MB (kernel 17 MB, initrd 80 MB
+of which 61 MB is mkosi's default initrd and 6.9 MB Ignition), root erofs (zstd) 400 MB, verity 3.2 MB,
 signature 1.9 KB. A warm `make base` (nothing changed) takes ~10 s, a cold one with
 package downloads ~3 min; `make verify-base` ~5 s; `make smoke-boot` ~30 s wall, the guest
 reaches multi-user.target after ~7 s. The kubernetes sysext for 1.36.4 is 206 MB
@@ -77,8 +78,11 @@ cache, `make images verify` (everything, warm) ~30 s.
 
 - `/usr/lib/udev/hwdb.d/45-imds-giantswarm.hwdb`: `dmi:*:svnGiantSwarm:*` ->
   `IMDS_VENDOR=giantswarm`, `IMDS_DATA_URL=http://169.254.169.254/giantswarm/v1`,
-  `IMDS_ADDRESS_IPV4`, `IMDS_KEY_{HOSTNAME,REGION,ZONE,SSH_KEY,USERDATA}`. Compiled
+  `IMDS_ADDRESS_IPV4`, `IMDS_KEY_{HOSTNAME,REGION,ZONE,SSH_KEY}`. Compiled
   into `hwdb.bin` of the root file system and of the initrd (`scripts/hwdb-update`).
+  `/user-data` is deliberately not an hwdb key: Ignition fetches it through
+  `ignition.config.url`, and `systemd-imds --import` must not see the 503 the IMDS answers
+  while the key is gated by attestation.
 - `/usr/lib/repart.sysinstall.d/`: target layout for `systemd-sysinstall`: ESP 512M,
   root A / verity A / verity-sig A with `CopyBlocks=auto` and labels `%M_%A[...]`
   (`giantswarm-vm-base_0.1.0`, `_verity`, `_verity_sig`), empty B slots labelled `_empty`
@@ -126,6 +130,71 @@ cache, `make images verify` (everything, warm) ~30 s.
 - `systemd-modules-load.service.d/` and `systemd-sysctl.service.d/vm-manager.conf`:
   `After=systemd-sysext.service`, so `modules-load.d/` and `sysctl.d/` entries of a
   merged extension are applied (upstream has no such ordering).
+
+## Ignition
+
+Ignition v2.27.0 runs in the initrd on the first installed boot and applies the
+`user_data` of `create_vm` (CAPI's bootstrap Secret with `format: ignition`: files and
+systemd units) to the real root before the switch root. Attestation is not Ignition's
+job; it only sees the IMDS answer.
+
+Build: Arch has no Ignition package, so `make ignition` (a prerequisite of `base` and
+`images`) runs `scripts/build-ignition build/ignition v2.27.0`: a shallow clone of the
+upstream tag, `go build` of `./internal` with the vendored modules,
+`-X .../internal/version.Raw=<tag>` and `-X .../internal/distro.selinuxRelabel=false`
+(the upstream default assumes an SELinux distro and makes the files stage abort on a root
+without `/etc/selinux/config`), cached as `build/ignition/tree/usr/bin/ignition`
+with a `stamp-<tag>` (bump `IGNITION_VERSION` in the Makefile to rebuild). The binary is
+linked dynamically against glibc, `libblkid` and `libresolv`: `internal/as_user` and the
+blkid helper are cgo-only and Arch ships no static libblkid; the initrd is built from the
+same Arch packages (systemd depends on glibc and util-linux-libs) and `scripts/verify`
+checks every `NEEDED` library against the initrd listing. It reaches the initrd through
+`ExtraTrees=../build/ignition/tree:/` in `mkosi.initrd.conf/mkosi.conf` and adds 6.9 MB
+to the (zstd) initrd, 23 MB uncompressed.
+
+Units (`mkosi.initrd.conf/mkosi.extra/usr/lib/systemd/system/`), ported from upstream's
+`dracut/30ignition/` for a systemd initrd without dracut:
+
+| Unit | Ordering | Does |
+|---|---|---|
+| `ignition-complete.target` | `Before=initrd.target`, required by it (`initrd.target.requires/`); `Conflicts=initrd-switch-root.target` | synchronization point; requires the four stages below |
+| `ignition-fetch.service` | `After=basic.target network-online.target systemd-imds-early-network.service systemd-imds-import.service`, `Wants=network-online.target`, `Before=ignition-disks.service` | `--stage=fetch`: GETs `ignition.config.url`, caches `/run/ignition.json` |
+| `ignition-disks.service` | `After=ignition-fetch.service systemd-udevd.service`, `Before=ignition-mount.service` | `--stage=disks`: partitions/file systems of the config (none for CAPI) |
+| `ignition-mount.service` | `Requires=initrd-root-fs.target`, `After=initrd-root-fs.target systemd-volatile-root.service network.target`, `Before=ignition-files.service initrd-switch-root.target`, `ExecStop=--stage=umount` | `--stage=mount`: mounts the config's file systems under `/sysroot` |
+| `ignition-files.service` | `After=ignition-mount.service initrd-root-fs.target systemd-volatile-root.service sysroot-var.mount`, `Before=initrd-parse-etc.service` | `--stage=files --root=/sysroot`: files, units, presets |
+
+All four services carry `ConditionKernelCommandLine=ignition.firstboot` (the target does
+not: a condition on the target would still start its dependencies), pass
+`--platform=metal` and `--log-to-stdout` with `StandardOutput=journal+console`, so the
+attempts show up in `get_vm_console` and `journalctl -u 'ignition-*'`, and have
+`OnFailure=emergency.target` like the rest of the initrd. Not ported: `fetch-offline`
+(this initrd always has the network up for the IMDS), `kargs`, the LUKS/cex bits and the
+generator (`/run/ignition.env` only carried the platform id). Two deliberate ordering
+differences: `ignition-disks.service` is not `Before=sysroot.mount` (the verity root cannot
+be reformatted, and that ordering would serialise every boot's root mount behind DHCP,
+because ordering also applies to condition-skipped jobs), and there is no
+`ignition-remount-sysroot.service` (`/sysroot` is writable through the overlay).
+
+Command line: the UKI carries `ignition.platform.id=metal
+ignition.config.url=http://169.254.169.254/giantswarm/v1/user-data`. `ignition.firstboot`
+is not in the image: vm-manager passes it through the stub's
+`io.systemd.stub.kernel-cmdline-extra` SMBIOS string on the first installed boot only
+(`internal/vm/lifecycle.go`), so every later boot reaches `ignition-complete.target` with
+the stages skipped and `/run/ignition.json` absent. `systemd-imds --import` no longer
+asks for `/user-data` (the key left the hwdb record).
+
+IMDS status codes (see `internal/imds` and docs/design.md): 200 with the raw Ignition JSON
+once released, 503 + `Retry-After` while gated by attestation (Ignition retries every
+status >= 500 with 200 ms..5 s backoff for `--fetch-timeout`, 2 min; then the fetch fails
+and the boot lands in `emergency.target`), 204 when the VM has no user-data (an empty body
+is "no config", the stages finish with nothing to do). The initrd stage of the
+attestation agent must be ordered `Before=ignition-fetch.service`: its verified quote is
+what turns the 503 into 200.
+
+Caveat: the initrd mounts no var partition under `/sysroot`, so user-data must not write
+below `/var` yet (the file would land in the overlay's tmpfs upper and make gpt-auto skip
+the var partition, "already populated"); `ignition-files.service` is already ordered after
+`sysroot-var.mount` for when the persistent-`/etc` work mounts it.
 
 ## Kubernetes sysext
 
@@ -223,7 +292,11 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    `systemd-sysinstall.service` masked, `systemd-sysupdate.timer` off, the rest enabled;
    `/etc/systemd/import-pubring.pgp` matches the dev key.
 6. Initrd listing: networkd, imdsd, `systemd-imds` and generator, the imds units, the
-   repart drop-in, and the giantswarm record in the initrd's `hwdb.bin`.
+   repart drop-in, and the giantswarm record in the initrd's `hwdb.bin` (without
+   `IMDS_KEY_USERDATA`); `usr/bin/ignition` with the four stage units, their
+   `ignition-complete.target` and `initrd.target` wiring, every `NEEDED` library of the
+   binary, and `ignition.config.url=` / `ignition.platform.id=metal` on the UKI cmdline
+   (and no `ignition.firstboot`).
 7. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 8. Writes `build/policy.json`.
 
@@ -289,7 +362,10 @@ In the initrd, `systemd-imds-early-network.service` configures networkd for
 169.254.169.254, `systemd-imds-import.service` turns `/hostname` and `/public-keys/0`
 into `firstboot.hostname` and `ssh.authorized_keys.root` credentials; the verity root is
 set up from `roothash=`, `/` becomes a tmpfs overlay (`systemd.volatile=overlay`), var
-is mounted from the disk. Serial console is `ttyS0`; ssh is reachable on AF_VSOCK port 22.
+is mounted from the disk. On the first installed boot vm-manager adds `ignition.firstboot`
+to the command line and the `ignition-*` units fetch `/user-data` from the IMDS and apply
+it to `/sysroot` before the switch root, see [Ignition](#ignition). Serial console is
+`ttyS0`; ssh is reachable on AF_VSOCK port 22.
 
 ## Deviations from docs/design.md and the systemd/mkosi man pages
 

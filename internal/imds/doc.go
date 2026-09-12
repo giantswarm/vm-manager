@@ -6,9 +6,9 @@
 //
 // The guest resolves a key as plain HTTP GET DataURL + key; every body is
 // text/plain without a trailing newline unless the value carries one. 404 is
-// what systemd-imdsd maps to KeyNotFound, 403 is a key the caller is not
-// (yet) allowed to read (systemd-imdsd reports it as NotAvailable), 405 a
-// wrong method. No token flow is configured, so
+// what systemd-imdsd maps to KeyNotFound, 405 a wrong method; /user-data has
+// its own codes (below) because its client is Ignition, not systemd-imdsd.
+// No token flow is configured, so
 // there is no IMDS_TOKEN_URL and no header the guest has to send. The client
 // address on the in-stack listener is the only identity: a request from an
 // address the Resolver does not map to a VM is answered 403 for every key,
@@ -34,8 +34,11 @@
 // Attestor decides whether a quote verifies; ReleasesUserData is the one rule
 // that turns a verified quote into a release: only the initrd stage unlocks
 // user-data, the ready stage is recorded for get_vm_attestation. Until then
-// /user-data answers 403 with a one-line reason so the guest can tell "not
-// yet" from "none" (404).
+// /user-data answers 503 with Retry-After and a one-line reason, which
+// Ignition (the only client of this key; it is not an hwdb key) retries with
+// backoff until its fetch timeout; a VM without user-data gets 204, which
+// Ignition takes as "no config" and finishes its stages with nothing to do.
+// 404 and 403 would both fail Ignition's fetch stage, see userData.
 //
 // # Version selection for sysupdate
 //

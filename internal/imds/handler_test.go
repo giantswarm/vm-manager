@@ -240,16 +240,19 @@ func TestHandlerUserDataGating(t *testing.T) {
 		inst := testInstance()
 		inst.UserData = nil
 		rec := newFixture(t, inst).do(t, http.MethodGet, "/user-data", "", "")
-		assert.Equal(t, http.StatusNotFound, rec.Code)
-		// `systemd-imds --import` tolerates KeyNotFound for user-data, which
-		// systemd-imdsd only reports for a bodyless 404.
-		assert.Empty(t, rec.Body.String(), "a 404 must have no body")
+		// Ignition accepts 204 and parses the empty body as "no config"
+		// (ErrEmpty); a 404 would fail its fetch stage.
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		assert.Empty(t, rec.Body.String(), "a 204 has no body")
 	})
 
 	t.Run("gated until released", func(t *testing.T) {
 		f := newFixture(t, testInstance())
 		rec := f.do(t, http.MethodGet, "/user-data", "", "")
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		// Ignition retries every status >= 500 with backoff; 403 or 404
+		// would end its fetch stage with an error.
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, userDataRetryAfter, rec.Header().Get("Retry-After"))
 		assert.Equal(t, userDataGatedBody, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "\n")
 

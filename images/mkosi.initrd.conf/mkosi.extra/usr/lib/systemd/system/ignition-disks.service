@@ -1,0 +1,28 @@
+# Ported from Ignition's dracut/30ignition/ignition-disks.service. Upstream
+# orders this stage Before=sysroot.mount so a config can wipe the root file
+# system; here the root is a read-only verity image the stage cannot touch, and
+# that ordering would serialise the root mount behind DHCP and the fetch on
+# every boot (ordering applies to condition-skipped jobs too). So disks only
+# needs udev, for the partition changes it makes on other disks.
+[Unit]
+Description=Ignition (disks)
+Documentation=https://coreos.github.io/ignition/
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+ConditionKernelCommandLine=ignition.firstboot
+Before=ignition-complete.target
+
+After=ignition-fetch.service
+Before=ignition-mount.service
+
+Requires=systemd-udevd.service
+After=systemd-udevd.service
+
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+ExecStart=/usr/bin/ignition --root=/sysroot --platform=metal --stage=disks --log-to-stdout

@@ -1,0 +1,41 @@
+# Ported from Ignition's dracut/30ignition/ignition-fetch.service for the
+# systemd (mkosi) initrd. Stage order: fetch -> disks -> mount -> files, all
+# required by ignition-complete.target, which initrd.target requires. The
+# services (not the target) carry ConditionKernelCommandLine=: a condition on
+# the target would still start its dependencies. Every boot after the first
+# lacks ignition.firstboot, so the four stages are skipped.
+#
+# fetch reads ignition.config.url from the kernel command line (the IMDS
+# /user-data key) and caches the parsed config in /run/ignition.json for the
+# later stages. The IMDS answers 503 with Retry-After while user-data is gated
+# by attestation and 204 when the VM has none; Ignition retries every status
+# >= 500 with 200 ms..5 s backoff for --fetch-timeout (2 min) and treats an
+# empty body as "no config". No fetch-offline stage: this initrd always has the
+# network up (systemd-imds-early-network.service), so neednet is moot.
+#
+# The attestation agent's initrd stage (vm-agent-attest.service) must be
+# ordered Before=ignition-fetch.service: the quote it posts is what releases
+# /user-data.
+[Unit]
+Description=Ignition (fetch)
+Documentation=https://coreos.github.io/ignition/
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+ConditionKernelCommandLine=ignition.firstboot
+After=basic.target
+Before=ignition-complete.target
+Before=ignition-disks.service
+
+Wants=network-online.target
+After=network-online.target systemd-imds-early-network.service systemd-imds-import.service
+
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Log lines reach the journal (attributed to this unit) and the serial
+# console, so get_vm_console shows fetch attempts while user-data is gated.
+StandardOutput=journal+console
+ExecStart=/usr/bin/ignition --root=/sysroot --platform=metal --stage=fetch --log-to-stdout

@@ -4,6 +4,7 @@
 #   make                                     keys, all images, verify
 #   make keys base verify-base smoke-boot    base-only cycle
 #   make kubernetes verify-kubernetes        sysext only (base tree is reused)
+#   make ignition                            Ignition binary for the initrd (cached)
 #   make PROFILE=debug base smoke-boot       root autologin, empty root password
 #   make clean                               drop build/ (keys/ are kept)
 
@@ -17,10 +18,16 @@ KUBERNETES_VERSION := $(strip $(shell cat mkosi.images/kubernetes/mkosi.version)
 BUILD    := build
 KEYS     := keys
 SCRIPTS  := scripts
+# Ignition for the initrd, built from the upstream tag (Arch has no package)
+# into $(IGNITION_DIR)/tree and copied in through ExtraTrees= of
+# mkosi.initrd.conf/mkosi.conf. See scripts/build-ignition.
+IGNITION_VERSION := v2.27.0
+IGNITION_DIR     := $(BUILD)/ignition
+IGNITION_STAMP   := $(IGNITION_DIR)/stamp-$(IGNITION_VERSION)
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys images base kubernetes verify verify-base verify-kubernetes smoke-boot clean summary
+.PHONY: all keys ignition images base kubernetes verify verify-base verify-kubernetes smoke-boot clean summary
 
 all: keys images verify
 
@@ -29,16 +36,25 @@ keys: $(KEYS)/import-pubring.pgp
 $(KEYS)/import-pubring.pgp: $(SCRIPTS)/gen-keys
 	$(SCRIPTS)/gen-keys $(KEYS)
 
+# The stamp carries the version: bumping IGNITION_VERSION rebuilds, a clean
+# checkout builds once (git clone of the tag, go build, ~40 s).
+ignition: $(IGNITION_STAMP)
+
+$(IGNITION_STAMP): $(SCRIPTS)/build-ignition
+	$(SCRIPTS)/build-ignition $(IGNITION_DIR) $(IGNITION_VERSION)
+	rm -f $(IGNITION_DIR)/stamp-*
+	touch $@
+
 # One mkosi run builds the base tree, the kubernetes sysext (--dependency=
 # appends to Dependencies=base of mkosi.conf) and the disk image, then lays out
 # both sysupdate directories (renamed artifacts, SHA256SUMS, SHA256SUMS.gpg).
-images: keys
+images: keys ignition
 	$(MKOSI) $(MKOSI_ARGS) --force --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
 
 # Base tree and disk image only.
-base: keys
+base: keys ignition
 	$(MKOSI) $(MKOSI_ARGS) --force build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 

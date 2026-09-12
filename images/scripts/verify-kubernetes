@@ -204,8 +204,12 @@ if tgt["Path"] != "/var/lib/extensions":
     sys.exit(f"verify-kubernetes: FAIL: transfer Target Path={tgt['Path']}, systemd-sysext looks in /var/lib/extensions")
 print(f"verify-kubernetes: ok: transfer {os.path.basename(transfer)}: {src['Path']}{fname} -> {tgt['Path']}/{tgt['MatchPattern'].replace('@v', version)} (Verify=yes)")
 EOF
-GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$keys/import-pubring.pgp" \
+# gpg rewrites a --keyring file it opens (see scripts/verify); use a copy.
+pubring="$(mktemp)"
+cp "$keys/import-pubring.pgp" "$pubring"
+GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$pubring" \
         --verify "$sysupdate/SHA256SUMS.gpg" "$sysupdate/SHA256SUMS" 2>/dev/null || fail "SHA256SUMS.gpg does not verify"
+rm -f "$pubring" "$pubring~"
 (cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
 ok "sysupdate/kubernetes: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifact(s)"
 

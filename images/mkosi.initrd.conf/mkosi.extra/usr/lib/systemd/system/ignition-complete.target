@@ -1,0 +1,15 @@
+# Ported from Ignition's dracut/30ignition/ignition-complete.target. Required
+# by initrd.target (initrd.target.requires/) and requiring the four stage
+# services (ignition-complete.target.requires/); upstream wires the same with
+# its generator. It is reached on every boot; on boots without
+# ignition.firstboot the stages are condition-skipped. Units that must run
+# only on the first installed boot can order themselves after it.
+[Unit]
+Description=Ignition Complete
+Documentation=https://coreos.github.io/ignition/
+ConditionPathExists=/etc/initrd-release
+Before=initrd.target
+
+# Stop every stage (the mount stage's ExecStop= unmounts) before the switch root.
+Conflicts=initrd-switch-root.target umount.target
+Conflicts=emergency.service emergency.target

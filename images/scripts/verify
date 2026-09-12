@@ -132,12 +132,39 @@ for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-imdsd usr/lib/
         /usr/bin/grep -qx "$f" "$tmp/initrd.lst" || fail "initrd lacks $f"
 done
 mkdir -p "$tmp/initrd"
-zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/udev/hwdb.bin 2>/dev/null) || true
-systemd-hwdb --root="$tmp/initrd" query "$modalias" | /usr/bin/grep -qx 'IMDS_VENDOR=giantswarm' || fail "initrd hwdb lacks the giantswarm record"
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/udev/hwdb.bin usr/bin/ignition 2>/dev/null) || true
+systemd-hwdb --root="$tmp/initrd" query "$modalias" >| "$tmp/initrd-hwdb.txt"
+/usr/bin/grep -qx 'IMDS_VENDOR=giantswarm' "$tmp/initrd-hwdb.txt" || fail "initrd hwdb lacks the giantswarm record"
+! /usr/bin/grep -q 'IMDS_KEY_USERDATA' "$tmp/initrd-hwdb.txt" || fail "initrd hwdb still names /user-data (systemd-imds --import would trip over Ignition's 503)"
 ok "initrd: networkd, imdsd, imds generator and giantswarm hwdb record present"
 
-# 7. sysupdate directory: manifest signature and checksums.
-GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$keys/import-pubring.pgp" \
+# 6b. Initrd: Ignition binary (make ignition), the ported stage units, their
+# wiring into initrd.target, and every shared library the binary needs
+# (scripts/build-ignition links dynamically; the initrd is built from the same
+# Arch packages).
+for f in usr/bin/ignition usr/lib/systemd/system/ignition-complete.target \
+         usr/lib/systemd/system/initrd.target.requires/ignition-complete.target; do
+        /usr/bin/grep -qx "$f" "$tmp/initrd.lst" || fail "initrd lacks $f"
+done
+for stage in fetch disks mount files; do
+        /usr/bin/grep -qx "usr/lib/systemd/system/ignition-$stage.service" "$tmp/initrd.lst" || fail "initrd lacks ignition-$stage.service"
+        /usr/bin/grep -qx "usr/lib/systemd/system/ignition-complete.target.requires/ignition-$stage.service" "$tmp/initrd.lst" || fail "ignition-$stage.service is not required by ignition-complete.target"
+done
+[[ -x "$tmp/initrd/usr/bin/ignition" ]] || fail "could not extract usr/bin/ignition from the initrd"
+for lib in $(readelf -d "$tmp/initrd/usr/bin/ignition" | awk '/NEEDED/ {gsub(/[][]/, "", $5); print $5}'); do
+        /usr/bin/grep -qx "usr/lib/$lib" "$tmp/initrd.lst" || fail "initrd lacks $lib, which usr/bin/ignition needs"
+done
+/usr/bin/grep -q 'ignition.config.url=http://169.254.169.254/giantswarm/v1/user-data' "$tmp/ukify.txt" || fail "UKI cmdline lacks ignition.config.url"
+/usr/bin/grep -q 'ignition.platform.id=metal' "$tmp/ukify.txt" || fail "UKI cmdline lacks ignition.platform.id=metal"
+! /usr/bin/grep -q 'ignition.firstboot' "$tmp/ukify.txt" || fail "UKI cmdline must not carry ignition.firstboot (vm-manager adds it on the first installed boot only)"
+ok "initrd: ignition $("$tmp/initrd/usr/bin/ignition" --version 2>/dev/null | awk '{print $2}') with fetch/disks/mount/files units, libraries and cmdline present"
+
+# 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
+#    --keyring file it opens (leaving import-pubring.pgp~ behind), which would
+#    make the next build bake a pubring that differs from the one in this
+#    image; verify against a copy.
+cp "$keys/import-pubring.pgp" "$tmp/import-pubring.pgp"
+GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$tmp/import-pubring.pgp" \
         --verify "$sysupdate/SHA256SUMS.gpg" "$sysupdate/SHA256SUMS" 2>/dev/null || fail "SHA256SUMS.gpg does not verify"
 (cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
 ok "sysupdate/base: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifacts"

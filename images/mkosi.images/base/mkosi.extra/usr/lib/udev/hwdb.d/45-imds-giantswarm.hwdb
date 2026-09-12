@@ -12,4 +12,3 @@ dmi:*:svnGiantSwarm:*
  IMDS_KEY_REGION=/region
  IMDS_KEY_ZONE=/zone
  IMDS_KEY_SSH_KEY=/public-keys/0
- IMDS_KEY_USERDATA=/user-data
