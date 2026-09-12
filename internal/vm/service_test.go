@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -155,6 +156,43 @@ func (h *harness) lan() *fakeNetwork {
 	n, err := h.nets.Get(testNetwork)
 	require.NoError(h.t, err)
 	return n.(*fakeNetwork)
+}
+
+func (h *harness) entry(id string) *entry {
+	h.t.Helper()
+	e, err := h.svc.entry(id)
+	require.NoError(h.t, err)
+	return e
+}
+
+// closeAsync starts Close and returns once it has begun (the closing flag is
+// set); the result arrives on the returned channel.
+func (h *harness) closeAsync() <-chan error {
+	h.t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- h.svc.Close(h.ctx) }()
+	require.Eventually(h.t, func() bool {
+		h.svc.mu.Lock()
+		defer h.svc.mu.Unlock()
+		return h.svc.closing
+	}, waitAtMost, waitEvery, "Close did not begin")
+	return done
+}
+
+// awaitClose fails when Close does not return in time. Close waits for every
+// supervisor, so its return proves no goroutine is left behind.
+func (h *harness) awaitClose(done <-chan error) {
+	h.t.Helper()
+	select {
+	case err := <-done:
+		require.NoError(h.t, err)
+	case <-time.After(waitAtMost):
+		// End whatever escaped so the Cleanup Close cannot hang as well.
+		for i := 0; i < h.rt.count(); i++ {
+			h.rt.at(i).Exit(0)
+		}
+		h.t.Fatalf("Close did not return within %s: a process escaped it", waitAtMost)
+	}
 }
 
 func TestCreateValidation(t *testing.T) {
@@ -389,6 +427,84 @@ func TestInstallTimeoutKillsAndKeepsConsole(t *testing.T) {
 	require.ErrorIs(t, err, apierr.ErrConflict, "never installed")
 	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
 	assert.Empty(t, h.store.names())
+}
+
+// TestCloseDuringInstallHandoff drives Close into the install-to-boot
+// handoff. Once Close has begun, phase B is not started (pending handoff) or
+// is stopped by Close like any other process (start already in flight), and
+// Close returns.
+func TestCloseDuringInstallHandoff(t *testing.T) {
+	t.Run("handoff pending", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("pending")
+		inst := h.waitInstances(1)
+		// Hold the handoff's lock: the installer's exit settles (installed,
+		// no process) but boot() cannot start phase B before we let go.
+		e := h.entry(v.ID)
+		e.opMu.Lock()
+		inst.Exit(0)
+		require.Eventually(t, func() bool {
+			v, err := h.svc.Get(v.ID)
+			return err == nil && v.InstalledAt != nil
+		}, waitAtMost, waitEvery, "installer exit not settled")
+		assert.Zero(t, h.tpm.running())
+
+		done := h.closeAsync()
+		e.opMu.Unlock()
+		h.awaitClose(done)
+
+		assert.Equal(t, 1, h.rt.count(), "phase B was not started once Close had begun")
+		v, err := h.svc.Get(v.ID)
+		require.NoError(t, err)
+		assert.Equal(t, StateStopped, v.State)
+		assert.NotNil(t, v.InstalledAt, "the record stays startable")
+		assert.Contains(t, v.LastError, "shut down before the installed boot started")
+		_, err = h.svc.Start(h.ctx, v.ID)
+		require.ErrorIs(t, err, apierr.ErrConflict, "no start after Close")
+		_, err = h.svc.Create(h.ctx, h.spec("late"))
+		require.ErrorIs(t, err, apierr.ErrConflict, "no create after Close")
+	})
+
+	t.Run("handoff in flight", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("inflight")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		h.rt.setHold(func(spec qemu.Spec) {
+			if spec.Phase == qemu.PhaseBoot {
+				once.Do(func() { close(entered) })
+				<-release
+			}
+		})
+		h.waitInstances(1).Exit(0)
+		select {
+		case <-entered:
+		case <-time.After(waitAtMost):
+			t.Fatal("phase B start not reached")
+		}
+
+		done := h.closeAsync()
+		close(release)
+		h.awaitClose(done)
+
+		assert.Equal(t, 2, h.rt.count(), "the start in flight completed")
+		ev := h.ev.list()
+		assert.Greater(t, lastIndex(ev, "qemu.stop"), lastIndex(ev, "qemu.start:boot"), "Close stopped the phase B it let start")
+		v, err := h.svc.Get(v.ID)
+		require.NoError(t, err)
+		assert.Equal(t, StateStopped, v.State)
+		assert.Zero(t, h.tpm.running())
+		assert.False(t, h.notify.subscribed(v.CID))
+	})
+}
+
+func lastIndex(list []string, s string) int {
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i] == s {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestQEMUStartFailureLeavesNothing(t *testing.T) {

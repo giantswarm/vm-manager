@@ -157,11 +157,14 @@ type Service struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mu guards vms, every entry's record, imds and changed.
+	// mu guards vms, every entry's record, imds, changed and closing.
 	mu      sync.Mutex
 	vms     map[string]*entry
 	imds    map[string]*imdsServer
 	changed chan struct{}
+	// closing is set once Close has begun; no process is started after
+	// that (allocate, Start and the install-to-boot handoff check it).
+	closing bool
 }
 
 // entry is a VM in memory: the persisted record plus the live handles.
@@ -285,9 +288,14 @@ func (s *Service) loadEntry(id string) (*entry, error) {
 }
 
 // Close stops every running VM gracefully, then the IMDS servers. VMs are
-// not left running because nothing could reattach to them afterwards.
+// not left running because nothing could reattach to them afterwards. Once
+// Close has begun no process is started any more: each VM is stopped under
+// its opMu, so a start in flight (Create, Start, the install-to-boot
+// handoff) completes first and is what gets stopped, and a start that has
+// not begun sees the closing flag and refuses.
 func (s *Service) Close(ctx context.Context) error {
 	s.mu.Lock()
+	s.closing = true
 	entries := make([]*entry, 0, len(s.vms))
 	for _, e := range s.vms {
 		entries = append(entries, e)
@@ -299,7 +307,10 @@ func (s *Service) Close(ctx context.Context) error {
 		wg.Add(1)
 		go func(e *entry) {
 			defer wg.Done()
-			if _, err := s.Stop(ctx, e.rec.ID); err != nil && !errors.Is(err, apierr.ErrConflict) {
+			e.opMu.Lock()
+			defer e.opMu.Unlock()
+			_, err := s.Stop(ctx, e.rec.ID)
+			if err != nil && !errors.Is(err, apierr.ErrConflict) && !errors.Is(err, apierr.ErrNotFound) {
 				s.log.Warn("stopping vm on shutdown", "id", e.rec.ID, "err", err)
 			}
 		}(e)

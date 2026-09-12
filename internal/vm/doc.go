@@ -24,6 +24,7 @@
 //	creating    -> (gone)       Create failed before the installer was up; nothing is kept
 //	installing  -> booting      installer exited 0 (sysinstall rebooted, -no-reboot ended QEMU)
 //	installing  -> failed       installer exited non-zero, or InstallTimeout (killed); console tail in LastError
+//	installing  -> stopped      installer exited 0 but Close began before phase B started; Start resumes it
 //	booting     -> attesting    RequireAttestation and the guest fetched its first nonce
 //	booting     -> ready        READY=1
 //	attesting   -> ready        READY=1 (user-data was released by a verified initrd quote before)
@@ -39,6 +40,16 @@
 // <live> is installing, booting, attesting, ready or running. A reboot from
 // inside the guest is invisible here: only phase A runs with -no-reboot, phase
 // B lets QEMU reset internally and the next READY=1 keeps the VM ready.
+//
+// Invariant: once Close or Delete has begun for a VM, no process is started
+// for it. Every start (Create, Start, the install-to-boot handoff) holds the
+// entry's opMu and checks the record under s.mu; Delete takes opMu and moves
+// the record to deleting first, Close sets a service-wide closing flag under
+// s.mu and stops each VM under its opMu. A start already holding opMu
+// therefore finishes and is stopped by Close or Delete; one that has not
+// begun refuses (Create and Start with apierr.ErrConflict, the handoff by
+// leaving the installed VM stopped). Close returns within StopTimeout per VM
+// plus whatever start was in flight.
 //
 // # Milestones Create can wait for
 //
