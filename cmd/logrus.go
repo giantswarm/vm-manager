@@ -53,6 +53,7 @@ var connectionNoise = []string{
 	"broken pipe",
 	"endpoint is closed for send",
 	"connection was aborted",
+	"cannot receive packets from",
 }
 
 func slogLevel(e *logrus.Entry) slog.Level {
