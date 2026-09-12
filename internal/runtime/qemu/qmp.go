@@ -202,22 +202,35 @@ func (q *QMP) Execute(ctx context.Context, command string, args, result any) err
 	}
 	select {
 	case resp := <-ch:
-		if resp.err != nil {
-			return fmt.Errorf("qmp %s: %w", command, resp.err)
-		}
-		if result != nil && len(resp.ret) > 0 {
-			if err := json.Unmarshal(resp.ret, result); err != nil {
-				return fmt.Errorf("qmp %s: decode: %w", command, err)
-			}
-		}
-		return nil
+		return decodeResponse(command, resp, result)
 	case <-ctx.Done():
 		q.forget(id)
 		return fmt.Errorf("qmp %s: %w", command, ctx.Err())
 	case <-q.done:
+		// The reader delivers a reply before it notices the peer closing the
+		// connection, so both channels can be ready at once (QEMU answers
+		// "quit" and exits). Prefer the reply over the closed connection.
+		select {
+		case resp := <-ch:
+			return decodeResponse(command, resp, result)
+		default:
+		}
 		q.forget(id)
 		return fmt.Errorf("qmp %s: %w", command, q.closedErr())
 	}
+}
+
+// decodeResponse turns a reply into the command's error or result.
+func decodeResponse(command string, resp qmpResponse, result any) error {
+	if resp.err != nil {
+		return fmt.Errorf("qmp %s: %w", command, resp.err)
+	}
+	if result != nil && len(resp.ret) > 0 {
+		if err := json.Unmarshal(resp.ret, result); err != nil {
+			return fmt.Errorf("qmp %s: decode: %w", command, err)
+		}
+	}
+	return nil
 }
 
 func (q *QMP) forget(id uint64) {
