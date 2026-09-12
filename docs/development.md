@@ -6,13 +6,18 @@ make test           # unit + contract tests, race detector when a C toolchain is
 make test-race      # the same with -race forced
 make test-integration # tests tagged `integration`: real QEMU + OVMF + swtpm on this host (skip without /dev/kvm)
 make lint           # golangci-lint v2 with the pre-commit linters (gosec, goconst, govet)
+make image          # mkosi build of the guest image into images/build/ (dev keys generated on first use)
+make image-verify   # offline checks of the built image (GPT, UKI sections, expected PCR 11, hwdb, presets)
+make e2e            # tests tagged `e2e`: install + reboot + READY over vsock with the built image on KVM (skip without it)
 make serve          # go run . -v serve (SERVE_ARGS="--listen 127.0.0.1:18080" to override)
 make help           # every target with its description
 ```
 
-`make image` and `make e2e` (mkosi build, image-verify, KVM boot tests) arrive
-with `images/`; see `Makefile.custom.mk` for the placeholder and
-[design.md](design.md) "Testing strategy" for the tiers.
+`make e2e` prints `install_seconds=` and `boot_to_ready_seconds=` for the boot-time
+budgets of [design.md](design.md) "Testing strategy"; `VM_MANAGER_E2E_IMAGE_DIR`
+points it at artifacts built elsewhere and `VM_MANAGER_E2E_KEEP=1` keeps the
+per-test state directory (consoles, TPM state, target disk) after a pass. See
+`e2e/doc.go` for the host requirements.
 
 ## Layout
 

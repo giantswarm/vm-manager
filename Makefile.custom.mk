@@ -14,6 +14,26 @@ serve: ## Run the server locally with debug logging (make run prints the CLI hel
 
 ##@ Images
 
-# image targets live in images/Makefile
-# (make image / make e2e are wired here once images/ lands: the mkosi build,
-# image-verify and the KVM boot e2e from docs/design.md "Testing strategy".)
+# The mkosi project lives in images/ (see images/README.md); these are the
+# entry points from the repo root.
+
+.PHONY: image
+image: ## Build the guest image with mkosi (dev keys + base image) into images/build/.
+	$(MAKE) -C images keys base
+
+.PHONY: image-verify
+image-verify: ## Offline checks of the built image (GPT, UKI sections, expected PCR 11, hwdb, presets).
+	$(MAKE) -C images verify
+
+##@ End-to-end
+
+# T3 boot tests of docs/design.md "Testing strategy": real QEMU on KVM with
+# swtpm, OVMF and the image from images/build (override the directory with
+# VM_MANAGER_E2E_IMAGE_DIR). The tests skip, naming the reason, on a host
+# without /dev/kvm, /dev/vhost-vsock, qemu, swtpm, OVMF or the artifacts;
+# `make image` builds the latter. They print install_seconds= and
+# boot_to_ready_seconds= for the boot-time budgets.
+
+.PHONY: e2e
+e2e: ## Run the KVM boot end-to-end tests (go test -tags e2e ./e2e/...).
+	go test -tags e2e -count=1 -timeout 15m -v ./e2e/...
