@@ -59,7 +59,8 @@ func (s *Service) StoreReport(_ context.Context, vmID string, report json.RawMes
 
 // recordingAttestor wraps the configured Attestor and writes its verdicts
 // into the VM record: the first nonce moves a booting VM to attesting, a
-// verified initrd quote releases user-data (imds.ReleasesUserData).
+// verified initrd quote releases user-data (imds.ReleasesUserData). The
+// QuoteResult passes through; the IMDS handler fills in UserDataReleased.
 type recordingAttestor struct {
 	s     *Service
 	inner imds.Attestor
@@ -79,7 +80,7 @@ func (a recordingAttestor) SubmitQuote(ctx context.Context, vmID string, req imd
 	if err != nil {
 		return res, err
 	}
-	res.UserDataReleased = a.s.recordQuote(vmID, req.Stage, res)
+	a.s.recordQuote(vmID, req.Stage, res)
 	return res, nil
 }
 
@@ -100,13 +101,13 @@ func (s *Service) onNonce(vmID string) {
 	s.broadcastLocked()
 }
 
-// recordQuote stores the verdict and reports whether user-data is released.
-func (s *Service) recordQuote(vmID string, stage imds.Stage, res imds.QuoteResult) bool {
+// recordQuote stores the verdict and releases user-data when it applies.
+func (s *Service) recordQuote(vmID string, stage imds.Stage, res imds.QuoteResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, err := s.lookup(vmID)
 	if err != nil {
-		return false
+		return
 	}
 	q := &Quote{Verified: res.Verified, Message: res.Message, At: s.clock.Now()}
 	switch stage {
@@ -121,7 +122,6 @@ func (s *Service) recordQuote(vmID string, stage imds.Stage, res imds.QuoteResul
 	s.save(e)
 	s.broadcastLocked()
 	s.log.Info("attestation quote", "id", vmID, "stage", stage, "verified", res.Verified, "userDataReleased", e.rec.Attestation.UserDataReleased)
-	return e.rec.Attestation.UserDataReleased
 }
 
 // IMDSDeps is the imds.Handler wiring of this service: resolver, recording

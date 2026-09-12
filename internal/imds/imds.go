@@ -100,6 +100,9 @@ func ReleasesUserData(stage Stage, verified bool) bool {
 // Attestor issues nonces and judges quotes. A rejected quote is a
 // QuoteResult with Verified false, not an error; errors wrapping
 // apierr.ErrInvalid answer 400, apierr.ErrNotFound 404, anything else 500.
+// Implementations fill Verified and Message; the handler sets Stage and
+// UserDataReleased (ReleasesUserData) so every Attestor answers by the same
+// rule.
 type Attestor interface {
 	Nonce(ctx context.Context, vmID string) (string, error)
 	SubmitQuote(ctx context.Context, vmID string, req QuoteRequest) (QuoteResult, error)

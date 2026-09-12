@@ -653,6 +653,17 @@ func TestAttestationGating(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(body)
 	}
+	quote := func(stage imds.Stage, nonce string) (int, imds.QuoteResult) {
+		body, err := json.Marshal(imds.QuoteRequest{Stage: stage, Nonce: nonce, AKPub: []byte("ak"), Quote: []byte("q"),
+			Signature: []byte("s"), PCRs: map[string]map[string]string{"sha256": {"11": "00"}}})
+		require.NoError(t, err)
+		resp, err := client.Post("http://"+h.lan().imdsAddr+imds.BasePath+"/attest/quote", "application/json", bytes.NewReader(body))
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		var res imds.QuoteResult
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&res))
+		return resp.StatusCode, res
+	}
 	code, body := get("/hostname")
 	assert.Equal(t, http.StatusOK, code)
 	assert.Equal(t, "attested", body)
@@ -666,8 +677,8 @@ func TestAttestationGating(t *testing.T) {
 	assert.NotNil(t, v.Attestation.NonceIssuedAt)
 
 	// A ready-stage quote never releases user-data.
-	res, err := att.SubmitQuote(h.ctx, v.ID, imds.QuoteRequest{Stage: imds.StageReady, Nonce: nonce})
-	require.NoError(t, err)
+	code, res := quote(imds.StageReady, nonce)
+	assert.Equal(t, http.StatusOK, code)
 	assert.True(t, res.Verified)
 	assert.False(t, res.UserDataReleased)
 	a, err := h.svc.Attestation(v.ID)
@@ -678,10 +689,10 @@ func TestAttestationGating(t *testing.T) {
 
 	nonce, err = att.Nonce(h.ctx, v.ID)
 	require.NoError(t, err)
-	res, err = att.SubmitQuote(h.ctx, v.ID, imds.QuoteRequest{Stage: imds.StageInitrd, Nonce: nonce})
-	require.NoError(t, err)
+	code, res = quote(imds.StageInitrd, nonce)
+	assert.Equal(t, http.StatusOK, code)
 	assert.True(t, res.Verified)
-	assert.True(t, res.UserDataReleased)
+	assert.True(t, res.UserDataReleased, "the handler applies imds.ReleasesUserData")
 	a, _ = h.svc.Attestation(v.ID)
 	assert.True(t, a.UserDataReleased)
 	require.NotNil(t, a.Initrd)
