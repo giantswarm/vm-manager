@@ -12,8 +12,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,7 +288,8 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	v := h.create("node1")
 	require.Equal(t, vm.StateInstalling, v.State)
 	assert.Equal(t, qemu.PhaseInstall, v.Phase)
-	assert.Equal(t, uint32(qemu.MinCID), v.CID)
+	assert.GreaterOrEqual(t, v.CID, uint32(qemu.MinCID), "CID is in the vsock range")
+	assert.Less(t, v.CID, uint32(qemu.MaxCID), "CID is in the vsock range")
 	assert.Equal(t, "127.0.0.2", v.IP)
 	assert.Len(t, v.MachineID, 32)
 	assert.Contains(t, v.SSHPublicKey, "ssh-ed25519 ")
@@ -829,7 +832,7 @@ func TestPersistenceRoundTripAndLoad(t *testing.T) {
 	assert.Equal(t, vm.StateBooting, after.State)
 	assert.Contains(t, h.ev.List(), "storage.acquire:open")
 	assert.Empty(t, h.waitInstances(3).Spec().KernelCmdlineExtra)
-	assert.Equal(t, uint32(qemu.MinCID+1), h.create("second").CID, "CID allocation skips the restored VM")
+	assert.Equal(t, v.CID+1, h.create("second").CID, "CID allocation skips the restored VM")
 }
 
 func TestLoadMarksInterruptedRecords(t *testing.T) {
@@ -1033,4 +1036,37 @@ func TestOptionsDefaults(t *testing.T) {
 	code, vars := vm.FindOVMF()
 	assert.NotEmpty(t, code)
 	assert.NotEmpty(t, vars)
+}
+
+// vsock CIDs are host-global: when QEMU reports the guest CID in use by a VM
+// another vm-manager owns, the start is retried with the next free CID and
+// the record keeps the one that worked.
+func TestCreateRetriesWhenTheVsockCIDIsTaken(t *testing.T) {
+	h := newHarness(t)
+	var (
+		first    uint32
+		attempts atomic.Int32
+	)
+	h.rt.SetFailOn(func(spec qemu.Spec) error {
+		attempts.Add(1)
+		if first == 0 {
+			first = spec.VsockCID
+		}
+		if spec.VsockCID == first {
+			return errors.New("qemu-system-x86_64: -device vhost-vsock-pci,id=vsock0,guest-cid=" +
+				strconv.FormatUint(uint64(spec.VsockCID), 10) + ": vhost-vsock: unable to set guest cid: Address already in use")
+		}
+		return nil
+	})
+	v := h.create("cid-taken")
+	got := h.waitState(v.ID, vm.StateInstalling)
+	assert.NotEqual(t, first, got.CID, "the record holds the CID that started")
+	assert.Equal(t, first+1, got.CID, "the next free CID is tried")
+	assert.Equal(t, int32(2), attempts.Load(), "exactly one retry")
+	assert.Equal(t, 1, h.rt.Count(), "one instance running")
+	assert.Equal(t, 1, h.tpm.Running(), "one swtpm for the VM")
+
+	stored, err := h.svc.Get(v.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got.CID, stored.CID)
 }
