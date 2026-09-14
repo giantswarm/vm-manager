@@ -114,7 +114,9 @@ func Push(ctx context.Context, dir, reference string, opts Options) (ocispec.Des
 
 	layers := make([]ocispec.Descriptor, 0, len(files))
 	for _, rel := range files {
-		desc, err := store.Add(ctx, rel, FileMediaType, filepath.Join(dir, rel))
+		// The store resolves a relative path against its working directory,
+		// dir — so the relative name is the path, whatever dir is.
+		desc, err := store.Add(ctx, rel, FileMediaType, rel)
 		if err != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("add %s: %w", rel, err)
 		}

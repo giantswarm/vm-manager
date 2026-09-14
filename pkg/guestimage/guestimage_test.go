@@ -163,6 +163,25 @@ func TestPushPull(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestPushRelativeDir: a relative image directory (`--image-dir images/build`
+// from a checkout) resolves against the working directory once, not twice.
+func TestPushRelativeDir(t *testing.T) {
+	ctx := context.Background()
+	host := testRegistry(t)
+	parent := t.TempDir()
+	src := buildDir(t, "0.1.0")
+	rel := filepath.Join("images", "build")
+	require.NoError(t, os.MkdirAll(filepath.Join(parent, "images"), 0o750))
+	require.NoError(t, os.Rename(src, filepath.Join(parent, rel)))
+	t.Chdir(parent)
+	desc, err := Push(ctx, rel, host+"/giantswarm/vm-manager-guest-image:rel", Options{PlainHTTP: true})
+	require.NoError(t, err)
+	res, err := Pull(ctx, host+"/giantswarm/vm-manager-guest-image:rel", filepath.Join("pulled", "images"), Options{PlainHTTP: true})
+	require.NoError(t, err)
+	assert.Equal(t, desc.Digest, res.Descriptor.Digest)
+	assert.FileExists(t, filepath.Join(parent, "pulled", "images", "giantswarm-vm-base_0.1.0.efi"))
+}
+
 func TestPushNeedsATag(t *testing.T) {
 	_, err := Push(context.Background(), buildDir(t, "0.1.0"), testRegistry(t)+"/giantswarm/vm-manager-guest-image", Options{PlainHTTP: true})
 	assert.ErrorContains(t, err, "tag")
