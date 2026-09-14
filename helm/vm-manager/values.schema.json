@@ -105,9 +105,18 @@
                 },
                 "resources": {
                     "type": "object",
-                    "description": "Resources of the init container.",
+                    "description": "Resources of the init container (it streams files to the volume).",
                     "additionalProperties": false,
                     "properties": {
+                        "limits": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        },
                         "requests": {
                             "type": "object",
                             "additionalProperties": false,

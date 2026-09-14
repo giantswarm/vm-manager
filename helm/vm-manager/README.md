@@ -37,7 +37,7 @@ chart installs it as `components.vm-manager`.
 | guestImage.digest | string | `""` | Manifest digest (`sha256:…`) to pull instead of the tag: exact content, and a changed digest rolls the pod (a lab pushing local builds). |
 | guestImage.plainHTTP | bool | `false` | Reach the registry over HTTP instead of HTTPS (a lab registry). |
 | guestImage.pullSecret | string | `""` | Secret of type kubernetes.io/dockerconfigjson with the registry's credentials, for a private mirror; empty pulls anonymously. |
-| guestImage.resources | object | `{"requests":{"cpu":"100m","memory":"128Mi"}}` | Resources of the init container. |
+| guestImage.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resources of the init container (it streams files to the volume). |
 | vm.networkSubnet | string | `"192.168.127.0/24"` | CIDR of the default network, created at startup when missing. |
 | vm.defaultNetwork | string | `"default"` | Its name; `create_vm` attaches to it unless told otherwise. |
 | vm.installTimeout | string | `"5m"` | Installer boot ceiling, then `failed`. |
