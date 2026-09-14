@@ -47,8 +47,11 @@ jobs:
       - run:
           name: Build vm-manager
           command: |
+            # -buildvcs=false: the checkout belongs to the circleci user and the
+            # container runs as root, so git refuses the VCS stamp ("dubious
+            # ownership"); the version and commit come from the ldflags anyway.
             docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=0 "$GO_IMAGE" \
-              go build -trimpath -ldflags "-s -w -X github.com/giantswarm/vm-manager/pkg/project.version=${CIRCLE_TAG#v} -X github.com/giantswarm/vm-manager/pkg/project.gitSHA=$CIRCLE_SHA1" -o bin/vm-manager .
+              go build -trimpath -buildvcs=false -ldflags "-s -w -X github.com/giantswarm/vm-manager/pkg/project.version=${CIRCLE_TAG#v} -X github.com/giantswarm/vm-manager/pkg/project.gitSHA=$CIRCLE_SHA1" -o bin/vm-manager .
             sudo chown "$(id -u):$(id -g)" bin/vm-manager
             bin/vm-manager version
       - run:
