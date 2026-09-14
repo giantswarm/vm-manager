@@ -1,16 +1,12 @@
 package main
 
-import "github.com/giantswarm/vm-manager/cmd"
-
-// Set by the build via ldflags (-X main.version=...).
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+import (
+	"github.com/giantswarm/vm-manager/cmd"
+	"github.com/giantswarm/vm-manager/pkg/project"
 )
 
 func main() {
-	cmd.SetVersion(version)
-	cmd.SetBuildInfo(commit, date)
+	cmd.SetVersion(project.Version())
+	cmd.SetBuildInfo(project.GitSHA(), project.BuildTimestamp())
 	cmd.Execute()
 }

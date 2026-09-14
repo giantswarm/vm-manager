@@ -1,12 +1,12 @@
 name: chart
 
-# The pod shape of vm-manager, checked on every change: the container image
-# builds, the chart lints, its render assertions hold (hack/verify-chart.sh),
-# values.schema.json and the chart README are current, and the chart installs
-# on a kind cluster with the image of this commit — the Deployment becomes
-# ready and GET /api/v1/host answers with the runtime the image ships. What
-# the chart does on a KVM node with the platform's identity is proven in
-# agentlab (docs/development.md).
+# The offline chart checks on every change: the chart lints and its render
+# assertions hold (hack/verify-chart.sh — the rules the templates encode that
+# helm lint and the values schema cannot check). values.schema.json and the
+# chart README are kept current by the generated pre-commit hooks; the install
+# smoke is the ATS job of the generated CircleCI pipeline
+# (execute-chart-tests, .ats/main.yaml); what the chart does on a KVM node with
+# the platform's identity is proven in agentlab (docs/development.md).
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   verify:
-    name: lint, render assertions, schema and README current
+    name: lint and render assertions
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,67 +31,5 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.19.0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Install the schema plugin, schemalint and helm-docs
-        run: |
-          helm plugin install https://github.com/losisin/helm-values-schema-json --version 2.6.0
-          go install github.com/giantswarm/schemalint/v2@v2.6.3
-          go install github.com/norwoodj/helm-docs/cmd/helm-docs@v1.14.2
       - run: make helm-lint
       - run: make helm-verify
-      - name: values.schema.json and the chart README are what the generators produce
-        run: |
-          make helm-schema helm-docs
-          git diff --exit-code -- helm/vm-manager/values.schema.json helm/vm-manager/README.md \
-            || { echo "::error::helm/vm-manager/values.schema.json or README.md is stale: run make helm-schema helm-docs and commit"; exit 1; }
-
-  smoke:
-    name: install on kind
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Build the image of this commit
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
-        with:
-          context: .
-          load: true
-          tags: localhost/vm-manager:smoke
-          build-args: |
-            VERSION=smoke-${{ github.sha }}
-            COMMIT=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
-        with:
-          cluster_name: smoke
-      - name: Side-load the image into the node
-        run: kind load docker-image localhost/vm-manager:smoke --name smoke
-      - name: Install the chart and wait for the Deployment
-        run: |
-          kubectl create namespace agent-platform
-          helm install vm-manager helm/vm-manager -n agent-platform -f helm/vm-manager/ci/smoke-values.yaml --wait --timeout 5m
-          kubectl -n agent-platform rollout status deployment/vm-manager --timeout=120s
-      - name: The API answers and names what the smoke node lacks
-        run: |
-          kubectl -n agent-platform port-forward svc/vm-manager 18080:8080 >/tmp/pf.log 2>&1 &
-          for i in $(seq 1 30); do curl -fsS localhost:18080/healthz >/dev/null 2>&1 && break; sleep 1; done
-          curl -fsS localhost:18080/healthz
-          host=$(curl -fsS localhost:18080/api/v1/host)
-          echo "$host" | jq .
-          # The runtime the image ships is found (QEMU, swtpm, OVMF) and the
-          # verdict is consistent: ready exactly when nothing is missing.
-          # Whether the devices are there depends on the runner — GitHub's
-          # have /dev/kvm, and a privileged container sees the node's devices
-          # whatever host.devices says — so the smoke asserts the shape, not
-          # the KVM verdict; the platform chain runs in agentlab.
-          echo "$host" | jq -e '.qemu.found and .swtpm.found and (.ovmfCode | length > 0) and (.ready == (((.missing // []) | length) == 0))' >/dev/null \
-            || { echo "::error::unexpected host report"; exit 1; }
-          curl -fsS localhost:18080/metrics | grep -q '^vm_manager_build_info' || { echo "::error::no build info metric"; exit 1; }
-      - name: Logs on failure
-        if: failure()
-        run: kubectl -n agent-platform describe pod -l app.kubernetes.io/name=vm-manager; kubectl -n agent-platform logs -l app.kubernetes.io/name=vm-manager --tail=100

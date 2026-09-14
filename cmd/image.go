@@ -13,22 +13,56 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/vm"
+	"github.com/giantswarm/vm-manager/pkg/guestimage"
 )
 
 // goldenHTTPTimeout bounds the attestation lookup on the running server.
 const goldenHTTPTimeout = 10 * time.Second
 
 type imageGoldenOptions struct {
-	fromVM   string
-	server   string
-	token    string
+	imageDirOptions
+	fromVM string
+	server string
+	token  string
+}
+
+// imageDirOptions resolve the image directory the image subcommands work on:
+// --image-dir, else <state-dir>/images like the server.
+type imageDirOptions struct {
 	stateDir string
 	imageDir string
+}
+
+func (o *imageDirOptions) addFlags(f *pflag.FlagSet) {
+	f.StringVar(&o.stateDir, "state-dir", envOr("VM_MANAGER_STATE_DIR", defaultStateDir()), "State directory of the server; only its images subdirectory is used unless --image-dir is set (VM_MANAGER_STATE_DIR)")
+	f.StringVar(&o.imageDir, "image-dir", envOr("VM_MANAGER_IMAGE_DIR", ""), "Image directory; default: <state-dir>/images (VM_MANAGER_IMAGE_DIR)")
+}
+
+func (o *imageDirOptions) dir() string {
+	if o.imageDir != "" {
+		return o.imageDir
+	}
+	return filepath.Join(o.stateDir, imagesSubdir)
+}
+
+type imageArtifactOptions struct {
+	imageDirOptions
+	plainHTTP bool
+}
+
+func (o *imageArtifactOptions) addFlags(f *pflag.FlagSet) {
+	o.imageDirOptions.addFlags(f)
+	f.BoolVar(&o.plainHTTP, "plain-http", envBool("VM_MANAGER_REGISTRY_PLAIN_HTTP", false), "Reach the registry over HTTP instead of HTTPS (a lab registry) (VM_MANAGER_REGISTRY_PLAIN_HTTP)")
+}
+
+func (o *imageArtifactOptions) options() guestimage.Options {
+	return guestimage.Options{PlainHTTP: o.plainHTTP, Logger: slog.Default()}
 }
 
 func newImageCmd() *cobra.Command {
@@ -36,7 +70,64 @@ func newImageCmd() *cobra.Command {
 		Use:   "image",
 		Short: "Image catalog operations",
 	}
-	cmd.AddCommand(newImageGoldenCmd())
+	cmd.AddCommand(newImagePullCmd(), newImagePushCmd(), newImageGoldenCmd())
+	return cmd
+}
+
+func newImagePullCmd() *cobra.Command {
+	o := &imageArtifactOptions{}
+	cmd := &cobra.Command{
+		Use:   "pull <reference>",
+		Short: "Fetch a published guest image artifact into the image directory",
+		Long: `Fetch the guest image artifact <registry>/<repository>:<tag> (or @<digest>) — the
+UKIs, disks, policy.json and sysupdate tree ` + "`vm-manager image push`" + ` published — into
+the image directory the server reads. A directory that already holds that artifact
+(by manifest digest, recorded in ` + guestimage.MarkerFile + `) is left as it is, golden PCR
+values recorded since included; another digest replaces its contents. Registry
+credentials come from the Docker config ($DOCKER_CONFIG/config.json or
+~/.docker/config.json) when one exists; without one the pull is anonymous.
+
+The pod runs this as its init container.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res, err := guestimage.Pull(cmd.Context(), args[0], o.dir(), o.options())
+			if err != nil {
+				return err
+			}
+			verb := "already present"
+			if res.Fetched {
+				verb = "pulled"
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s, %d files) in %s\n", verb, args[0], res.Descriptor.Digest, res.Files, o.dir())
+			return nil
+		},
+	}
+	o.addFlags(cmd.Flags())
+	return cmd
+}
+
+func newImagePushCmd() *cobra.Command {
+	o := &imageArtifactOptions{}
+	cmd := &cobra.Command{
+		Use:   "push <reference>",
+		Short: "Publish the image directory as a guest image artifact",
+		Long: `Publish the guest image in the image directory (` + "`make -C images`" + ` output: every
+<id>_<version>.efi with its .raw disk, .roothash and .repart.d/, policy.json and the
+sysupdate tree — nothing else of a build directory) as the OCI artifact
+<registry>/<repository>:<tag>. Registry credentials come from the Docker config
+($DOCKER_CONFIG/config.json or ~/.docker/config.json). The release pipeline pushes
+one per release; a lab pushes a local build to its own registry.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			desc, err := guestimage.Push(cmd.Context(), o.dir(), args[0], o.options())
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "pushed %s (%s)\n", args[0], desc.Digest)
+			return nil
+		},
+	}
+	o.addFlags(cmd.Flags())
 	return cmd
 }
 
@@ -60,16 +151,13 @@ boot is accepted without golden values.`,
 	f.StringVar(&o.fromVM, "from-vm", "", "ID of the VM whose verified ready-stage quote supplies the values")
 	f.StringVar(&o.server, "server", envOr("VM_MANAGER_SERVER", "http://127.0.0.1:8080"), "Base URL of the running vm-manager server (VM_MANAGER_SERVER)")
 	f.StringVar(&o.token, "token", os.Getenv("VM_MANAGER_TOKEN"), "Bearer token for a server started with --enable-oauth (VM_MANAGER_TOKEN)")
-	f.StringVar(&o.stateDir, "state-dir", envOr("VM_MANAGER_STATE_DIR", defaultStateDir()), "State directory of the server; only its images subdirectory is used unless --image-dir is set (VM_MANAGER_STATE_DIR)")
-	f.StringVar(&o.imageDir, "image-dir", envOr("VM_MANAGER_IMAGE_DIR", ""), "Image directory holding the policy.json to update; default: <state-dir>/images (VM_MANAGER_IMAGE_DIR)")
+	o.addFlags(f)
 	_ = cmd.MarkFlagRequired("from-vm")
 	return cmd
 }
 
 func runImageGolden(ctx context.Context, o *imageGoldenOptions, ref string, out io.Writer) error {
-	if o.imageDir == "" {
-		o.imageDir = filepath.Join(o.stateDir, imagesSubdir)
-	}
+	o.imageDir = o.dir()
 	catalog, err := images.Load(o.imageDir, slog.Default())
 	if err != nil {
 		return fmt.Errorf("load images: %w", err)

@@ -18,22 +18,26 @@ chart installs it as `components.vm-manager`.
 |-----|------|---------|-------------|
 | global | object | `{}` | Platform-wide values an umbrella chart (agent-platform) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly. |
 | replicaCount | int | `1` | Number of replicas. One: the VMs are children of the one process and the state directory is its own. The Deployment rolls with Recreate for the same reason. |
-| image.registry | string | `"ghcr.io"` | Image registry. |
+| image.registry | string | `"gsoci.azurecr.io"` | Image registry. |
 | image.repository | string | `"giantswarm/vm-manager"` | Image repository. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.tag | string | `""` | Image tag. Defaults to the chart appVersion. |
 | imagePullSecrets | list | `[]` | Image pull secrets. |
 | nameOverride | string | `""` | Override the chart name. |
 | fullnameOverride | string | `""` | Override the fully qualified release name (the umbrella chart pins the Service name through this). |
-| host.devices | object | `{"enabled":true,"paths":["/dev/kvm","/dev/vhost-vsock"]}` | The node's KVM devices, mounted into the pod from the node as hostPath character devices: /dev/kvm (hardware virtualization) and /dev/vhost-vsock (the guests' READY=1 and ssh). Off, the pod starts without them and GET /api/v1/host reports them under `missing` — for a cluster without KVM nodes, and for the chart's own install smoke. |
-| persistence.existingClaim | string | `""` | Keep the state directory (VM records, disks, vTPM state, consoles) on a PersistentVolumeClaim: an existing claim's name, or `create: true` to render one from the settings below. With neither the state is an emptyDir and the VMs die with the pod — they end with the process anyway (--launcher process), but a claim keeps their records and disks for the next `start_vm`. |
+| persistence.existingClaim | string | `""` | Keep the state directory (VM records, disks, vTPM state, consoles, and the guest image under images/) on a PersistentVolumeClaim: an existing claim's name, or `create: true` to render one from the settings below. With neither the state is an emptyDir: the VMs die with the pod — they end with the process anyway (--launcher process) — and every pod start fetches the guest image again and forgets the golden PCR values recorded into its policy.json. A claim keeps VM records and disks for the next `start_vm`, the image and its golden values for the next start. |
 | persistence.create | bool | `false` |  |
 | persistence.size | string | `"50Gi"` |  |
 | persistence.storageClass | string | `""` |  |
 | persistence.accessModes[0] | string | `"ReadWriteOnce"` |  |
-| images.existingClaim | string | `""` | The image directory `--image-dir` reads (README "Images"): the base image, its UKI and the Kubernetes sysext layers `make -C images` in a vm-manager checkout builds, with the policy.json that carries the golden PCR values. Mounted from an existing PersistentVolumeClaim an operator fills, or from a node path (a lab: agentlab mounts its checkout's images/build into the kind node); neither means an empty emptyDir and no bootable image. `vm-manager image golden` writes policy.json from outside the pod, so the mount is read-only by default. |
-| images.hostPath | string | `""` |  |
-| images.readOnly | bool | `true` |  |
+| guestImage.enabled | bool | `true` | Fetch the guest image the pod boots — the base image, its UKI, the Kubernetes sysext layers and the policy.json `make -C images` builds, published by every release as an OCI artifact — into `<state>/images` at pod start: an init container runs `vm-manager image pull`, a no-op when the directory already holds that artifact. Off, the directory stays as it is (empty on a fresh volume: list_images is empty) — for the chart's own install smoke. |
+| guestImage.registry | string | `"gsoci.azurecr.io"` | Registry of the artifact. |
+| guestImage.repository | string | `"giantswarm/vm-manager-guest-image"` | Repository of the artifact. |
+| guestImage.tag | string | `""` | Tag. Defaults to the chart appVersion: a release publishes its guest image next to its container image and chart. |
+| guestImage.digest | string | `""` | Manifest digest (`sha256:…`) to pull instead of the tag: exact content, and a changed digest rolls the pod (a lab pushing local builds). |
+| guestImage.plainHTTP | bool | `false` | Reach the registry over HTTP instead of HTTPS (a lab registry). |
+| guestImage.pullSecret | string | `""` | Secret of type kubernetes.io/dockerconfigjson with the registry's credentials, for a private mirror; empty pulls anonymously. |
+| guestImage.resources | object | `{"requests":{"cpu":"100m","memory":"128Mi"}}` | Resources of the init container. |
 | vm.networkSubnet | string | `"192.168.127.0/24"` | CIDR of the default network, created at startup when missing. |
 | vm.defaultNetwork | string | `"default"` | Its name; `create_vm` attaches to it unless told otherwise. |
 | vm.installTimeout | string | `"5m"` | Installer boot ceiling, then `failed`. |
@@ -75,7 +79,7 @@ chart installs it as `components.vm-manager`.
 | podAnnotations | object | `{}` | Annotations on the pod. |
 | podLabels | object | `{}` | Labels on the pod. |
 | podSecurityContext | object | `{}` | Pod security context. Root: /dev/kvm is root:kvm on every node and the process forks QEMU and swtpm as its own children. |
-| securityContext | object | `{"privileged":true,"runAsGroup":0,"runAsUser":0}` | Container security context. Privileged, on purpose: a hostPath device mounted into an unprivileged container is denied by the device cgroup (open(2) fails with EPERM) unless a device plugin hands it out, so the privileged flag is what makes /dev/kvm and /dev/vhost-vsock usable. No capability is used beyond that (no bridges, no tap devices, no CAP_NET_ADMIN: the networks are userspace). |
+| securityContext | object | `{"privileged":true,"runAsGroup":0,"runAsUser":0}` | Container security context. Privileged, on purpose: the container runtime gives a privileged container the node's devices, /dev/kvm (hardware virtualization) and /dev/vhost-vsock (the guests' READY=1 and ssh) among them, with the device cgroup open — nothing is mounted from the node. A device plugin handing out the two devices to an unprivileged pod is the refinement. No capability is used beyond that (no bridges, no tap devices, no CAP_NET_ADMIN: the networks are userspace). A node without the devices starts the pod all the same; GET /api/v1/host names them under `missing`. |
 | service.type | string | `"ClusterIP"` | Service type. |
 | service.port | int | `8080` | Service port (container listens on 8080). |
 | resources | object | `{"requests":{"cpu":"250m","memory":"512Mi"}}` | Container resources. The VMs are QEMU processes inside this container, so a memory limit bounds the sum of their memory too; none by default. |

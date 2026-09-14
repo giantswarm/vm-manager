@@ -1,0 +1,8 @@
+# Values for the chart tests on the ATS kind cluster (execute-chart-tests):
+# the guest image fetch is off — a branch build publishes no guest image
+# artifact, releases do — so the pod starts with an empty image directory,
+# which the smoke tolerates (readiness does not depend on an image; see
+# .ats/main.yaml). OAuth and the muster registration stay off: no identity
+# provider and no muster on the bare cluster.
+guestImage:
+  enabled: false

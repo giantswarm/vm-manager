@@ -1,0 +1,79 @@
+# Repo-owned CircleCI jobs. The setup workflow in the generated
+# .circleci/config.yml deep-merges this file into .circleci/workflows.yml at
+# pipeline runtime: the job definition lands next to the generated ones, the
+# workflow entry is appended to the build workflow. devctl never touches it.
+#
+# guest-image: the third artifact of a release next to the container image
+# (push-to-registries-release) and the chart (push-chart-release) — the guest
+# image the pod boots, built with mkosi in a privileged archlinux container on
+# a machine executor (hack/guest-image-build.sh; the docker executor cannot
+# run privileged containers) and published as the OCI artifact
+# gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version> by
+# `vm-manager image push` (pkg/guestimage). The chart's guestImage.tag
+# defaults to its appVersion, so a release is complete once this job is green.
+# Tags only: branch builds keep the GitHub Actions image and KVM e2e workflows
+# (test-only), and the ATS smoke installs the chart with the fetch off.
+jobs:
+  guest-image:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large
+    environment:
+      GUEST_IMAGE_WORKSPACE: /tmp/mkosi-workspace
+      GUEST_IMAGE_REPOSITORY: gsoci.azurecr.io/giantswarm/vm-manager-guest-image
+      GO_IMAGE: golang:1.27.1
+    steps:
+      - checkout
+      - run:
+          name: Cache key (the image inputs, per ISO week)
+          # mkosi's incremental cache freezes the Arch package set it was
+          # built from, so a fresh week starts from the current repositories.
+          command: |
+            date -u +%G-W%V | tee /tmp/week
+            find images -path images/build -prune -o -path images/mkosi.cache -prune -o -path images/keys -prune -o -type f -print0 \
+              | sort -z | xargs -0 sha256sum | tee /tmp/image-inputs.sha256 | tail -1
+      - restore_cache:
+          keys:
+            - guest-image-v1-{{ checksum "/tmp/week" }}-{{ checksum "/tmp/image-inputs.sha256" }}
+            - guest-image-v1-{{ checksum "/tmp/week" }}-
+      - run:
+          name: Build the guest image (mkosi in a privileged archlinux container)
+          command: hack/guest-image-build.sh
+          no_output_timeout: 60m
+      - save_cache:
+          key: guest-image-v1-{{ checksum "/tmp/week" }}-{{ checksum "/tmp/image-inputs.sha256" }}
+          paths:
+            - images/mkosi.cache
+      - run:
+          name: Build vm-manager
+          command: |
+            docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=0 "$GO_IMAGE" \
+              go build -trimpath -ldflags "-s -w -X github.com/giantswarm/vm-manager/pkg/project.version=${CIRCLE_TAG#v} -X github.com/giantswarm/vm-manager/pkg/project.gitSHA=$CIRCLE_SHA1" -o bin/vm-manager .
+            sudo chown "$(id -u):$(id -g)" bin/vm-manager
+            bin/vm-manager version
+      - run:
+          name: Push the guest image artifact
+          command: |
+            username="${ACR_GSOCI_USERNAME:-${ACR_USERNAME:-}}"
+            password="${ACR_GSOCI_PASSWORD:-${ACR_PASSWORD:-}}"
+            if [ -z "$username" ] || [ -z "$password" ]; then
+              echo "no gsoci credentials in the architect context"; exit 1
+            fi
+            echo "$password" | docker login gsoci.azurecr.io -u "$username" --password-stdin
+            bin/vm-manager image push "${GUEST_IMAGE_REPOSITORY}:${CIRCLE_TAG#v}" --image-dir images/build
+      - store_artifacts:
+          path: images/build/policy.json
+          destination: policy.json
+
+workflows:
+  build:
+    jobs:
+      - guest-image:
+          context: architect
+          requires:
+            - go-build
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/

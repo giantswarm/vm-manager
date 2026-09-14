@@ -15,7 +15,7 @@ replicaCount: 1
 
 image:
   # -- Image registry.
-  registry: ghcr.io
+  registry: gsoci.azurecr.io
   # -- Image repository.
   repository: giantswarm/vm-manager
   # -- Image pull policy.
@@ -31,25 +31,15 @@ nameOverride: ""
 # Service name through this).
 fullnameOverride: ""
 
-host:
-  # -- The node's KVM devices, mounted into the pod from the node as hostPath
-  # character devices: /dev/kvm (hardware virtualization) and /dev/vhost-vsock
-  # (the guests' READY=1 and ssh). Off, the pod starts without them and
-  # GET /api/v1/host reports them under `missing` — for a cluster without KVM
-  # nodes, and for the chart's own install smoke.
-  devices:
-    enabled: true
-    paths:
-      - /dev/kvm
-      - /dev/vhost-vsock
-
 persistence:
-  # -- Keep the state directory (VM records, disks, vTPM state, consoles) on
-  # a PersistentVolumeClaim: an existing claim's name, or `create: true` to
-  # render one from the settings below. With neither the state is an emptyDir
-  # and the VMs die with the pod — they end with the process anyway
-  # (--launcher process), but a claim keeps their records and disks for the
-  # next `start_vm`.
+  # -- Keep the state directory (VM records, disks, vTPM state, consoles, and
+  # the guest image under images/) on a PersistentVolumeClaim: an existing
+  # claim's name, or `create: true` to render one from the settings below.
+  # With neither the state is an emptyDir: the VMs die with the pod — they end
+  # with the process anyway (--launcher process) — and every pod start fetches
+  # the guest image again and forgets the golden PCR values recorded into its
+  # policy.json. A claim keeps VM records and disks for the next `start_vm`,
+  # the image and its golden values for the next start.
   existingClaim: ""
   create: false
   size: 50Gi
@@ -57,18 +47,35 @@ persistence:
   accessModes:
     - ReadWriteOnce
 
-images:
-  # -- The image directory `--image-dir` reads (README "Images"): the base
-  # image, its UKI and the Kubernetes sysext layers `make -C images` in a
-  # vm-manager checkout builds, with the policy.json that carries the golden
-  # PCR values. Mounted from an existing PersistentVolumeClaim an operator
-  # fills, or from a node path (a lab: agentlab mounts its checkout's
-  # images/build into the kind node); neither means an empty emptyDir and no
-  # bootable image. `vm-manager image golden` writes policy.json from outside
-  # the pod, so the mount is read-only by default.
-  existingClaim: ""
-  hostPath: ""
-  readOnly: true
+guestImage:
+  # -- Fetch the guest image the pod boots — the base image, its UKI, the
+  # Kubernetes sysext layers and the policy.json `make -C images` builds,
+  # published by every release as an OCI artifact — into `<state>/images` at
+  # pod start: an init container runs `vm-manager image pull`, a no-op when
+  # the directory already holds that artifact. Off, the directory stays as it
+  # is (empty on a fresh volume: list_images is empty) — for the chart's own
+  # install smoke.
+  enabled: true
+  # -- Registry of the artifact.
+  registry: gsoci.azurecr.io
+  # -- Repository of the artifact.
+  repository: giantswarm/vm-manager-guest-image
+  # -- Tag. Defaults to the chart appVersion: a release publishes its guest
+  # image next to its container image and chart.
+  tag: ""
+  # -- Manifest digest (`sha256:…`) to pull instead of the tag: exact
+  # content, and a changed digest rolls the pod (a lab pushing local builds).
+  digest: ""
+  # -- Reach the registry over HTTP instead of HTTPS (a lab registry).
+  plainHTTP: false
+  # -- Secret of type kubernetes.io/dockerconfigjson with the registry's
+  # credentials, for a private mirror; empty pulls anonymously.
+  pullSecret: ""
+  # -- Resources of the init container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
 
 vm:
   # -- CIDR of the default network, created at startup when missing.
@@ -216,12 +223,14 @@ podLabels: {}  # @schema additionalProperties: true
 # process forks QEMU and swtpm as its own children.
 podSecurityContext: {}  # @schema additionalProperties: true
 
-# -- Container security context. Privileged, on purpose: a hostPath device
-# mounted into an unprivileged container is denied by the device cgroup
-# (open(2) fails with EPERM) unless a device plugin hands it out, so the
-# privileged flag is what makes /dev/kvm and /dev/vhost-vsock usable. No
-# capability is used beyond that (no bridges, no tap devices, no
-# CAP_NET_ADMIN: the networks are userspace).
+# -- Container security context. Privileged, on purpose: the container
+# runtime gives a privileged container the node's devices, /dev/kvm (hardware
+# virtualization) and /dev/vhost-vsock (the guests' READY=1 and ssh) among
+# them, with the device cgroup open — nothing is mounted from the node. A
+# device plugin handing out the two devices to an unprivileged pod is the
+# refinement. No capability is used beyond that (no bridges, no tap devices,
+# no CAP_NET_ADMIN: the networks are userspace). A node without the devices
+# starts the pod all the same; GET /api/v1/host names them under `missing`.
 securityContext:  # @schema additionalProperties: true
   privileged: true
   runAsUser: 0

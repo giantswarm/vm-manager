@@ -286,21 +286,32 @@ token from this server's own OAuth flow. `vm-manager image golden --token` (or
 
 ## CI
 
-GitHub Actions, `.github/workflows/`. The devctl-generated `zz_generated.*` workflows add
-pre-commit, gitleaks, semantic PR titles and the release automation. CircleCI generation is
-switched off for this repo in giantswarm/github (`gen.ci.generate: false` in
-`repositories/team-bumblebee.yaml`): the image build needs an Arch container and the boot
-tests nested KVM, and the container image and chart publish from here to ghcr.io
-(`publish.yml`), the way the kagent and Substrate lines do. The tiers are those of
-[design.md](design.md) "Testing strategy".
+Two systems, one job each. **CircleCI** releases: the devctl-generated pipeline
+(`.circleci/config.yml` + `workflows.yml`, from `gen.ci` in giantswarm/github's
+`repositories/team-bumblebee.yaml`, flavour `app`, `branchPublish`, a linux/amd64 image)
+runs `make test` (go-build), builds and pushes the container image
+`gsoci.azurecr.io/giantswarm/vm-manager` and the chart to the giantswarm catalog — a dev
+image and dev chart on every branch, the release on every `v*` tag the Auto Release workflow
+cuts — and runs the chart's install smoke on a kind cluster (`execute-chart-tests`:
+[`.ats/main.yaml`](../.ats/main.yaml), `tests/ats/test_smoke.py`, `tests/test-values.yaml`).
+The repo-owned `guest-image` job in [`.circleci/custom.yml`](../.circleci/custom.yml) builds
+the guest image on the tag (mkosi in a privileged archlinux container on a machine executor,
+`hack/guest-image-build.sh`) and publishes it as the OCI artifact
+`gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>` with `vm-manager image push`
+([`pkg/guestimage`](../pkg/guestimage)); the chart's `guestImage.tag` defaults to its
+appVersion, so a release is complete when that job is green (the image build takes about 30
+minutes on a cold cache). **GitHub Actions** tests what CircleCI cannot run: the guest
+image build for the KVM boot tests on the runners' nested virtualization. The
+devctl-generated `zz_generated.*` workflows add pre-commit (with the chart schema and
+README hooks), the values-schema check, gitleaks, semantic PR titles and the release
+automation. The tiers are those of [design.md](design.md) "Testing strategy".
 
 | Workflow | Runs on | When | What |
 |---|---|---|---|
 | `test.yml` | `ubuntu-latest` | every PR, push to main | `make test vet-e2e` (T0/T1, plus `go vet -tags e2e ./e2e/...` so the e2e package cannot rot unnoticed) and `make lint lint-e2e` |
 | `image.yml` | `archlinux:latest` container (`--privileged`) on `ubuntu-24.04` | PRs touching `images/**`, `cmd/vm-agent/**`, `internal/agent/**` or the workflow; push to main with the same paths; manual; called by `e2e.yml` | `make -C images` (all: keys, base image, every Kubernetes sysext of `KUBERNETES_VERSIONS`, verify; T2), sizes and the expected PCR 11 values in the job summary, `images/build/` (UKI, disk image, split partitions, `sysupdate/`, `policy.json`; not `base/`) as the **`guest-image`** artifact, 7 days (30 on main) |
 | `e2e.yml` | `ubuntu-24.04` (nested KVM) | every PR, push to main: **fast** subset; nightly 02:17 UTC and manual: **full** suite | T3: `go test -tags e2e` against the artifact, consoles and logs as the **`e2e-logs-<suite>`** artifact |
-| `chart.yml` | `ubuntu-latest` | every PR, push to main | the pod shape: `make helm-lint helm-verify` (`hack/verify-chart.sh` render assertions), `values.schema.json` and the chart README current, then the image of the commit built and side-loaded into a kind cluster and the chart installed with `helm/vm-manager/ci/smoke-values.yaml` (devices off, no KVM on the runner): the Deployment ready, `GET /api/v1/host` naming `/dev/kvm` under `missing` with QEMU, swtpm and OVMF found |
-| `publish.yml` | `ubuntu-latest` | after every green Auto-release run on main (a `workflow_run`: the tag is pushed with the workflow token, which fires no `push` event), a hand-pushed `v*` tag, or manual with a version | `ghcr.io/giantswarm/vm-manager:<version>` (linux/amd64) and the chart `oci://ghcr.io/giantswarm/vm-manager/helm/vm-manager:<version>`, version and appVersion stamped from the tag |
+| `chart.yml` | `ubuntu-latest` | every PR, push to main | `make helm-lint helm-verify`: the chart lints and the render assertions of `hack/verify-chart.sh` hold (privileged, no hostPath, the guest-image init container and its reference, the state claim, OAuth from the identity contract, the MCPServer CR) |
 
 The image build runs in an Arch container because the image is Arch (mkosi 27, systemd 261,
 erofs-utils, ukify, systemd-measure) and the hosted Ubuntu runner has none of that at the needed

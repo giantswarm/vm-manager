@@ -1,0 +1,5 @@
+generate-metadata: true
+chart-dir: ./helm/vm-manager
+destination: ./build
+# CI overwrites this, check .circleci/workflows.yml
+catalog-base-url: https://giantswarm.github.io/giantswarm-catalog/

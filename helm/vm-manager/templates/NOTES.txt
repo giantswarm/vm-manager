@@ -8,13 +8,16 @@ Try it:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vm-manager.fullname" . }} 8080:{{ .Values.service.port }}
   curl -s localhost:8080/api/v1/host     # ready + missing: what the node offers (add a bearer token with oauth.enabled)
-{{- if not .Values.host.devices.enabled }}
+{{- if .Values.guestImage.enabled }}
 
-host.devices.enabled is false: the pod has no /dev/kvm, so create_vm cannot work here.
+Guest image: {{ include "vm-manager.guestImageRef" . }} (fetched into {{ include "vm-manager.imageDir" . }} at pod start).
+{{- else }}
+
+guestImage.enabled is false: nothing fills {{ include "vm-manager.imageDir" . }}, so list_images is empty.
 {{- end }}
-{{- if not (or .Values.images.existingClaim .Values.images.hostPath) }}
+{{- if not (or .Values.persistence.existingClaim .Values.persistence.create) }}
 
-No image directory is mounted (images.existingClaim / images.hostPath): list_images is empty until one is.
+The state is an emptyDir: VM records, disks and the golden PCR values recorded into policy.json end with the pod (persistence.create / persistence.existingClaim).
 {{- end }}
 {{- if .Values.muster.mcpServer.enabled }}
 
