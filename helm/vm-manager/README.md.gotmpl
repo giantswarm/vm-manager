@@ -1,0 +1,17 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.description" . }}
+
+vm-manager as a platform pod: the Deployment runs privileged on a KVM node with
+`/dev/kvm` and `/dev/vhost-vsock` mounted from the node, QEMU and swtpm as its
+children (`--launcher process`), the state directory on an optional claim and
+the image directory (`make -C images` in a vm-manager checkout) mounted from a
+claim or a node path. With `oauth.enabled` it is an OAuth 2.1 resource server
+against the platform identity (`global.identity`), and with
+`muster.mcpServer.enabled` it registers with muster under the `agent-platform`
+tool group, next to agent-manager and model-manager. The agent-platform meta
+chart installs it as `components.vm-manager`.
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}

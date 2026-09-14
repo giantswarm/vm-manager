@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://github.com/losisin/helm-values-schema-json/raw/refs/heads/main/config.schema.json
+# `make helm-schema` regenerates values.schema.json from values.yaml with the
+# losisin helm-values-schema-json plugin, fixes the $ref siblings and
+# normalizes with schemalint (the same pipeline as model-manager's).
+values:
+  - helm/vm-manager/values.yaml
+
+draft: 2020
+indent: 4
+output: helm/vm-manager/values.schema.json
+
+bundle: true
+bundleRoot: ""
+bundleWithoutID: true
+
+k8sSchemaURL:
+  https://raw.githubusercontent.com/yannh/kubernetes-json-schema/refs/heads/master/v1.33.1/
+k8sSchemaVersion: "v1.33.1"
+
+useHelmDocs: true
+
+noAdditionalProperties: true
+noDefaultGlobal: false
+
+schemaRoot:
+  additionalProperties: false

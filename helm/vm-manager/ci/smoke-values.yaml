@@ -1,0 +1,13 @@
+# The chart's install smoke (.github/workflows/chart.yml): a kind cluster
+# without KVM, the image built from the same commit and side-loaded into the
+# node. Devices off — the node has no /dev/kvm to mount, and GET /api/v1/host
+# is expected to report it under `missing`; OAuth off — no identity provider
+# on the smoke cluster (the platform's chain is proven in agentlab).
+image:
+  registry: localhost
+  repository: vm-manager
+  tag: smoke
+  pullPolicy: Never
+host:
+  devices:
+    enabled: false

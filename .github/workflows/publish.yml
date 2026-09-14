@@ -1,0 +1,91 @@
+name: publish
+
+# The pod shape of vm-manager, published: on every tag the Auto Release
+# workflow cuts (zz_generated.auto_release.yaml, vX.Y.Z from the merged PR
+# titles), the container image ghcr.io/giantswarm/vm-manager:X.Y.Z (linux/amd64
+# — the guests are x86-64 and so is the runtime the image ships) and the chart
+# oci://ghcr.io/giantswarm/vm-manager/helm/vm-manager:X.Y.Z with version and
+# appVersion stamped from the tag. The agent-platform meta chart pins the
+# chart's range as components.vm-manager.versionRange. Publishing lives here
+# and not in a CircleCI pipeline because this repository runs on GitHub
+# Actions (test, image, e2e) and has no CircleCI project (#44).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish again (the tag without "v"; the checked-out ref is what gets built)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/vm-manager
+  HELM_REPO: oci://ghcr.io/${{ github.repository_owner }}/vm-manager/helm
+
+jobs:
+  publish:
+    name: image and chart to ghcr.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Resolve the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then version="$INPUT_VERSION"; else version="${GITHUB_REF_NAME#v}"; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::not a semver version: $version"; exit 1; }
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build and push the image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.19.0
+      - name: Package and push the chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          # helm keeps its own registry config: log in again with the same token.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm lint helm/vm-manager
+          helm package helm/vm-manager --version "$VERSION" --app-version "$VERSION" --destination dist
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "dist/vm-manager-${VERSION}.tgz" "$HELM_REPO"
+          {
+            echo "## vm-manager ${VERSION}"
+            echo
+            echo '```'
+            echo "image: ${IMAGE}:${VERSION}"
+            echo "chart: ${HELM_REPO}/vm-manager:${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

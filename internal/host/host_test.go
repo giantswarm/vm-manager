@@ -93,7 +93,7 @@ func TestGet(t *testing.T) {
 			runner: fakeRunner{},
 			check: func(t *testing.T, info *Info) {
 				assert.False(t, info.Ready)
-				assert.Equal(t, []string{KVMDevice, VsockDevice, QEMUBinary, SwtpmBinary, "OVMF code image", "systemd", "storage provider fs"}, info.Missing)
+				assert.Equal(t, []string{KVMDevice, VsockDevice, QEMUBinary, SwtpmBinary, "OVMF code image"}, info.Missing)
 				assert.Equal(t, "", info.Kernel)
 				assert.Equal(t, uint64(0), info.MemoryBytes)
 				assert.Equal(t, "no such file or directory", info.KVM.Error, "path errors carry the reason only")
@@ -132,7 +132,7 @@ func TestGet(t *testing.T) {
 			},
 		},
 		{
-			name: "block provider alone is not enough",
+			name: "without the fs provider the host is ready and reports what it has",
 			root: func(t *testing.T) string {
 				root := fullHost(t)
 				require.NoError(t, os.Remove(filepath.Join(root, StorageProviderDir, "fs")))
@@ -140,7 +140,8 @@ func TestGet(t *testing.T) {
 			},
 			runner: allTools,
 			check: func(t *testing.T, info *Info) {
-				assert.Equal(t, []string{"storage provider fs"}, info.Missing)
+				assert.True(t, info.Ready, "missing: %v", info.Missing)
+				assert.Equal(t, []string{"block"}, info.StorageProviders)
 			},
 		},
 	}

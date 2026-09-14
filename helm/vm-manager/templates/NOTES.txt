@@ -1,0 +1,22 @@
+vm-manager is running: KVM virtual machines with an instance metadata service, a vTPM and attestation.
+
+  REST API : http://{{ include "vm-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/v1
+  Contract : http://{{ include "vm-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/v1/openapi.yaml
+  MCP      : http://{{ include "vm-manager.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.mcp.path }}
+
+Try it:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vm-manager.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s localhost:8080/api/v1/host     # ready + missing: what the node offers (add a bearer token with oauth.enabled)
+{{- if not .Values.host.devices.enabled }}
+
+host.devices.enabled is false: the pod has no /dev/kvm, so create_vm cannot work here.
+{{- end }}
+{{- if not (or .Values.images.existingClaim .Values.images.hostPath) }}
+
+No image directory is mounted (images.existingClaim / images.hostPath): list_images is empty until one is.
+{{- end }}
+{{- if .Values.muster.mcpServer.enabled }}
+
+muster registers the server as MCPServer "{{ .Values.muster.mcpServer.name }}"; tools appear as x_{{ .Values.muster.mcpServer.name }}_<tool>.
+{{- end }}

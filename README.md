@@ -3,6 +3,7 @@
 [![test](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml)
 [![image](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml)
 [![e2e](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml)
+[![chart](https://github.com/giantswarm/vm-manager/actions/workflows/chart.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/chart.yml)
 
 VM provisioning service for the Giant Swarm Agent Platform: the write surface for
 **virtual machines**, the sibling of [agent-manager](https://github.com/giantswarm/agent-manager)
@@ -11,7 +12,7 @@ to the planned cluster-manager, which will hand the VMs it creates to Cluster AP
 on a KVM host (a laptop, a bare-metal node, a CI runner) and turns it into a small cloud
 region: every VM gets an instance metadata service, a vTPM with measured boot, an
 immutable OS image, a Kubernetes node stack as a versioned layer, and attestation before
-it receives its bootstrap secrets.
+it receives its bootstrap secrets. On the Agent Platform it runs as a pod of the KVM node.
 
 The whole guest and host flow is built from systemd primitives rather than a
 cloud-init-style agent. The image comes from mkosi (Arch Linux, systemd 261, a UKI with
@@ -39,18 +40,19 @@ The same operations are exposed twice from one process:
   call order (`get_host` first, then images and a network, then `create_vm`).
 
 Both surfaces call the same service and return the same JSON. On the platform vm-manager
-joins the agent-platform toolset the way its siblings do, a muster `MCPServer` pointing
-at the host with the `agent-platform.giantswarm.io/tool-group: agent-platform` label.
-[agentlab](https://github.com/giantswarm/agentlab) renders that CR for the machine that
-runs the lab (`platform.vmManager`), writes the environment `serve` needs to trust the
-lab's Dex, and proves the chain headlessly (`agentlab vm-manager-test`) — the way to
-test vm-manager against the real platform locally, see
+is a **pod**, like its siblings: the [Helm chart](helm/vm-manager) runs it privileged on
+a KVM node with `/dev/kvm` and `/dev/vhost-vsock` from the node, QEMU and swtpm as its
+children, the image directory mounted from a claim or a node path, OAuth against the
+platform identity, and registers it with muster through its own `MCPServer` CR carrying
+the `agent-platform.giantswarm.io/tool-group: agent-platform` label. The
+[agent-platform](https://github.com/giantswarm/agent-platform) meta chart installs it as
+`components.vm-manager`; [agentlab](https://github.com/giantswarm/agentlab) runs that
+component on a local kind cluster with a build from this checkout and proves the chain
+headlessly (`agentlab vm-manager-test`), see
 [docs/development.md](docs/development.md#testing-against-the-agent-platform-agentlab).
-The same CR rendered by the agent-platform chart for a management cluster's host is a
-follow-up, see [Status and roadmap](#status-and-roadmap). Design decisions and their reasons are in
-[docs/design.md](docs/design.md), the plan in [docs/plan.md](docs/plan.md), the host
-install in [docs/install.md](docs/install.md), development in
-[docs/development.md](docs/development.md).
+Design decisions and their reasons are in [docs/design.md](docs/design.md), the plan in
+[docs/plan.md](docs/plan.md), the install on a host or a cluster in
+[docs/install.md](docs/install.md), development in [docs/development.md](docs/development.md).
 
 ## API at a glance
 
@@ -366,11 +368,13 @@ provider is present, and by default `images/`. Startup order: storage detection 
 networks restored with their leases, the vsock notify listener, the image catalog, the
 VM records (VMs that were running become `stopped`), then the default network.
 
-Host prerequisites: KVM (`/dev/kvm`), `vhost_vsock` (`/dev/vhost-vsock`),
-`qemu-system-x86_64`, `swtpm`, an OVMF build, systemd (`systemd-ssh-proxy` for
-`exec_vm`), optionally systemd 261's storage provider. No root: the daemon needs group
-access to the two devices and nothing else. `GET /api/v1/host` reports `ready` and
-`missing` so a client can show what to install. `vm-manager image golden` is the second
+Host prerequisites of `create_vm`: KVM (`/dev/kvm`), `vhost_vsock` (`/dev/vhost-vsock`),
+`qemu-system-x86_64`, `swtpm` and an OVMF build. systemd (the transient units VMs
+survive restarts in) and systemd 261's storage provider (provider volumes instead of
+files) are capabilities the report names but does not require: without them VMs are
+child processes and volumes plain files — the shape of vm-manager in a pod. No root on a
+host: the daemon needs group access to the two devices and nothing else.
+`GET /api/v1/host` reports `ready` and `missing` so a client can show what to install. `vm-manager image golden` is the second
 command (see [Attestation](#attestation)); `vm-manager version` the third.
 
 As a system service: [`deploy/systemd/vm-manager.service`](deploy/systemd/vm-manager.service)
@@ -383,6 +387,17 @@ swtpm and unix sockets working, `EnvironmentFile=-/etc/vm-manager/env` for every
 flag, and `Restart=on-failure`. Stopping the service stops the VMs on it.
 [docs/install.md](docs/install.md) walks through packages, device permissions, images,
 the first VM, logs and upgrades.
+
+As a pod: the [chart](helm/vm-manager) (`ghcr.io/giantswarm/vm-manager`, the image with
+QEMU, swtpm and Ubuntu's OVMF; the chart at `oci://ghcr.io/giantswarm/vm-manager/helm`)
+runs `serve --launcher process` privileged — a hostPath device in an unprivileged
+container is denied by the device cgroup — with `/dev/kvm` and `/dev/vhost-vsock` mounted
+from the node, the state directory on an emptyDir or a claim (`persistence`), the image
+directory from a claim or a node path (`images`), OAuth from the platform's
+`global.identity`, and the muster `MCPServer` CR (`muster.mcpServer.enabled`). A pod
+restart ends the VMs (their records and disks survive on a claim); the guests' traffic
+leaves through the pod's own network. The agent-platform meta chart installs it as
+`components.vm-manager`, off by default: KVM nodes are not universal.
 
 ## Development
 
@@ -404,10 +419,9 @@ VMs as transient systemd units so that they survive vm-manager restarts, and
 multi-version publishing of the Kubernetes sysext directory.
 
 Follow-ups outside the prototype, in the order they are likely to matter: the CAPI
-infrastructure provider or cluster-manager glue that maps Machines to `create_vm`; the
-agent-platform chart's wiring for a management cluster (the muster `MCPServer` for the host
-and its values block — the lab half of it ships in agentlab, see
-[Testing against the agent platform](docs/development.md#testing-against-the-agent-platform-agentlab)); a PCR 12
+infrastructure provider or cluster-manager glue that maps Machines to `create_vm`; a
+published guest image the pod fetches instead of a directory an operator fills
+(`images.existingClaim`); a PCR 12
 prediction so the command-line addition is covered by the policy; EK-certified attestation
 keys and Secure Boot; a tap/bridge network backend; the host-side pre-install fast path
 (`systemd-repart` from the same definitions, skipping the installer boot); a multi

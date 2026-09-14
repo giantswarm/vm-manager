@@ -75,3 +75,39 @@ vet-e2e: ## Compile-check the e2e-tagged package without running it (go vet -tag
 .PHONY: lint-e2e
 lint-e2e: ## golangci-lint of the e2e-tagged package with the linters of make lint.
 	golangci-lint run -E gosec -E goconst --build-tags e2e --timeout=15m ./e2e/...
+
+##@ Container image and chart
+
+# The pod shape of vm-manager: the image (Dockerfile) and the chart
+# (helm/vm-manager) the agent-platform meta chart installs as
+# components.vm-manager. Published to ghcr.io by .github/workflows/publish.yml
+# on every tag the Auto Release workflow cuts.
+
+.PHONY: docker-build
+docker-build: ## Build the container image locally (TAG=vm-manager:dev): the binary and the QEMU/swtpm/OVMF runtime.
+	docker build --build-arg VERSION=dev-$(GITSHA1) --build-arg COMMIT=$(GITSHA1) --build-arg DATE=$(BUILDTIMESTAMP) -t $(or $(TAG),vm-manager:dev) .
+
+.PHONY: helm-lint
+helm-lint: ## Lint the chart.
+	helm lint helm/vm-manager
+
+.PHONY: helm-template
+helm-template: ## Render the chart with defaults.
+	helm template vm-manager helm/vm-manager
+
+.PHONY: helm-verify
+helm-verify: ## Render assertions for the chart (hack/verify-chart.sh).
+	hack/verify-chart.sh
+
+.PHONY: helm-schema
+helm-schema: ## Regenerate values.schema.json (needs the helm schema plugin and schemalint).
+	helm schema --config helm/vm-manager/.schema.yaml
+	python3 -c 'import json,sys; h=lambda o: {**{k:v for k,v in o.items() if k!="additionalProperties"},"unevaluatedProperties":False} if ("$$ref" in o and o.get("additionalProperties") is False) else o; p=sys.argv[1]; f=open(p,encoding="utf-8"); d=json.load(f,object_hook=h); f.close(); f=open(p,"w",encoding="utf-8"); json.dump(d,f); f.close()' helm/vm-manager/values.schema.json
+	schemalint normalize helm/vm-manager/values.schema.json -o helm/vm-manager/values.schema.json --force
+
+.PHONY: helm-docs
+helm-docs: ## Regenerate the chart README (needs helm-docs).
+	helm-docs --chart-search-root=helm --sort-values-order=file
+
+.PHONY: helm-test
+helm-test: helm-lint helm-verify ## Every offline chart check (what the chart workflow runs before the kind smoke).

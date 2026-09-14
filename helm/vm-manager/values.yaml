@@ -1,0 +1,258 @@
+# Default values for vm-manager.
+
+# -- Platform-wide values an umbrella chart (agent-platform) shares with every
+# component; Helm forwards them to this chart. `oauth.*` reads the identity
+# contract as its defaults: `global.identity.issuerUrl`,
+# `global.identity.clientId`, `global.identity.existingSecret`,
+# `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth
+# base URL. Empty here; a standalone install sets `oauth.*` directly.
+global: {}  # @schema type: object; additionalProperties: true
+
+# -- Number of replicas. One: the VMs are children of the one process and the
+# state directory is its own. The Deployment rolls with Recreate for the same
+# reason.
+replicaCount: 1
+
+image:
+  # -- Image registry.
+  registry: ghcr.io
+  # -- Image repository.
+  repository: giantswarm/vm-manager
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart appVersion.
+  tag: ""
+
+# -- Image pull secrets.
+imagePullSecrets: []
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the fully qualified release name (the umbrella chart pins the
+# Service name through this).
+fullnameOverride: ""
+
+host:
+  # -- The node's KVM devices, mounted into the pod from the node as hostPath
+  # character devices: /dev/kvm (hardware virtualization) and /dev/vhost-vsock
+  # (the guests' READY=1 and ssh). Off, the pod starts without them and
+  # GET /api/v1/host reports them under `missing` — for a cluster without KVM
+  # nodes, and for the chart's own install smoke.
+  devices:
+    enabled: true
+    paths:
+      - /dev/kvm
+      - /dev/vhost-vsock
+
+persistence:
+  # -- Keep the state directory (VM records, disks, vTPM state, consoles) on
+  # a PersistentVolumeClaim: an existing claim's name, or `create: true` to
+  # render one from the settings below. With neither the state is an emptyDir
+  # and the VMs die with the pod — they end with the process anyway
+  # (--launcher process), but a claim keeps their records and disks for the
+  # next `start_vm`.
+  existingClaim: ""
+  create: false
+  size: 50Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+images:
+  # -- The image directory `--image-dir` reads (README "Images"): the base
+  # image, its UKI and the Kubernetes sysext layers `make -C images` in a
+  # vm-manager checkout builds, with the policy.json that carries the golden
+  # PCR values. Mounted from an existing PersistentVolumeClaim an operator
+  # fills, or from a node path (a lab: agentlab mounts its checkout's
+  # images/build into the kind node); neither means an empty emptyDir and no
+  # bootable image. `vm-manager image golden` writes policy.json from outside
+  # the pod, so the mount is read-only by default.
+  existingClaim: ""
+  hostPath: ""
+  readOnly: true
+
+vm:
+  # -- CIDR of the default network, created at startup when missing.
+  networkSubnet: 192.168.127.0/24
+  # -- Its name; `create_vm` attaches to it unless told otherwise.
+  defaultNetwork: default
+  # -- Installer boot ceiling, then `failed`.
+  installTimeout: 5m
+  # -- `READY=1` ceiling, then `running`; raise it when user-data runs
+  # `kubeadm init` with image pulls.
+  bootTimeout: 4m
+  # -- Graceful power-down before SIGKILL, also on shutdown.
+  stopTimeout: 30s
+  # -- How guest TPM quotes are judged: `verify` (against the image policy and
+  # its golden values) or `noop`.
+  attestation: verify
+  # -- Bring-up of a new image or firmware only: accept golden PCRs the image
+  # policy has no value for and record them for `vm-manager image golden`.
+  learnGolden: false
+  ovmf:
+    # -- OVMF firmware code image and variable store template; empty probes
+    # the known locations (the image ships Ubuntu's under /usr/share/OVMF).
+    code: ""
+    vars: ""
+
+metrics:
+  # -- Serve the Prometheus exposition at GET /metrics, outside the OAuth
+  # guard like /healthz.
+  enabled: true
+  # -- Series kept per VM from one systemd-report upload.
+  guestSeriesLimit: 1000
+
+mcp:
+  # -- MCP endpoint path (the REST API is always served).
+  path: /mcp
+
+oauth:
+  # -- Make vm-manager an OAuth 2.1 resource server (mcp-oauth): the MCP
+  # endpoint and the REST API require a bearer token the platform identity
+  # provider issued, and every call carries the caller's identity. On the
+  # Agent Platform muster forwards the session's IdP id_token to this server
+  # (MCPServer `auth.forwardToken`, rendered below), validated against the
+  # IdP's JWKS when its audience is in `trustedAudiences`. Off: anonymous —
+  # only for a server nothing but a trusted proxy can reach.
+  enabled: false
+  # -- Public base URL of this server: the issuer of its own OAuth metadata
+  # (https, or http on loopback). Empty derives
+  # `https://<fullname>.<global.domain>` when `global.domain` is set.
+  baseURL: ""
+  # -- Identity provider: `dex` or `google`.
+  provider: dex
+  dex:
+    # -- Dex issuer URL. Empty falls back to `global.identity.issuerUrl`.
+    issuerURL: ""
+    # -- Dex OAuth client ID. Empty falls back to `global.identity.clientId`.
+    clientID: ""
+    # -- Dex OAuth client secret (prefer `oauth.existingSecret`).
+    clientSecret: ""
+    # -- Let the issuer resolve to a private or loopback address (an
+    # in-cluster Dex).
+    allowPrivateURLs: false
+    # -- Secret with the CA of a Dex that serves a private certificate;
+    # mounted and passed as `--dex-ca-file`. Empty name falls back to
+    # `global.identity.ca.secretName` / `global.identity.ca.key`.
+    caSecret:
+      name: ""
+      key: ca.crt
+  google:
+    # -- Google OAuth client ID (not secret; may also come from the Secret key
+    # `google-client-id` when empty).
+    clientID: ""
+    # -- Google OAuth client secret (prefer `oauth.existingSecret`).
+    clientSecret: ""
+  # -- Existing Secret with the provider credentials: `dex-client-secret`
+  # (dex) or `google-client-secret` (+ optional `google-client-id`) (google).
+  # Empty falls back to `global.identity.existingSecret`, whose
+  # `dex-client-secret` is the platform client's; without that, the chart
+  # renders a Secret from the values above.
+  existingSecret: ""
+  # -- OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO
+  # token forwarding). Empty falls back to `[global.identity.clientId]`, the
+  # platform client MCP clients and the muster CLI log in with. The server
+  # trusts the union of this list and `muster.mcpServer.auth.requiredAudiences`
+  # (in that order, without duplicates).
+  trustedAudiences: []
+  sso:
+    # -- Let the IdP's JWKS endpoint resolve to a private address when
+    # validating forwarded tokens (an in-cluster Dex).
+    allowPrivateIPs: false
+  # -- Accept unauthenticated dynamic client registration (labs only).
+  allowPublicClientRegistration: false
+
+muster:
+  mcpServer:
+    # -- Register this server with muster by rendering an
+    # `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then
+    # appear as `x_<name>_<tool>`. The CR carries
+    # `agent-platform.giantswarm.io/tool-group: agent-platform`: the platform's
+    # own management surface, next to agent-manager and model-manager.
+    enabled: false
+    # -- MCPServer CR name (drives the tool prefix).
+    name: vm-manager
+    # -- Start the server connection when muster initializes.
+    autoStart: true
+    # -- Human-readable description shown by muster.
+    description: VM provisioning on the platform's KVM node (images, networks, VMs with measured boot and attestation); call get_host first, then list_images and list_networks, then create_vm
+    # -- Extra labels on the MCPServer CR (merged last: they may override the
+    # tool-group label).
+    labels: {}  # @schema additionalProperties: true
+    # -- How muster authenticates to this server; rendered only with
+    # `oauth.enabled`. `forwardToken` makes muster forward the session's IdP
+    # id_token byte-identical. `requiredAudiences` are extra audiences that
+    # token must carry, trusted as bearer audiences by construction.
+    auth:
+      forwardToken: true
+      requiredAudiences: []
+
+networkPolicy:
+  # -- Create a Kubernetes NetworkPolicy for the pod.
+  enabled: false
+  # -- Namespaces allowed to reach the API (label kubernetes.io/metadata.name).
+  # Empty allows ingress from the release namespace only.
+  ingressNamespaces: []
+  # -- The guests' traffic leaves the pod: the networks are userspace NAT
+  # (gvisor-tap-vsock) and a VM reaches whatever the pod reaches, so the
+  # policy admits every egress destination. False limits egress to DNS and
+  # the identity provider — VMs then have no network beyond their own.
+  guestEgress: true
+
+serviceAccount:
+  # -- Create a ServiceAccount. vm-manager calls no Kubernetes API; the token
+  # is never mounted.
+  create: true
+  # -- Annotations on the ServiceAccount.
+  annotations: {}  # @schema additionalProperties: true
+  # -- ServiceAccount name (generated when empty).
+  name: ""
+
+# -- Annotations on the pod.
+podAnnotations: {}  # @schema additionalProperties: true
+# -- Labels on the pod.
+podLabels: {}  # @schema additionalProperties: true
+
+# -- Pod security context. Root: /dev/kvm is root:kvm on every node and the
+# process forks QEMU and swtpm as its own children.
+podSecurityContext: {}  # @schema additionalProperties: true
+
+# -- Container security context. Privileged, on purpose: a hostPath device
+# mounted into an unprivileged container is denied by the device cgroup
+# (open(2) fails with EPERM) unless a device plugin hands it out, so the
+# privileged flag is what makes /dev/kvm and /dev/vhost-vsock usable. No
+# capability is used beyond that (no bridges, no tap devices, no
+# CAP_NET_ADMIN: the networks are userspace).
+securityContext:  # @schema additionalProperties: true
+  privileged: true
+  runAsUser: 0
+  runAsGroup: 0
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port (container listens on 8080).
+  port: 8080
+
+# -- Container resources. The VMs are QEMU processes inside this container,
+# so a memory limit bounds the sum of their memory too; none by default.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+logging:
+  # -- Enable debug logging.
+  verbose: false
+
+# -- Extra container arguments.
+extraArgs: []
+# -- Extra environment variables.
+extraEnv: []  # @schema item: object ; itemProperties: {name: {type: string}, value: {type: string}, valueFrom: {type: object, additionalProperties: true}}
+
+# -- Node selector: the KVM node(s) — a label such as
+# `kvm.giantswarm.io/enabled: "true"` on nodes that expose /dev/kvm.
+nodeSelector: {}  # @schema additionalProperties: true
+# -- Tolerations.
+tolerations: []  # @schema item: object ; itemProperties: {key: {type: string}, operator: {type: string}, value: {type: string}, effect: {type: string}, tolerationSeconds: {type: integer}}
+# -- Affinity.
+affinity: {}  # @schema additionalProperties: true

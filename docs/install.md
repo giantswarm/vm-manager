@@ -1,7 +1,8 @@
-# Installing vm-manager on a KVM host
+# Installing vm-manager
 
-vm-manager runs on the KVM host itself, not in a pod: a laptop, a bare-metal node, a
-GitHub Actions runner. This guide installs it as a system service with
+vm-manager runs where the KVM devices are: as a pod of a KVM node on the Agent Platform
+([On Kubernetes](#on-kubernetes-the-chart) below), or directly on a host — a laptop, a
+bare-metal node, a GitHub Actions runner. The host part of this guide installs it as a system service with
 [`deploy/systemd/vm-manager.service`](../deploy/systemd/vm-manager.service). The daemon
 needs no root: everything it does (QEMU, swtpm, the userspace network, the IMDS) runs
 as an unprivileged user with access to three device nodes. What the service is and how
@@ -17,15 +18,17 @@ it works is in the [README](../README.md); local development loops are in
 | QEMU | `qemu-system-x86` (or `qemu-full`) | `qemu-system-x86_64` on `$PATH` |
 | swtpm | `swtpm` | one vTPM process per VM |
 | OVMF | `edk2-ovmf` | searched at `/usr/share/edk2/x64/OVMF_CODE.4m.fd`, `/usr/share/OVMF/OVMF_CODE_4M.fd`, `/usr/share/OVMF/OVMF_CODE.fd`, `/usr/share/edk2/ovmf/OVMF_CODE.fd`; other paths through `--ovmf-code` / `--ovmf-vars` |
-| systemd | `systemd` (any recent version) | `systemctl`, `systemd-ssh-proxy` for `exec_vm` over vsock |
+| systemd (optional) | `systemd` (any recent version) | transient units the VMs survive restarts in (`--launcher systemd`); without it VMs are child processes of `serve` |
 | storage provider (optional) | systemd 261 with `io.systemd.StorageProvider` | when the `fs` provider's socket answers under `/run/systemd/io.systemd.StorageProvider/`, VM disks are provider volumes; otherwise plain files below `<state-dir>/volumes/` |
 | ssh client | `openssh` | `exec_vm` and the e2e tests |
 | image build (optional) | `mkosi` >= 27, `erofs-utils`, `python-pefile`, `gnupg`, `go` 1.26+, `sfdisk` (util-linux) | only on the machine that builds images, see below |
 
 Any distribution with these packages works; the paths in the table are what the code
 probes. `vm-manager serve` starts on a host that lacks some of them and reports the gaps
-through `GET /api/v1/host` (`ready: false`, `missing: [...]`) so an operator or an agent
-can see what to install; `create_vm` fails until `ready` is true.
+through `GET /api/v1/host` (`ready: false`, `missing: [...]` — the two devices, the two
+binaries and the firmware; systemd and the storage provider are reported as found or not
+but never required) so an operator or an agent can see what to install; `create_vm` fails
+until `ready` is true.
 
 Device access. `/dev/kvm` is `root:kvm 0660` on every mainstream distribution.
 `/dev/vhost-vsock` is often `root:root 0600`; give it to the same group:
@@ -279,6 +282,58 @@ built; a multi-version directory has to merge the manifests until
 `policy.json` is per image version: `make -C images verify` recomputes PCR 11 and 13 for
 the new build and keeps the golden values of the same image version; a new version (or a
 firmware update on the host) needs one learn-mode boot and `image golden` again.
+
+## On Kubernetes (the chart)
+
+[`helm/vm-manager`](../helm/vm-manager) is vm-manager as a platform pod, the shape the
+[agent-platform](https://github.com/giantswarm/agent-platform) meta chart installs as
+`components.vm-manager` (off by default; a node with KVM is the prerequisite). Published
+by [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) on every release
+tag: the image `ghcr.io/giantswarm/vm-manager:<version>` (Ubuntu 26.04's QEMU, swtpm and OVMF
+next to the binary, x86-64) and the chart
+`oci://ghcr.io/giantswarm/vm-manager/helm/vm-manager:<version>`.
+
+What the chart renders, and why:
+
+- A **Deployment** (one replica, `Recreate`) running `serve --launcher process
+  --state-dir /var/lib/vm-manager --image-dir /var/lib/vm-manager/images`, **privileged**
+  with `runAsUser: 0`. A hostPath character device mounted into an unprivileged container
+  is denied by the device cgroup (`open(2)` fails with `EPERM`) unless a device plugin
+  hands it out, so the privileged flag is what makes `/dev/kvm` and `/dev/vhost-vsock`
+  usable; nothing else of it is used (the networks are userspace: no bridges, no tap
+  devices, no `CAP_NET_ADMIN`). `host.devices.paths` lists the devices, `host.devices.enabled:
+  false` starts the pod without them (the report then names them under `missing`).
+- No service manager in the pod, so QEMU and swtpm are children of the process and end
+  with it: a pod restart stops the VMs. Their records, disks (plain files, no storage
+  provider) and vTPM state survive on a claim (`persistence.existingClaim`, or
+  `persistence.create: true`); without one the state is an emptyDir.
+- The **image directory** is mounted from a claim an operator fills with the output of
+  `make -C images` (`images.existingClaim`) or from a node path (`images.hostPath` — a lab
+  mounting its checkout's `images/build` into the node), read-only by default: `vm-manager
+  image golden` writes `policy.json` from outside the pod. Neither means no bootable image.
+  The `images` workflow publishes the build as a GitHub Actions artifact only; a registry
+  channel the pod fetches from is a follow-up.
+- **OAuth** (`oauth.enabled`) against the platform identity: the issuer, client, client
+  secret and CA fall back to `global.identity.*` and the base URL to `global.domain`, the
+  way model-manager's chart reads them; `--allow-private-oauth-urls` and
+  `--sso-allow-private-ips` for an in-cluster Dex are `oauth.dex.allowPrivateURLs` and
+  `oauth.sso.allowPrivateIPs`. The trusted audiences are `oauth.trustedAudiences` (default
+  the platform client) plus `muster.mcpServer.auth.requiredAudiences`.
+- The **muster `MCPServer`** (`muster.mcpServer.enabled`): `streamable-http` to the
+  Service, `auth.type: oauth` with `forwardToken: true`, labelled
+  `agent-platform.giantswarm.io/tool-group: agent-platform` — the platform's own management
+  surface, next to agent-manager and model-manager.
+- The guests' traffic leaves through the pod's network (userspace NAT), so a network
+  policy on the pod must admit their destinations: the chart's own policy
+  (`networkPolicy.enabled`) admits every egress destination unless `guestEgress: false`.
+- Resources: a memory limit bounds the sum of the VMs' memory too (they are processes of
+  this container); the chart sets requests only.
+
+Pod restarts and the golden values: the OVMF build inside the image differs from a host's,
+so an image whose `policy.json` was recorded against another firmware needs `vm-manager
+image golden` once against a VM the pod booted in learn mode (`vm.learnGolden: true` for
+that one boot), run from a machine that has the image directory — the recipe of [First
+VM](#first-vm) with the pod's API behind a port-forward or the platform's muster.
 
 ## Known limitations
 
