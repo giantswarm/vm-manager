@@ -40,9 +40,14 @@ The same operations are exposed twice from one process:
 
 Both surfaces call the same service and return the same JSON. On the platform vm-manager
 joins the agent-platform toolset the way its siblings do, a muster `MCPServer` pointing
-at the host with the `agent-platform.giantswarm.io/tool-group: agent-platform` label;
-that wiring (an MCPServer CR for a service that runs outside the cluster) is a follow-up,
-see [Status and roadmap](#status-and-roadmap). Design decisions and their reasons are in
+at the host with the `agent-platform.giantswarm.io/tool-group: agent-platform` label.
+[agentlab](https://github.com/giantswarm/agentlab) renders that CR for the machine that
+runs the lab (`platform.vmManager`), writes the environment `serve` needs to trust the
+lab's Dex, and proves the chain headlessly (`agentlab vm-manager-test`) — the way to
+test vm-manager against the real platform locally, see
+[docs/development.md](docs/development.md#testing-against-the-agent-platform-agentlab).
+The same CR rendered by the agent-platform chart for a management cluster's host is a
+follow-up, see [Status and roadmap](#status-and-roadmap). Design decisions and their reasons are in
 [docs/design.md](docs/design.md), the plan in [docs/plan.md](docs/plan.md), the host
 install in [docs/install.md](docs/install.md), development in
 [docs/development.md](docs/development.md).
@@ -400,7 +405,9 @@ multi-version publishing of the Kubernetes sysext directory.
 
 Follow-ups outside the prototype, in the order they are likely to matter: the CAPI
 infrastructure provider or cluster-manager glue that maps Machines to `create_vm`; the
-agent-platform wiring (muster `MCPServer` for the host, the tool-group label); a PCR 12
+agent-platform chart's wiring for a management cluster (the muster `MCPServer` for the host
+and its values block — the lab half of it ships in agentlab, see
+[Testing against the agent platform](docs/development.md#testing-against-the-agent-platform-agentlab)); a PCR 12
 prediction so the command-line addition is covered by the policy; EK-certified attestation
 keys and Secure Boot; a tap/bridge network backend; the host-side pre-install fast path
 (`systemd-repart` from the same definitions, skipping the installer boot); a multi
