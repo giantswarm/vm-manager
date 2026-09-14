@@ -472,7 +472,7 @@
                     "properties": {
                         "code": {
                             "type": "string",
-                            "description": "OVMF firmware code image and variable store template; empty probes the known locations (the image ships Debian's under /usr/share/OVMF)."
+                            "description": "OVMF firmware code image and variable store template; empty probes the known locations (the image ships Ubuntu's under /usr/share/OVMF)."
                         },
                         "vars": {
                             "type": "string"

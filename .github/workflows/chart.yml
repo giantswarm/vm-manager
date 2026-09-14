@@ -4,9 +4,9 @@ name: chart
 # builds, the chart lints, its render assertions hold (hack/verify-chart.sh),
 # values.schema.json and the chart README are current, and the chart installs
 # on a kind cluster with the image of this commit — the Deployment becomes
-# ready and GET /api/v1/host answers, naming the KVM devices the smoke node
-# lacks. What the chart does on a real KVM node with the platform's identity is
-# proven in agentlab (docs/development.md).
+# ready and GET /api/v1/host answers with the runtime the image ships. What
+# the chart does on a KVM node with the platform's identity is proven in
+# agentlab (docs/development.md).
 
 on:
   pull_request:
@@ -83,9 +83,13 @@ jobs:
           curl -fsS localhost:18080/healthz
           host=$(curl -fsS localhost:18080/api/v1/host)
           echo "$host" | jq .
-          # No KVM on the smoke node (devices off): the report says so and
-          # names QEMU, swtpm and OVMF as found — the runtime the image ships.
-          echo "$host" | jq -e '.ready == false and (.missing | index("/dev/kvm")) and .qemu.found and .swtpm.found and (.ovmfCode | length > 0)' >/dev/null \
+          # The runtime the image ships is found (QEMU, swtpm, OVMF) and the
+          # verdict is consistent: ready exactly when nothing is missing.
+          # Whether the devices are there depends on the runner — GitHub's
+          # have /dev/kvm, and a privileged container sees the node's devices
+          # whatever host.devices says — so the smoke asserts the shape, not
+          # the KVM verdict; the platform chain runs in agentlab.
+          echo "$host" | jq -e '.qemu.found and .swtpm.found and (.ovmfCode | length > 0) and (.ready == (((.missing // []) | length) == 0))' >/dev/null \
             || { echo "::error::unexpected host report"; exit 1; }
           curl -fsS localhost:18080/metrics | grep -q '^vm_manager_build_info' || { echo "::error::no build info metric"; exit 1; }
       - name: Logs on failure

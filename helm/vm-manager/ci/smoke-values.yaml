@@ -1,8 +1,10 @@
-# The chart's install smoke (.github/workflows/chart.yml): a kind cluster
-# without KVM, the image built from the same commit and side-loaded into the
-# node. Devices off — the node has no /dev/kvm to mount, and GET /api/v1/host
-# is expected to report it under `missing`; OAuth off — no identity provider
-# on the smoke cluster (the platform's chain is proven in agentlab).
+# The chart's install smoke (.github/workflows/chart.yml): a kind cluster on
+# the runner, the image built from the same commit and side-loaded into the
+# node. Devices off — a node without /dev/kvm has nothing to mount, and the
+# pod must start regardless (a privileged container still sees the node's
+# devices where the runner has them, so the smoke asserts the report's shape,
+# not the KVM verdict); OAuth off — no identity provider on the smoke cluster
+# (the platform's chain is proven in agentlab).
 image:
   registry: localhost
   repository: vm-manager
