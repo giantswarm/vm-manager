@@ -1,0 +1,489 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "affinity": {
+            "type": "object",
+            "description": "Affinity.",
+            "additionalProperties": true
+        },
+        "extraArgs": {
+            "type": "array",
+            "description": "Extra container arguments."
+        },
+        "extraEnv": {
+            "type": "array",
+            "description": "Extra environment variables.",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "value": {
+                        "type": "string"
+                    },
+                    "valueFrom": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                }
+            }
+        },
+        "fullnameOverride": {
+            "type": "string",
+            "description": "Override the fully qualified release name (the umbrella chart pins the Service name through this)."
+        },
+        "global": {
+            "type": "object",
+            "description": "Platform-wide values an umbrella chart (agent-platform) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly.",
+            "additionalProperties": true
+        },
+        "host": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "devices": {
+                    "type": "object",
+                    "description": "The node's KVM devices, mounted into the pod from the node as hostPath character devices: /dev/kvm (hardware virtualization) and /dev/vhost-vsock (the guests' READY=1 and ssh). Off, the pod starts without them and GET /api/v1/host reports them under `missing` — for a cluster without KVM nodes, and for the chart's own install smoke.",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "image": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "pullPolicy": {
+                    "type": "string",
+                    "description": "Image pull policy."
+                },
+                "registry": {
+                    "type": "string",
+                    "description": "Image registry."
+                },
+                "repository": {
+                    "type": "string",
+                    "description": "Image repository."
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Image tag. Defaults to the chart appVersion."
+                }
+            }
+        },
+        "imagePullSecrets": {
+            "type": "array",
+            "description": "Image pull secrets."
+        },
+        "images": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "existingClaim": {
+                    "type": "string",
+                    "description": "The image directory `--image-dir` reads (README \"Images\"): the base image, its UKI and the Kubernetes sysext layers `make -C images` in a vm-manager checkout builds, with the policy.json that carries the golden PCR values. Mounted from an existing PersistentVolumeClaim an operator fills, or from a node path (a lab: agentlab mounts its checkout's images/build into the kind node); neither means an empty emptyDir and no bootable image. `vm-manager image golden` writes policy.json from outside the pod, so the mount is read-only by default."
+                },
+                "hostPath": {
+                    "type": "string"
+                },
+                "readOnly": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "logging": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "verbose": {
+                    "type": "boolean",
+                    "description": "Enable debug logging."
+                }
+            }
+        },
+        "mcp": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "MCP endpoint path (the REST API is always served)."
+                }
+            }
+        },
+        "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Serve the Prometheus exposition at GET /metrics, outside the OAuth guard like /healthz."
+                },
+                "guestSeriesLimit": {
+                    "type": "integer",
+                    "description": "Series kept per VM from one systemd-report upload."
+                }
+            }
+        },
+        "muster": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "mcpServer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Human-readable description shown by muster."
+                        },
+                        "auth": {
+                            "type": "object",
+                            "description": "How muster authenticates to this server; rendered only with `oauth.enabled`. `forwardToken` makes muster forward the session's IdP id_token byte-identical. `requiredAudiences` are extra audiences that token must carry, trusted as bearer audiences by construction.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "forwardToken": {
+                                    "type": "boolean"
+                                },
+                                "requiredAudiences": {
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "autoStart": {
+                            "type": "boolean",
+                            "description": "Start the server connection when muster initializes."
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Register this server with muster by rendering an `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then appear as `x_<name>_<tool>`. The CR carries `agent-platform.giantswarm.io/tool-group: agent-platform`: the platform's own management surface, next to agent-manager and model-manager."
+                        },
+                        "labels": {
+                            "type": "object",
+                            "description": "Extra labels on the MCPServer CR (merged last: they may override the tool-group label).",
+                            "additionalProperties": true
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "MCPServer CR name (drives the tool prefix)."
+                        }
+                    }
+                }
+            }
+        },
+        "nameOverride": {
+            "type": "string",
+            "description": "Override the chart name."
+        },
+        "networkPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Create a Kubernetes NetworkPolicy for the pod."
+                },
+                "guestEgress": {
+                    "type": "boolean",
+                    "description": "The guests' traffic leaves the pod: the networks are userspace NAT (gvisor-tap-vsock) and a VM reaches whatever the pod reaches, so the policy admits every egress destination. False limits egress to DNS and the identity provider — VMs then have no network beyond their own."
+                },
+                "ingressNamespaces": {
+                    "type": "array",
+                    "description": "Namespaces allowed to reach the API (label kubernetes.io/metadata.name). Empty allows ingress from the release namespace only."
+                }
+            }
+        },
+        "nodeSelector": {
+            "type": "object",
+            "description": "Node selector: the KVM node(s) — a label such as `kvm.giantswarm.io/enabled: \"true\"` on nodes that expose /dev/kvm.",
+            "additionalProperties": true
+        },
+        "oauth": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "allowPublicClientRegistration": {
+                    "type": "boolean",
+                    "description": "Accept unauthenticated dynamic client registration (labs only)."
+                },
+                "baseURL": {
+                    "type": "string",
+                    "description": "Public base URL of this server: the issuer of its own OAuth metadata (https, or http on loopback). Empty derives `https://<fullname>.<global.domain>` when `global.domain` is set."
+                },
+                "dex": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "allowPrivateURLs": {
+                            "type": "boolean",
+                            "description": "Let the issuer resolve to a private or loopback address (an in-cluster Dex)."
+                        },
+                        "caSecret": {
+                            "type": "object",
+                            "description": "Secret with the CA of a Dex that serves a private certificate; `global.identity.ca.secretName` / `global.identity.ca.key`.",
+                            "additionalProperties": false,
+                            "properties": {
+                                "key": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "clientID": {
+                            "type": "string",
+                            "description": "Dex OAuth client ID. Empty falls back to `global.identity.clientId`."
+                        },
+                        "clientSecret": {
+                            "type": "string",
+                            "description": "Dex OAuth client secret (prefer `oauth.existingSecret`)."
+                        },
+                        "issuerURL": {
+                            "type": "string",
+                            "description": "Dex issuer URL. Empty falls back to `global.identity.issuerUrl`."
+                        }
+                    }
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Make vm-manager an OAuth 2.1 resource server (mcp-oauth): the MCP endpoint and the REST API require a bearer token the platform identity provider issued, and every call carries the caller's identity. On the Agent Platform muster forwards the session's IdP id_token to this server (MCPServer `auth.forwardToken`, rendered below), validated against the IdP's JWKS when its audience is in `trustedAudiences`. Off: anonymous — only for a server nothing but a trusted proxy can reach."
+                },
+                "existingSecret": {
+                    "type": "string",
+                    "description": "Existing Secret with the provider credentials: `dex-client-secret` (dex) or `google-client-secret` (+ optional `google-client-id`) (google). Empty falls back to `global.identity.existingSecret`, whose `dex-client-secret` is the platform client's; without that, the chart renders a Secret from the values above."
+                },
+                "google": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "clientID": {
+                            "type": "string",
+                            "description": "Google OAuth client ID (not secret; may also come from the Secret key `google-client-id` when empty)."
+                        },
+                        "clientSecret": {
+                            "type": "string",
+                            "description": "Google OAuth client secret (prefer `oauth.existingSecret`)."
+                        }
+                    }
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Identity provider: `dex` or `google`."
+                },
+                "sso": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "allowPrivateIPs": {
+                            "type": "boolean",
+                            "description": "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (an in-cluster Dex)."
+                        }
+                    }
+                },
+                "trustedAudiences": {
+                    "type": "array",
+                    "description": "OAuth client IDs whose IdP id_tokens are accepted as bearer tokens (SSO token forwarding). Empty falls back to `[global.identity.clientId]`, the platform client MCP clients and the muster CLI log in with. The server trusts the union of this list and `muster.mcpServer.auth.requiredAudiences` (in that order, without duplicates)."
+                }
+            }
+        },
+        "persistence": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "accessModes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "create": {
+                    "type": "boolean"
+                },
+                "existingClaim": {
+                    "type": "string",
+                    "description": "Keep the state directory (VM records, disks, vTPM state, consoles) on a PersistentVolumeClaim: an existing claim's name, or `create: true` to render one from the settings below. With neither the state is an emptyDir and the VMs die with the pod — they end with the process anyway next `start_vm`."
+                },
+                "size": {
+                    "type": "string"
+                },
+                "storageClass": {
+                    "type": "string"
+                }
+            }
+        },
+        "podAnnotations": {
+            "type": "object",
+            "description": "Annotations on the pod.",
+            "additionalProperties": true
+        },
+        "podLabels": {
+            "type": "object",
+            "description": "Labels on the pod.",
+            "additionalProperties": true
+        },
+        "podSecurityContext": {
+            "type": "object",
+            "description": "Pod security context. Root: /dev/kvm is root:kvm on every node and the process forks QEMU and swtpm as its own children.",
+            "additionalProperties": true
+        },
+        "replicaCount": {
+            "type": "integer",
+            "description": "Number of replicas. One: the VMs are children of the one process and the state directory is its own. The Deployment rolls with Recreate for the same reason."
+        },
+        "resources": {
+            "type": "object",
+            "description": "Container resources. The VMs are QEMU processes inside this container, so a memory limit bounds the sum of their memory too; none by default.",
+            "additionalProperties": false,
+            "properties": {
+                "requests": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "cpu": {
+                            "type": "string"
+                        },
+                        "memory": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "securityContext": {
+            "type": "object",
+            "description": "Container security context. Privileged, on purpose: a hostPath device mounted into an unprivileged container is denied by the device cgroup (open(2) fails with EPERM) unless a device plugin hands it out, so the privileged flag is what makes /dev/kvm and /dev/vhost-vsock usable. No capability is used beyond that (no bridges, no tap devices, no CAP_NET_ADMIN: the networks are userspace).",
+            "additionalProperties": true,
+            "properties": {
+                "privileged": {
+                    "type": "boolean"
+                },
+                "runAsGroup": {
+                    "type": "integer"
+                },
+                "runAsUser": {
+                    "type": "integer"
+                }
+            }
+        },
+        "service": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Service type."
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "Service port (container listens on 8080)."
+                }
+            }
+        },
+        "serviceAccount": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "annotations": {
+                    "type": "object",
+                    "description": "Annotations on the ServiceAccount.",
+                    "additionalProperties": true
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": "Create a ServiceAccount. vm-manager calls no Kubernetes API; the token is never mounted."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "ServiceAccount name (generated when empty)."
+                }
+            }
+        },
+        "tolerations": {
+            "type": "array",
+            "description": "Tolerations.",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "effect": {
+                        "type": "string"
+                    },
+                    "key": {
+                        "type": "string"
+                    },
+                    "operator": {
+                        "type": "string"
+                    },
+                    "tolerationSeconds": {
+                        "type": "integer"
+                    },
+                    "value": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "vm": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "attestation": {
+                    "type": "string",
+                    "description": "How guest TPM quotes are judged: `verify` (against the image policy and its golden values) or `noop`."
+                },
+                "bootTimeout": {
+                    "type": "string",
+                    "description": "`READY=1` ceiling, then `running`; raise it when user-data runs `kubeadm init` with image pulls."
+                },
+                "defaultNetwork": {
+                    "type": "string",
+                    "description": "Its name; `create_vm` attaches to it unless told otherwise."
+                },
+                "installTimeout": {
+                    "type": "string",
+                    "description": "Installer boot ceiling, then `failed`."
+                },
+                "learnGolden": {
+                    "type": "boolean",
+                    "description": "Bring-up of a new image or firmware only: accept golden PCRs the image policy has no value for and record them for `vm-manager image golden`."
+                },
+                "networkSubnet": {
+                    "type": "string",
+                    "description": "CIDR of the default network, created at startup when missing."
+                },
+                "ovmf": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "OVMF firmware code image and variable store template; empty probes the known locations (the image ships Ubuntu's under /usr/share/OVMF)."
+                        },
+                        "vars": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "stopTimeout": {
+                    "type": "string",
+                    "description": "Graceful power-down before SIGKILL, also on shutdown."
+                }
+            }
+        }
+    }
+}

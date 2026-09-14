@@ -290,14 +290,17 @@ GitHub Actions, `.github/workflows/`. The devctl-generated `zz_generated.*` work
 pre-commit, gitleaks, semantic PR titles and the release automation. CircleCI generation is
 switched off for this repo in giantswarm/github (`gen.ci.generate: false` in
 `repositories/team-bumblebee.yaml`): the image build needs an Arch container and the boot
-tests nested KVM, and nothing is published through the architect pipeline. The tiers are
-those of [design.md](design.md) "Testing strategy".
+tests nested KVM, and the container image and chart publish from here to ghcr.io
+(`publish.yml`), the way the kagent and Substrate lines do. The tiers are those of
+[design.md](design.md) "Testing strategy".
 
 | Workflow | Runs on | When | What |
 |---|---|---|---|
 | `test.yml` | `ubuntu-latest` | every PR, push to main | `make test vet-e2e` (T0/T1, plus `go vet -tags e2e ./e2e/...` so the e2e package cannot rot unnoticed) and `make lint lint-e2e` |
 | `image.yml` | `archlinux:latest` container (`--privileged`) on `ubuntu-24.04` | PRs touching `images/**`, `cmd/vm-agent/**`, `internal/agent/**` or the workflow; push to main with the same paths; manual; called by `e2e.yml` | `make -C images` (all: keys, base image, every Kubernetes sysext of `KUBERNETES_VERSIONS`, verify; T2), sizes and the expected PCR 11 values in the job summary, `images/build/` (UKI, disk image, split partitions, `sysupdate/`, `policy.json`; not `base/`) as the **`guest-image`** artifact, 7 days (30 on main) |
 | `e2e.yml` | `ubuntu-24.04` (nested KVM) | every PR, push to main: **fast** subset; nightly 02:17 UTC and manual: **full** suite | T3: `go test -tags e2e` against the artifact, consoles and logs as the **`e2e-logs-<suite>`** artifact |
+| `chart.yml` | `ubuntu-latest` | every PR, push to main | the pod shape: `make helm-lint helm-verify` (`hack/verify-chart.sh` render assertions), `values.schema.json` and the chart README current, then the image of the commit built and side-loaded into a kind cluster and the chart installed with `helm/vm-manager/ci/smoke-values.yaml` (devices off, no KVM on the runner): the Deployment ready, `GET /api/v1/host` naming `/dev/kvm` under `missing` with QEMU, swtpm and OVMF found |
+| `publish.yml` | `ubuntu-latest` | every `v*` tag (the Auto Release workflow cuts one per merge); manual with a version | `ghcr.io/giantswarm/vm-manager:<version>` (linux/amd64) and the chart `oci://ghcr.io/giantswarm/vm-manager/helm/vm-manager:<version>`, version and appVersion stamped from the tag |
 
 The image build runs in an Arch container because the image is Arch (mkosi 27, systemd 261,
 erofs-utils, ukify, systemd-measure) and the hosted Ubuntu runner has none of that at the needed
@@ -342,30 +345,28 @@ server logs of the failed test's `vmm-e2e-*` directory. A PR that conflicts with
 ## Testing against the agent platform (agentlab)
 
 [agentlab](https://github.com/giantswarm/agentlab) runs the whole agent platform — Dex,
-the agentgateway edge, muster, Backstage, kagent — on a local kind cluster and wires a
-vm-manager running on the same machine into it (`platform.vmManager` in `agentlab.yaml`,
-on by default when one answers on `:8100`). That is the end-to-end test of this repo's
-platform surface: the person's Dex id_token forwarded by muster and validated here, the
-tools aggregated as `x_vm-manager_<tool>` with their annotations, the portal listing the
-server under Agent Platform, and a VM created, followed to `ready`, attested and deleted
-through muster.
+the agentgateway edge, muster, Backstage, kagent — on a local kind cluster and, with
+`platform.vmManager` in `agentlab.yaml`, the agent-platform chart's `components.vm-manager`
+in it: this chart, as a pod of the kind node (a privileged docker container, so the host's
+`/dev/kvm` and `/dev/vhost-vsock` are in it), with the image directory of this checkout
+mounted into the node (`platform.vmManager.imageDir`) and a build of this checkout swapped
+in through the lab's dev-image loop (`platform.devImages.vm-manager`). That is the
+end-to-end test of this repo's platform surface: the person's Dex id_token forwarded by
+muster and validated here, the tools aggregated as `x_vm-manager_<tool>` with their
+annotations, the portal listing the server under Agent Platform, and a VM created,
+followed to `ready`, attested and deleted through muster.
 
 ```sh
-make build && make -C images                         # the binary and an image
-cd ~/projects/giantswarm/agentlab && agentlab up     # or a running lab
-agentlab platform                                    # writes state/vm-manager.env, registers the MCPServer
-set -a; source state/vm-manager.env; set +a          # listen on every interface, OAuth against the lab Dex
-cd - && ./vm-manager serve --image-dir images/build  # or a systemd user unit with EnvironmentFile=
-agentlab vm-manager-test                             # 401 anonymous -> token accepted -> tools -> create_vm -> ready -> delete_vm
+make -C images                                       # once: the image directory the pod mounts
+make docker-build TAG=vm-manager:dev                 # the image of this checkout
+cd ~/projects/giantswarm/agentlab
+agentlab configure --vm-manager --vm-manager-image-dir ~/projects/giantswarm/vm-manager/images/build
+# platform.devImages: {vm-manager: vm-manager:dev} in agentlab.yaml swaps the build in
+agentlab up                                          # the image-dir mount is fixed at kind create: `agentlab down && up` after changing it
+agentlab vm-manager-test                             # 401 anonymous -> token accepted -> tools -> create_vm -> ready -> attestation -> delete_vm
 ```
 
-`state/vm-manager.env` carries every `serve` setting the lab needs: `VM_MANAGER_LISTEN`
-on every interface (pods dial the docker bridge gateway, and the API is guarded), the
-Dex provider against the lab issuer with the lab CA, the platform client, and
-`OAUTH_TRUSTED_AUDIENCES=agent-platform` — the audience of the tokens muster forwards.
-`agentlab configure` reports what it found (`vm-manager <version> on 127.0.0.1:8100 —
-answers on <gateway>: yes`), and tells a host firewall that rejects the docker bridge
-apart from a loopback bind. Record the image's golden PCR values once through the lab's
-identity (`vm-manager image golden … --token "$(cat .token)"` after a learn-mode boot,
-see agentlab's docs/vm-manager.md) and the proof boots its VM with
-`require_attestation: true`.
+The pod's OVMF is Ubuntu's, not the host's: an image whose `policy.json` was recorded on
+the host needs `vm-manager image golden` once against a VM the pod booted in learn mode
+(agentlab's docs/vm-manager.md has the recipe), and the proof boots its VM with
+`require_attestation: true` from then on.

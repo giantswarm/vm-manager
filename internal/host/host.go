@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -195,7 +194,12 @@ func (s *Service) Get(ctx context.Context) (*Info, error) {
 	return info, nil
 }
 
-// missing lists the create_vm prerequisites info does not satisfy.
+// missing lists the create_vm prerequisites info does not satisfy: the two
+// devices, the two binaries and a firmware image. systemd and the fs storage
+// provider are reported (Systemd, StorageProviders) but not required: without
+// a service manager VMs run as plain child processes (--launcher process), and
+// without the provider volumes are plain files below the state directory — the
+// shape of vm-manager in a pod.
 func missing(info *Info) []string {
 	var out []string
 	if !info.KVM.Accessible {
@@ -212,12 +216,6 @@ func missing(info *Info) []string {
 	}
 	if info.OVMFCode == "" {
 		out = append(out, "OVMF code image")
-	}
-	if !info.Systemd.Found {
-		out = append(out, "systemd")
-	}
-	if !slices.Contains(info.StorageProviders, StorageProviderFS) {
-		out = append(out, "storage provider "+StorageProviderFS)
 	}
 	return out
 }

@@ -1,0 +1,22 @@
+{{- if and .Values.persistence.create (not .Values.persistence.existingClaim) }}
+{{- /*
+The state directory as a claim of the chart's own: VM records, disks (plain
+files, no storage provider in a pod), vTPM state and consoles survive the pod.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vm-manager.fullname" . }}-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vm-manager.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}
