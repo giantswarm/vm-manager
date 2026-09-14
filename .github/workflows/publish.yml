@@ -1,6 +1,6 @@
 name: publish
 
-# The pod shape of vm-manager, published: on every tag the Auto Release
+# The pod shape of vm-manager, published: for every release the Auto Release
 # workflow cuts (zz_generated.auto_release.yaml, vX.Y.Z from the merged PR
 # titles), the container image ghcr.io/giantswarm/vm-manager:X.Y.Z (linux/amd64
 # — the guests are x86-64 and so is the runtime the image ships) and the chart
@@ -10,7 +10,19 @@ name: publish
 # and not in a CircleCI pipeline because this repository runs on GitHub
 # Actions (test, image, e2e) and has no CircleCI project (#44).
 
+# The Auto Release workflow pushes the tag and creates the release with the
+# workflow's own GITHUB_TOKEN, and GitHub starts no workflow for an event that
+# token caused: an `on: push: tags` here never fires for a release cut on
+# main (v0.19.0 had to be published by hand). So this workflow runs when
+# Auto-release has completed — a workflow_run event fires regardless of the
+# token — and resolves the version from the release tag that points at the
+# run's commit; a merge that cut no tag publishes nothing. A hand-pushed tag
+# and a manual dispatch (the version to publish again) still work.
 on:
+  workflow_run:
+    workflows: [Auto-release]
+    types: [completed]
+    branches: [main]
   push:
     tags:
       - "v*.*.*"
@@ -32,25 +44,47 @@ env:
 jobs:
   publish:
     name: image and chart to ghcr.io
+    # A workflow_run of a failed Auto-release publishes nothing.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # workflow_run checks out the default branch's head by default; the
+          # release is the commit Auto-release ran on. Tags are fetched below.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
       - name: Resolve the version
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [ -n "$INPUT_VERSION" ]; then version="$INPUT_VERSION"; else version="${GITHUB_REF_NAME#v}"; fi
+          case "$EVENT" in
+            workflow_dispatch) version="$INPUT_VERSION" ;;
+            workflow_run)
+              git fetch --tags --quiet origin
+              tag=$(git tag --points-at "$RUN_SHA" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+              if [ -z "$tag" ]; then
+                echo "Auto-release cut no release tag for $RUN_SHA (a merge without a version bump): nothing to publish"
+                echo "version=" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              version="${tag#v}" ;;
+            *) version="${GITHUB_REF_NAME#v}" ;;
+          esac
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::not a semver version: $version"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
       - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        if: steps.version.outputs.version != ''
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        if: steps.version.outputs.version != ''
       - name: Build and push the image
+        if: steps.version.outputs.version != ''
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
@@ -65,13 +99,15 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            DATE=${{ github.event.head_commit.timestamp || github.event.workflow_run.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        if: steps.version.outputs.version != ''
         with:
           version: v3.19.0
       - name: Package and push the chart
+        if: steps.version.outputs.version != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
           # helm keeps its own registry config: log in again with the same token.
