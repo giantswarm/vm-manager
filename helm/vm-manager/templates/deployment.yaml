@@ -42,6 +42,53 @@ spec:
       {{- end }}
       {{- /* Guests power down on SIGTERM (--stop-timeout each); give the pod room for them. */}}
       terminationGracePeriodSeconds: 90
+      {{- if .Values.guestImage.enabled }}
+      {{- /*
+      The guest image is a published artifact, fetched into the state volume
+      before the server starts; a directory that already holds the referenced
+      digest is left alone, golden PCR values recorded into its policy.json
+      included. Unprivileged: it only writes files.
+      */}}
+      initContainers:
+        - name: guest-image
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - image
+            - pull
+            - {{ include "vm-manager.guestImageRef" . }}
+            - --image-dir={{ include "vm-manager.imageDir" . }}
+            {{- if .Values.guestImage.plainHTTP }}
+            - --plain-http
+            {{- end }}
+          env:
+            {{- /* The CLI's defaults inside the pod are the pod's directories: `vm-manager image golden` over kubectl exec needs no flags. */}}
+            - name: VM_MANAGER_STATE_DIR
+              value: {{ include "vm-manager.stateDir" . }}
+            {{- if .Values.guestImage.pullSecret }}
+            - name: DOCKER_CONFIG
+              value: /etc/vm-manager/registry
+            {{- end }}
+          securityContext:
+            {{- /* Root like the server that reads what it writes; nothing else. */}}
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.guestImage.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: {{ include "vm-manager.stateDir" . }}
+            {{- if .Values.guestImage.pullSecret }}
+            - name: registry-config
+              mountPath: /etc/vm-manager/registry
+              readOnly: true
+            {{- end }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
@@ -107,8 +154,9 @@ spec:
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or .Values.oauth.enabled .Values.extraEnv }}
           env:
+            - name: VM_MANAGER_STATE_DIR
+              value: {{ include "vm-manager.stateDir" . }}
             {{- if .Values.oauth.enabled }}
             {{- if eq .Values.oauth.provider "google" }}
             {{- if .Values.oauth.google.clientID }}
@@ -137,7 +185,6 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}
           ports:
             - name: http
               containerPort: 8080
@@ -163,19 +210,11 @@ spec:
           {{- $idpCA := "" }}
           {{- if and .Values.oauth.enabled (eq .Values.oauth.provider "dex") }}{{ $idpCA = include "vm-manager.oauthDexCASecretName" . }}{{ end }}
           volumeMounts:
+            {{- /* The image directory is <state>/images: one volume, the guest image and its golden values persist with the state. */}}
             - name: state
               mountPath: {{ include "vm-manager.stateDir" . }}
-            - name: images
-              mountPath: {{ include "vm-manager.imageDir" . }}
-              readOnly: {{ .Values.images.readOnly }}
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.host.devices.enabled }}
-            {{- range .Values.host.devices.paths }}
-            - name: {{ . | trimPrefix "/" | replace "/" "-" }}
-              mountPath: {{ . }}
-            {{- end }}
-            {{- end }}
             {{- if $idpCA }}
             - name: idp-ca
               mountPath: /etc/vm-manager/idp-ca
@@ -189,27 +228,15 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        - name: images
-          {{- if .Values.images.existingClaim }}
-          persistentVolumeClaim:
-            claimName: {{ .Values.images.existingClaim }}
-            readOnly: {{ .Values.images.readOnly }}
-          {{- else if .Values.images.hostPath }}
-          hostPath:
-            path: {{ .Values.images.hostPath }}
-            type: Directory
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
         - name: tmp
           emptyDir: {}
-        {{- if .Values.host.devices.enabled }}
-        {{- range .Values.host.devices.paths }}
-        - name: {{ . | trimPrefix "/" | replace "/" "-" }}
-          hostPath:
-            path: {{ . }}
-            type: CharDevice
-        {{- end }}
+        {{- if and .Values.guestImage.enabled .Values.guestImage.pullSecret }}
+        - name: registry-config
+          secret:
+            secretName: {{ .Values.guestImage.pullSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
         {{- end }}
         {{- if $idpCA }}
         - name: idp-ca

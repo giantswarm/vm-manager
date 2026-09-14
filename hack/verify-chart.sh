@@ -19,37 +19,50 @@ DEX=(--set oauth.enabled=true --set global.domain=example.test
      --set global.identity.existingSecret=idp
      --set global.identity.ca.secretName=dex-ca)
 
-# The pod shape: privileged, the two devices as CharDevice hostPaths mounted
-# at their node paths, the process launcher, the state and image directories.
+# The pod shape: privileged (the runtime hands a privileged container the
+# node's devices), nothing mounted from the node, the process launcher, the
+# state and image directories.
 got=$(args)
 for flag in '--launcher=process' '--state-dir=/var/lib/vm-manager' '--image-dir=/var/lib/vm-manager/images' '--listen=:8080' '--attestation=verify'; do
   echo "$got" | grep -qx -- "$flag" || fail "default render lacks $flag, got: $got"
 done
 deployment | grep -q '^ *privileged: true$' || fail "default render is not privileged"
-[ "$(deployment | grep -c 'type: CharDevice')" = 2 ] || fail "want two CharDevice hostPaths (/dev/kvm, /dev/vhost-vsock)"
-deployment | grep -q 'mountPath: /dev/kvm$' || fail "/dev/kvm is not mounted at its node path"
+if render | grep -q 'hostPath'; then
+  fail "the chart mounts a hostPath: component inputs are artifacts and volumes, never node paths"
+fi
 deployment | grep -q '^ *type: Recreate$' || fail "the Deployment must roll with Recreate"
 deployment | grep -q 'automountServiceAccountToken: false' || fail "the ServiceAccount token must not be mounted"
 
-# Devices off: no hostPath device, the pod still renders (the install smoke on
-# a node without KVM).
-if deployment --set host.devices.enabled=false | grep -q 'CharDevice'; then
-  fail "host.devices.enabled=false still mounts a device"
+# The guest image: an init container pulls the artifact of the appVersion by
+# default, a tag or a digest when set, over plain HTTP for a lab registry;
+# off, no init container.
+# The init container's block of the rendered pod spec (from its name to its
+# volume mounts), so assertions cannot match the server container.
+initc() { deployment "$@" | sed -n '/^ *- name: guest-image$/,/^ *volumeMounts:$/p'; }
+initc | grep -qx ' *- pull' || fail "no guest-image init container running image pull"
+appversion=$(grep '^appVersion:' "$CHART/Chart.yaml" | cut -d: -f2 | tr -d ' "')
+initc | grep -qx " *- gsoci.azurecr.io/giantswarm/vm-manager-guest-image:$appversion" || fail "guest image reference is not the appVersion's ($appversion)"
+initc --set guestImage.tag=1.2.3 | grep -qx ' *- gsoci.azurecr.io/giantswarm/vm-manager-guest-image:1.2.3' || fail "guestImage.tag is not used"
+initc --set guestImage.digest=sha256:0123 | grep -qx ' *- gsoci.azurecr.io/giantswarm/vm-manager-guest-image@sha256:0123' || fail "guestImage.digest is not used"
+initc --set guestImage.registry=agentlab-registry:5000 --set guestImage.repository=vm-manager-guest-image --set guestImage.plainHTTP=true | grep -qx ' *- --plain-http' || fail "guestImage.plainHTTP renders no --plain-http"
+initc | grep -qx ' *- --image-dir=/var/lib/vm-manager/images' || fail "the init container pulls into another directory than the server reads"
+if initc | grep -q 'privileged: true'; then
+  fail "the init container must not be privileged"
 fi
+[ "$(deployment | grep -c 'name: VM_MANAGER_STATE_DIR$')" = 2 ] || fail "both containers must carry VM_MANAGER_STATE_DIR (the CLI's defaults inside the pod)"
+if deployment --set guestImage.enabled=false | grep -q 'initContainers'; then
+  fail "guestImage.enabled=false still renders an init container"
+fi
+deployment --set guestImage.pullSecret=mirror-creds | grep -q 'secretName: mirror-creds' || fail "guestImage.pullSecret is not mounted"
+deployment --set guestImage.pullSecret=mirror-creds | grep -q 'name: DOCKER_CONFIG' || fail "guestImage.pullSecret sets no DOCKER_CONFIG"
 
 # The state directory: emptyDir by default, the named claim, the chart's own
-# claim with persistence.create.
+# claim with persistence.create; the init container writes the same volume.
 deployment | grep -A1 'name: state$' | grep -q 'emptyDir' || fail "default state volume is not an emptyDir"
+[ "$(deployment | grep -c 'mountPath: /var/lib/vm-manager$')" = 2 ] || fail "the state volume must be mounted in the init container and the server"
 deployment --set persistence.existingClaim=vm-state | grep -q 'claimName: vm-state' || fail "persistence.existingClaim is not mounted"
 render --set persistence.create=true --show-only templates/state-pvc.yaml | grep -q 'name: vmm-vm-manager-state' || fail "persistence.create renders no claim"
 deployment --set persistence.create=true | grep -q 'claimName: vmm-vm-manager-state' || fail "persistence.create is not mounted"
-
-# The image directory: a node path (Directory, read-only by default), a claim,
-# else an emptyDir.
-deployment --set images.hostPath=/var/lib/vm-images | grep -q 'path: /var/lib/vm-images' || fail "images.hostPath is not mounted"
-deployment --set images.hostPath=/var/lib/vm-images | grep -B1 'mountPath: /var/lib/vm-manager/images' | grep -q 'name: images' || fail "images volume mount missing"
-deployment --set images.hostPath=/var/lib/vm-images | grep -A2 'mountPath: /var/lib/vm-manager/images' | grep -q 'readOnly: true' || fail "images.hostPath is not read-only by default"
-deployment --set images.existingClaim=vm-images | grep -q 'claimName: vm-images' || fail "images.existingClaim is not mounted"
 
 # OAuth from the identity contract: issuer, client, CA file and trusted
 # audiences = union(oauth.trustedAudiences | default [global.identity.clientId],

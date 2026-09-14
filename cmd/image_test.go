@@ -58,7 +58,7 @@ func TestImageGolden(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	opts := func(vmID string) *imageGoldenOptions {
-		return &imageGoldenOptions{fromVM: vmID, server: srv.URL + "/", token: "tok", imageDir: imageDir}
+		return &imageGoldenOptions{fromVM: vmID, server: srv.URL + "/", token: "tok", imageDirOptions: imageDirOptions{imageDir: imageDir}}
 	}
 	ctx := context.Background()
 

@@ -287,32 +287,40 @@ firmware update on the host) needs one learn-mode boot and `image golden` again.
 
 [`helm/vm-manager`](../helm/vm-manager) is vm-manager as a platform pod, the shape the
 [agent-platform](https://github.com/giantswarm/agent-platform) meta chart installs as
-`components.vm-manager` (off by default; a node with KVM is the prerequisite). Published
-by [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) on every release
-tag: the image `ghcr.io/giantswarm/vm-manager:<version>` (Ubuntu 26.04's QEMU, swtpm and OVMF
-next to the binary, x86-64) and the chart
-`oci://ghcr.io/giantswarm/vm-manager/helm/vm-manager:<version>`.
+`components.vm-manager` (off by default; a node with KVM is the prerequisite). Released by
+the generated CircleCI pipeline on every release tag: the image
+`gsoci.azurecr.io/giantswarm/vm-manager:<version>` (Ubuntu 26.04's QEMU, swtpm and OVMF next
+to the binary, x86-64), the chart `oci://gsoci.azurecr.io/charts/giantswarm/vm-manager:<version>`
+in the giantswarm catalog, and the guest image the pod boots as the OCI artifact
+`gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>`.
 
 What the chart renders, and why:
 
 - A **Deployment** (one replica, `Recreate`) running `serve --launcher process
   --state-dir /var/lib/vm-manager --image-dir /var/lib/vm-manager/images`, **privileged**
-  with `runAsUser: 0`. A hostPath character device mounted into an unprivileged container
-  is denied by the device cgroup (`open(2)` fails with `EPERM`) unless a device plugin
-  hands it out, so the privileged flag is what makes `/dev/kvm` and `/dev/vhost-vsock`
-  usable; nothing else of it is used (the networks are userspace: no bridges, no tap
-  devices, no `CAP_NET_ADMIN`). `host.devices.paths` lists the devices, `host.devices.enabled:
-  false` starts the pod without them (the report then names them under `missing`).
+  with `runAsUser: 0`. The container runtime gives a privileged container the node's
+  devices with the device cgroup open, `/dev/kvm` and `/dev/vhost-vsock` among them, so
+  nothing is mounted from the node — the chart has no hostPath; nothing else of the
+  privilege is used (the networks are userspace: no bridges, no tap devices, no
+  `CAP_NET_ADMIN`). A node without the devices starts the pod all the same; the host
+  report names them under `missing`. A device plugin handing the two devices to an
+  unprivileged pod is the refinement.
 - No service manager in the pod, so QEMU and swtpm are children of the process and end
   with it: a pod restart stops the VMs. Their records, disks (plain files, no storage
   provider) and vTPM state survive on a claim (`persistence.existingClaim`, or
   `persistence.create: true`); without one the state is an emptyDir.
-- The **image directory** is mounted from a claim an operator fills with the output of
-  `make -C images` (`images.existingClaim`) or from a node path (`images.hostPath` — a lab
-  mounting its checkout's `images/build` into the node), read-only by default: `vm-manager
-  image golden` writes `policy.json` from outside the pod. Neither means no bootable image.
-  The `images` workflow publishes the build as a GitHub Actions artifact only; a registry
-  channel the pod fetches from is a follow-up.
+- The **guest image** is a published artifact: an init container runs `vm-manager image
+  pull` before the server starts and fetches `guestImage.registry/repository:tag` (the
+  chart's appVersion by default; `guestImage.digest` pins a manifest, `guestImage.plainHTTP`
+  reaches a lab registry over HTTP, `guestImage.pullSecret` names a `dockerconfigjson`
+  Secret for a private mirror) into `/var/lib/vm-manager/images` — the image directory is
+  part of the state volume. A directory that already holds that digest
+  (`.guest-image.json`) is left alone, so the golden PCR values `vm-manager image golden`
+  records into its `policy.json` survive pod restarts on a claim; another digest replaces
+  the contents. Recording golden values happens inside the pod, where the directory is
+  writable: `kubectl exec deploy/vm-manager -- vm-manager image golden <id>_<version>
+  --from-vm <id> --token <id_token>` (the server and image directory defaults are the
+  pod's). `guestImage.enabled: false` fetches nothing (the chart's own install smoke).
 - **OAuth** (`oauth.enabled`) against the platform identity: the issuer, client, client
   secret and CA fall back to `global.identity.*` and the base URL to `global.domain`, the
   way model-manager's chart reads them; `--allow-private-oauth-urls` and

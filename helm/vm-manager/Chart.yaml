@@ -2,8 +2,9 @@ apiVersion: v2
 name: vm-manager
 description: VM provisioning service for the Agent Platform — KVM virtual machines with an instance metadata service, a vTPM with measured boot, an immutable image and attestation, exposed as REST and MCP
 type: application
-# Stamped at publish from the git tag (.github/workflows/publish.yml); the
-# values here are placeholders a local `helm install` of the checkout uses.
+# Stamped at publish from the git tag by app-build-suite (the generated
+# CircleCI pipeline); the values here are placeholders a local `helm install`
+# of the checkout uses.
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://github.com/giantswarm/vm-manager

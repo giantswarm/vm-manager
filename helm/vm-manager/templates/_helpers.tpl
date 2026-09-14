@@ -68,6 +68,19 @@ the container. Short on purpose: unix socket paths live below the state dir.
 {{- define "vm-manager.imageDir" -}}/var/lib/vm-manager/images{{- end }}
 
 {{/*
+The guest image artifact the init container pulls: by digest when one is set,
+else by tag, the chart appVersion by default.
+*/}}
+{{- define "vm-manager.guestImageRef" -}}
+{{- $g := .Values.guestImage -}}
+{{- if $g.digest -}}
+{{ $g.registry }}/{{ $g.repository }}@{{ $g.digest }}
+{{- else -}}
+{{ $g.registry }}/{{ $g.repository }}:{{ $g.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end }}
+
+{{/*
 The state claim's name: the existing one, else the chart's own when created.
 Empty means an emptyDir.
 */}}

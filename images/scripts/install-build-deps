@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Install what images/README.md lists for an Arch Linux build host: mkosi and
+# systemd (repart, ukify, measure, dissect, hwdb), erofs-utils, dosfstools and
+# mtools for the ESP, cpio for the initrd, Go and base-devel for vm-agent and
+# Ignition (cgo), gnupg and openssl for the dev keys, python-pefile for ukify
+# and scripts/verify, file for the static check of `make agent`; git and zstd
+# for the CI checkouts and caches. Run as root in an archlinux container
+# (.github/workflows/image.yml, hack/guest-image-build.sh).
+set -euo pipefail
+
+pacman-key --init
+pacman -Syu --noconfirm --needed \
+  base-devel git go mkosi systemd systemd-ukify erofs-utils dosfstools mtools cpio \
+  zstd openssl gnupg python-pefile python-cryptography util-linux file
+mkosi --version
+systemctl --version | head -1
+go version

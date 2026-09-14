@@ -41,24 +41,20 @@ jobs:
       image: archlinux:latest
       options: --privileged
     steps:
-      - name: Install the Arch build tools
-        # Everything images/README.md lists for the host: mkosi and systemd
-        # (repart, ukify, measure, dissect, hwdb), erofs-utils, dosfstools and
-        # mtools for the ESP, cpio for the initrd, Go and base-devel for
-        # vm-agent and Ignition (cgo), gnupg and openssl for the dev keys,
-        # python-pefile for ukify and scripts/verify, file for the static
-        # check of make agent. git and zstd are for actions/checkout and
-        # actions/cache.
+      - name: git and zstd for the checkout and the caches
+        # Before the checkout: without git, actions/checkout downloads a
+        # tarball with no .git, and Make's rev-parse and Go's VCS stamping of
+        # vm-agent need one.
         run: |
           pacman-key --init
-          pacman -Syu --noconfirm --needed \
-            base-devel git go mkosi systemd systemd-ukify erofs-utils dosfstools mtools cpio \
-            zstd openssl gnupg python-pefile python-cryptography util-linux file
-          mkosi --version
-          systemctl --version | head -1
-          go version
+          pacman -Syu --noconfirm --needed git zstd
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install the Arch build tools
+        # The one list images/README.md documents for the host, shared with
+        # hack/guest-image-build.sh (the CircleCI guest-image job).
+        run: images/scripts/install-build-deps
 
       - name: Cache key
         id: key

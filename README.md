@@ -4,6 +4,7 @@
 [![image](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml)
 [![e2e](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml)
 [![chart](https://github.com/giantswarm/vm-manager/actions/workflows/chart.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/chart.yml)
+[![CircleCI](https://dl.circleci.com/status-badge/img/gh/giantswarm/vm-manager/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/giantswarm/vm-manager/tree/main)
 
 VM provisioning service for the Giant Swarm Agent Platform: the write surface for
 **virtual machines**, the sibling of [agent-manager](https://github.com/giantswarm/agent-manager)
@@ -388,16 +389,20 @@ flag, and `Restart=on-failure`. Stopping the service stops the VMs on it.
 [docs/install.md](docs/install.md) walks through packages, device permissions, images,
 the first VM, logs and upgrades.
 
-As a pod: the [chart](helm/vm-manager) (`ghcr.io/giantswarm/vm-manager`, the image with
-QEMU, swtpm and Ubuntu's OVMF; the chart at `oci://ghcr.io/giantswarm/vm-manager/helm`)
-runs `serve --launcher process` privileged — a hostPath device in an unprivileged
-container is denied by the device cgroup — with `/dev/kvm` and `/dev/vhost-vsock` mounted
-from the node, the state directory on an emptyDir or a claim (`persistence`), the image
-directory from a claim or a node path (`images`), OAuth from the platform's
-`global.identity`, and the muster `MCPServer` CR (`muster.mcpServer.enabled`). A pod
-restart ends the VMs (their records and disks survive on a claim); the guests' traffic
-leaves through the pod's own network. The agent-platform meta chart installs it as
-`components.vm-manager`, off by default: KVM nodes are not universal.
+As a pod: the [chart](helm/vm-manager) (the image `gsoci.azurecr.io/giantswarm/vm-manager`
+with QEMU, swtpm and Ubuntu's OVMF; the chart in the giantswarm catalog,
+`oci://gsoci.azurecr.io/charts/giantswarm/vm-manager`; both released by the generated
+CircleCI pipeline on every tag) runs `serve --launcher process` privileged — the runtime
+hands a privileged container the node's `/dev/kvm` and `/dev/vhost-vsock`, nothing is
+mounted from the node — with the state directory on an emptyDir or a claim
+(`persistence`), the guest image fetched into it at pod start by an init container from
+the OCI artifact every release publishes (`guestImage`,
+`gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>`; `vm-manager image pull` /
+`image push`), OAuth from the platform's `global.identity`, and the muster `MCPServer` CR
+(`muster.mcpServer.enabled`). A pod restart ends the VMs (their records and disks survive
+on a claim); the guests' traffic leaves through the pod's own network. The agent-platform
+meta chart installs it as `components.vm-manager`, off by default: KVM nodes are not
+universal.
 
 ## Development
 
@@ -420,8 +425,7 @@ multi-version publishing of the Kubernetes sysext directory.
 
 Follow-ups outside the prototype, in the order they are likely to matter: the CAPI
 infrastructure provider or cluster-manager glue that maps Machines to `create_vm`; a
-published guest image the pod fetches instead of a directory an operator fills
-(`images.existingClaim`); a PCR 12
+device plugin handing `/dev/kvm` and `/dev/vhost-vsock` to an unprivileged pod; a PCR 12
 prediction so the command-line addition is covered by the policy; EK-certified attestation
 keys and Secure Boot; a tap/bridge network backend; the host-side pre-install fast path
 (`systemd-repart` from the same definitions, skipping the installer boot); a multi
