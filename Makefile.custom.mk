@@ -89,7 +89,7 @@ BINARY := vm-manager
 
 .PHONY: build-linux-amd64
 build-linux-amd64: ## Build the static linux/amd64 binary the Dockerfile expects (what CircleCI's go-build attaches).
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X '$(MODULE)/pkg/project.version=$(VERSION)' -X '$(MODULE)/pkg/project.buildTimestamp=$(BUILDTIMESTAMP)' -X '$(MODULE)/pkg/project.gitSHA=$(GITSHA1)'" -o $(BINARY)-linux-amd64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X '$(MODULE)/pkg/project.version=$(or $(VERSION),dev)' -X '$(MODULE)/pkg/project.buildTimestamp=$(BUILDTIMESTAMP)' -X '$(MODULE)/pkg/project.gitSHA=$(GITSHA1)'" -o $(BINARY)-linux-amd64 .
 
 .PHONY: docker-build
 docker-build: build-linux-amd64 ## Build the container image locally (TAG=vm-manager:dev): the binary and the QEMU/swtpm/OVMF runtime.
