@@ -104,6 +104,12 @@ func TestPushPull(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ocispec.MediaTypeImageManifest, desc.MediaType)
 
+	// The digest is the content's: the same build pushed again is the same
+	// manifest, so a pod pinned to it does not roll.
+	again, err := Push(ctx, src, ref, opts)
+	require.NoError(t, err)
+	assert.Equal(t, desc.Digest, again.Digest)
+
 	// First pull: everything lands, nothing else, marker written.
 	dst := filepath.Join(t.TempDir(), "images")
 	res, err := Pull(ctx, ref, dst, opts)

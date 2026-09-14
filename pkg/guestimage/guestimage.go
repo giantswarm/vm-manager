@@ -57,6 +57,12 @@ const (
 
 	// pullConcurrency bounds concurrent blob downloads.
 	pullConcurrency = 3
+
+	// manifestCreated is the fixed org.opencontainers.image.created of every
+	// manifest: oras stamps the time of packing otherwise, and then two pushes
+	// of the same build differ in digest — a pod pinned to the digest would
+	// roll for nothing. With it fixed the digest is the content's.
+	manifestCreated = "1970-01-01T00:00:00Z"
 )
 
 // Options configure the registry access.
@@ -115,7 +121,10 @@ func Push(ctx context.Context, dir, reference string, opts Options) (ocispec.Des
 		log.Info("packed", "file", rel, "bytes", desc.Size)
 		layers = append(layers, desc)
 	}
-	manifest, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1, ArtifactType, oras.PackManifestOptions{Layers: layers})
+	manifest, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1, ArtifactType, oras.PackManifestOptions{
+		Layers:              layers,
+		ManifestAnnotations: map[string]string{ocispec.AnnotationCreated: manifestCreated},
+	})
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("pack manifest: %w", err)
 	}
