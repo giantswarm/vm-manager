@@ -61,11 +61,14 @@ spec:
             {{- if .Values.guestImage.plainHTTP }}
             - --plain-http
             {{- end }}
-          {{- if .Values.guestImage.pullSecret }}
           env:
+            {{- /* The CLI's defaults inside the pod are the pod's directories: `vm-manager image golden` over kubectl exec needs no flags. */}}
+            - name: VM_MANAGER_STATE_DIR
+              value: {{ include "vm-manager.stateDir" . }}
+            {{- if .Values.guestImage.pullSecret }}
             - name: DOCKER_CONFIG
               value: /etc/vm-manager/registry
-          {{- end }}
+            {{- end }}
           securityContext:
             {{- /* Root like the server that reads what it writes; nothing else. */}}
             runAsUser: 0
@@ -151,8 +154,9 @@ spec:
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or .Values.oauth.enabled .Values.extraEnv }}
           env:
+            - name: VM_MANAGER_STATE_DIR
+              value: {{ include "vm-manager.stateDir" . }}
             {{- if .Values.oauth.enabled }}
             {{- if eq .Values.oauth.provider "google" }}
             {{- if .Values.oauth.google.clientID }}
@@ -181,7 +185,6 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}
           ports:
             - name: http
               containerPort: 8080

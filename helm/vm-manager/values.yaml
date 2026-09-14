@@ -71,11 +71,13 @@ guestImage:
   # -- Secret of type kubernetes.io/dockerconfigjson with the registry's
   # credentials, for a private mirror; empty pulls anonymously.
   pullSecret: ""
-  # -- Resources of the init container.
+  # -- Resources of the init container (it streams files to the volume).
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
+    limits:
+      memory: 256Mi
 
 vm:
   # -- CIDR of the default network, created at startup when missing.

@@ -49,6 +49,7 @@ initc | grep -qx ' *- --image-dir=/var/lib/vm-manager/images' || fail "the init 
 if initc | grep -q 'privileged: true'; then
   fail "the init container must not be privileged"
 fi
+[ "$(deployment | grep -c 'name: VM_MANAGER_STATE_DIR$')" = 2 ] || fail "both containers must carry VM_MANAGER_STATE_DIR (the CLI's defaults inside the pod)"
 if deployment --set guestImage.enabled=false | grep -q 'initContainers'; then
   fail "guestImage.enabled=false still renders an init container"
 fi
