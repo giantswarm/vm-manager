@@ -338,3 +338,34 @@ Failures: `gh run view <id> --log-failed`, then the `e2e-logs-<suite>` artifact 
 <id> -n e2e-logs-fast`) for the serial consoles (`<phase>.log`, `vms/<id>/console.log`) and the
 server logs of the failed test's `vmm-e2e-*` directory. A PR that conflicts with `main` gets no
 `pull_request` runs at all (GitHub cannot create its merge commit): rebase first.
+
+## Testing against the agent platform (agentlab)
+
+[agentlab](https://github.com/giantswarm/agentlab) runs the whole agent platform — Dex,
+the agentgateway edge, muster, Backstage, kagent — on a local kind cluster and wires a
+vm-manager running on the same machine into it (`platform.vmManager` in `agentlab.yaml`,
+on by default when one answers on `:8100`). That is the end-to-end test of this repo's
+platform surface: the person's Dex id_token forwarded by muster and validated here, the
+tools aggregated as `x_vm-manager_<tool>` with their annotations, the portal listing the
+server under Agent Platform, and a VM created, followed to `ready`, attested and deleted
+through muster.
+
+```sh
+make build && make -C images                         # the binary and an image
+cd ~/projects/giantswarm/agentlab && agentlab up     # or a running lab
+agentlab platform                                    # writes state/vm-manager.env, registers the MCPServer
+set -a; source state/vm-manager.env; set +a          # listen on every interface, OAuth against the lab Dex
+cd - && ./vm-manager serve --image-dir images/build  # or a systemd user unit with EnvironmentFile=
+agentlab vm-manager-test                             # 401 anonymous -> token accepted -> tools -> create_vm -> ready -> delete_vm
+```
+
+`state/vm-manager.env` carries every `serve` setting the lab needs: `VM_MANAGER_LISTEN`
+on every interface (pods dial the docker bridge gateway, and the API is guarded), the
+Dex provider against the lab issuer with the lab CA, the platform client, and
+`OAUTH_TRUSTED_AUDIENCES=agent-platform` — the audience of the tokens muster forwards.
+`agentlab configure` reports what it found (`vm-manager <version> on 127.0.0.1:8100 —
+answers on <gateway>: yes`), and tells a host firewall that rejects the docker bridge
+apart from a loopback bind. Record the image's golden PCR values once through the lab's
+identity (`vm-manager image golden … --token "$(cat .token)"` after a learn-mode boot,
+see agentlab's docs/vm-manager.md) and the proof boots its VM with
+`require_attestation: true`.
