@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The released image reported `version=dev`: the version, commit and build time are now resolved from the Go build info (the tag at HEAD, `vcs.revision`, `vcs.time`) when the build passed no `-ldflags -X`; the start-up log names the commit next to the version.
+
+### Added
+
+- `get_info` MCP tool reporting the server's version, commit, build time and tool names, as the other Agent Platform managers do.
+
 
 
 [Unreleased]: https://github.com/giantswarm/vm-manager/tree/main

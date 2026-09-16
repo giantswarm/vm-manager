@@ -7,22 +7,18 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/giantswarm/vm-manager/internal/buildinfo"
 )
 
-var (
-	version     = "dev"
-	buildCommit = "unknown"
-	buildDate   = "unknown"
-)
+// build is the identity main resolved from the ldflags and the Go build
+// info: the release version (dev for an untagged local build), the commit
+// and the build time.
+var build = buildinfo.Info{Version: buildinfo.DevVersion, Commit: buildinfo.UnknownCommit, Date: buildinfo.UnknownDate}
 
-// SetVersion records the build version (set from main via ldflags).
-func SetVersion(v string) { version = v }
-
-// SetBuildInfo records the commit and build date.
-func SetBuildInfo(commit, date string) {
-	buildCommit = commit
-	buildDate = date
-}
+// SetBuild records the build identity the CLI, the MCP server and the metrics
+// report.
+func SetBuild(b buildinfo.Info) { build = b }
 
 func newRootCmd() *cobra.Command {
 	var verbose bool
@@ -45,7 +41,7 @@ tools from one process.`,
 		},
 	}
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
-	root.Version = version
+	root.Version = build.Version
 	root.SetVersionTemplate("vm-manager version {{.Version}}\n")
 	root.AddCommand(newServeCmd(), newImageCmd(), newVersionCmd())
 	return root
@@ -56,7 +52,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, _ []string) {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "vm-manager version %s\n  commit: %s\n  built:  %s\n", version, buildCommit, buildDate)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "vm-manager version %s\n  commit: %s\n  built:  %s\n", build.Version, build.Commit, build.Date)
 		},
 	}
 }

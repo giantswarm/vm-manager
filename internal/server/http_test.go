@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 )
@@ -28,7 +29,7 @@ func bareHost(t *testing.T) api.Services {
 
 func TestProbesAndRoutes(t *testing.T) {
 	svc := bareHost(t)
-	srv, err := New(Config{Addr: "127.0.0.1:0"}, svc, api.NewMCPServer(svc, "test"), nil)
+	srv, err := New(Config{Addr: "127.0.0.1:0"}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -66,7 +67,7 @@ func TestProbesAndRoutes(t *testing.T) {
 func TestMetricsMounted(t *testing.T) {
 	svc := bareHost(t)
 	reg := metrics.New(metrics.Options{Version: "test", ProcRoot: t.TempDir()})
-	srv, err := New(Config{Addr: "127.0.0.1:0", Metrics: reg.Handler()}, svc, api.NewMCPServer(svc, "test"), nil)
+	srv, err := New(Config{Addr: "127.0.0.1:0", Metrics: reg.Handler()}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -83,7 +84,7 @@ func TestMetricsMounted(t *testing.T) {
 
 func TestRunStopsOnContext(t *testing.T) {
 	svc := bareHost(t)
-	srv, err := New(Config{Addr: "127.0.0.1:0", MCPPath: "/tools"}, svc, api.NewMCPServer(svc, "test"), quiet())
+	srv, err := New(Config{Addr: "127.0.0.1:0", MCPPath: "/tools"}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), quiet())
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

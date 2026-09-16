@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/identity"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 )
@@ -246,7 +247,7 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	svc := bareHost(t)
 	cfg := idp.config()
 	exposition := metrics.New(metrics.Options{ProcRoot: t.TempDir()}).Handler()
-	srv, err := New(Config{Addr: "127.0.0.1:0", OAuth: &cfg, Metrics: exposition}, svc, api.NewMCPServer(svc, "test"), quiet())
+	srv, err := New(Config{Addr: "127.0.0.1:0", OAuth: &cfg, Metrics: exposition}, svc, api.NewMCPServer(svc, buildinfo.Info{Version: "test"}), quiet())
 	require.NoError(t, err)
 	t.Cleanup(func() { srv.oauth.shutdown(context.Background()) })
 	ts := httptest.NewServer(srv.Handler())

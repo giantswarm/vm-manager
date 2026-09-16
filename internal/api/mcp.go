@@ -9,6 +9,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
+	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/metrics"
@@ -18,6 +19,7 @@ import (
 // MCP tool names (docs/design.md "MCP tool surface"). Through muster they
 // appear as x_<server>_<tool>, e.g. x_vm-manager_get_host.
 const (
+	ToolGetInfo          = "get_info"
 	ToolGetHost          = "get_host"
 	ToolListImages       = "list_images"
 	ToolGetImage         = "get_image"
@@ -67,7 +69,7 @@ const (
 // the read-only tools first, then the writes.
 func ToolNames() []string {
 	return []string{
-		ToolGetHost, ToolListImages, ToolGetImage, ToolListNetworks, ToolGetNetwork,
+		ToolGetInfo, ToolGetHost, ToolListImages, ToolGetImage, ToolListNetworks, ToolGetNetwork,
 		ToolListVMs, ToolGetVM, ToolGetVMConsole, ToolGetVMMetrics, ToolGetVMAttestation,
 		ToolCreateNetwork, ToolDeleteNetwork, ToolCreateVM, ToolStartVM, ToolStopVM,
 		ToolRebootVM, ToolDeleteVM, ToolExecVM, ToolForwardPort,
@@ -119,15 +121,30 @@ var (
 	nameArg = mcp.WithString(argName, mcp.Required(), mcp.Description("Network name as returned by create_network or list_networks"))
 )
 
+// Info is get_info's answer: the build this server runs and the tools it
+// registers.
+type Info struct {
+	// Version is the release (the image tag), dev for an untagged local
+	// build; Commit and Built identify the source and the build time.
+	Version string   `json:"version"`
+	Commit  string   `json:"commit"`
+	Built   string   `json:"built"`
+	Tools   []string `json:"tools"`
+}
+
 // NewMCPServer builds an MCP server exposing the same operations as the REST
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
-func NewMCPServer(svc Services, version string) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer("vm-manager", version,
+// build is what get_info and the MCP server identity report as the version.
+func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
+	s := mcpserver.NewMCPServer("vm-manager", build.Version,
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions(instructions),
 	)
-	t := &tools{svc: svc}
+	t := &tools{svc: svc, build: build}
 
+	s.AddTool(newTool(ToolGetInfo,
+		"Read-only. Report this server's build (version — the release, or dev for a local build —, commit and build time) and the names of its tools.",
+		hintRead), t.getInfo)
 	s.AddTool(newTool(ToolGetHost,
 		"Read-only. Report the KVM host's capabilities: hostname, kernel, CPUs and memory; whether /dev/kvm and /dev/vhost-vsock are accessible; the qemu-system-x86_64, swtpm and systemd versions; the OVMF firmware image found; the systemd storage providers present; and ready plus the list of missing prerequisites. Call it before creating VMs.",
 		hintRead), t.getHost)
@@ -218,7 +235,12 @@ func NewMCPServer(svc Services, version string) *mcpserver.MCPServer {
 
 // tools holds the MCP handlers; each is a thin adapter over a service method.
 type tools struct {
-	svc Services
+	svc   Services
+	build buildinfo.Info
+}
+
+func (t *tools) getInfo(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return jsonResult(Info{Version: t.build.Version, Commit: t.build.Commit, Built: t.build.Date, Tools: ToolNames()})
 }
 
 func (t *tools) getHost(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

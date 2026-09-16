@@ -208,8 +208,8 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	bridgeLogrus(log)
 
 	reg := metrics.New(metrics.Options{
-		Version:        version,
-		Commit:         buildCommit,
+		Version:        build.Version,
+		Commit:         build.Commit,
 		States:         vm.StateNames(),
 		MaxGuestSeries: o.metricsGuestSeriesLimit,
 		Logger:         log,
@@ -241,11 +241,11 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			AllowPublicClientRegistration: o.allowPublicClientRegistration,
 		}
 	}
-	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, version), log)
+	srv, err := server.New(cfg, svc, api.NewMCPServer(svc, build), log)
 	if err != nil {
 		return errors.Join(err, c.close(log))
 	}
-	log.Info("vm-manager starting", "version", version, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath,
+	log.Info("vm-manager starting", "version", build.Version, "commit", build.Commit, "listen", o.listen, "rest", api.Prefix, "mcp", o.mcpPath,
 		"stateDir", o.stateDir, "imageDir", o.imageDir, "oauth", o.oauthEnabled, "metrics", o.metricsEnabled, "attestation", o.attestation)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
