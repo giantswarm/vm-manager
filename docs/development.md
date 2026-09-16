@@ -65,6 +65,10 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
   an HTTP status and a stable code; MCP tool errors carry the same code.
   `mcp_test.go` is the contract test: an mcp-go client over streamable HTTP
   against the assembled server.
+- `internal/buildinfo` — the version, commit and build time the CLI, the MCP
+  server (`get_info`, `serverInfo.version`) and `vm_manager_build_info` report:
+  the `-ldflags -X` values when the build set them, else the Go build info (the
+  tag at HEAD, `vcs.revision`, `vcs.time`); `dev` without either.
 - `internal/apierr` — the sentinel errors (`ErrNotFound`, `ErrInvalid`,
   `ErrConflict`, `ErrUnsupported`) domain packages wrap so both API surfaces
   answer the same status and code; `statusFor` also maps the VM service's

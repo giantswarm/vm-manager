@@ -406,7 +406,7 @@ proving integrity before secrets are released (`vm-agent attest`).
 
 ## MCP tool surface (v1)
 
-Read-only: `get_host`, `list_images`, `get_image`, `list_networks`, `get_network`,
+Read-only: `get_info`, `get_host`, `list_images`, `get_image`, `list_networks`, `get_network`,
 `list_vms`, `get_vm`, `get_vm_console`, `get_vm_metrics`, `get_vm_attestation`.
 Writes: `create_network`, `delete_network`, `create_vm` (name, image, kubernetes_version,
 cpus, memory_mib, disk_gib, network, user_data, ssh_authorized_keys, hostname, metadata,

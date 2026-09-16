@@ -31,7 +31,7 @@ The same operations are exposed twice from one process:
 
 - **REST/JSON** under `/api/v1` for the portal backend and scripts. Contract in
   [`api/openapi.yaml`](api/openapi.yaml), also served at `/api/v1/openapi.yaml`.
-- **MCP** (streamable HTTP, `/mcp`) for muster and agents: tools `get_host`,
+- **MCP** (streamable HTTP, `/mcp`) for muster and agents: tools `get_info`, `get_host`,
   `list_images`, `get_image`, `list_networks`, `get_network`, `list_vms`, `get_vm`,
   `get_vm_console`, `get_vm_metrics`, `get_vm_attestation`, `create_network`,
   `delete_network`, `create_vm`, `start_vm`, `stop_vm`, `reboot_vm`, `delete_vm`,
@@ -59,6 +59,7 @@ Design decisions and their reasons are in [docs/design.md](docs/design.md), the 
 
 | Operation | REST | MCP tool | Writes |
 |---|---|---|---|
+| This server's build (release version, commit, build time) and the names of its tools | — | `get_info` | no |
 | Host capabilities: kernel, CPUs, memory, `/dev/kvm`, `/dev/vhost-vsock`, qemu / swtpm / systemd versions, OVMF image, storage providers, `ready` + `missing` | `GET /api/v1/host` | `get_host` | no |
 | List the bootable images (id, version, UKI, disk, Kubernetes sysext versions, PCR policy) | `GET /api/v1/images` | `list_images` | no |
 | Describe one image (`<id>_<version>` or bare id = newest) | `GET /api/v1/images/{ref}` | `get_image` | no |

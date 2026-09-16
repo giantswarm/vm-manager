@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/metrics"
@@ -101,10 +102,13 @@ func guestReport(t *testing.T) json.RawMessage {
 	return raw
 }
 
+// testBuild is the build identity the contract test's server reports.
+var testBuild = buildinfo.Info{Version: "test", Commit: "abc1234", Date: "2026-09-16T08:00:00Z"}
+
 func newTestServer(t *testing.T) (*httptest.Server, api.Services) {
 	t.Helper()
 	svc := newServices(t)
-	srv, err := server.New(server.Config{Addr: "127.0.0.1:0", MCPPath: "/mcp"}, svc, api.NewMCPServer(svc, "test"), nil)
+	srv, err := server.New(server.Config{Addr: "127.0.0.1:0", MCPPath: "/mcp"}, svc, api.NewMCPServer(svc, testBuild), nil)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -216,12 +220,17 @@ func TestMCPContract(t *testing.T) {
 	}
 	assert.ElementsMatch(t, api.ToolNames(), names, "exactly the declared tools (tools/list sorts by name)")
 	assert.ElementsMatch(t, []string{
-		"get_host", "list_images", "get_image", "list_networks", "get_network", "list_vms", "get_vm",
+		"get_info", "get_host", "list_images", "get_image", "list_networks", "get_network", "list_vms", "get_vm",
 		"get_vm_console", "get_vm_metrics", "get_vm_attestation", "create_network", "delete_network",
 		"create_vm", "start_vm", "stop_vm", "reboot_vm", "delete_vm", "exec_vm", "forward_port",
 	}, names, "the v1 surface from docs/design.md")
 
-	// Read-only: host and images.
+	// Read-only: the build, host and images.
+	var info api.Info
+	s.call(api.ToolGetInfo, nil, &info)
+	assert.Equal(t, api.Info{Version: "test", Commit: "abc1234", Built: "2026-09-16T08:00:00Z", Tools: api.ToolNames()}, info)
+	assert.Contains(t, info.Tools, api.ToolGetInfo)
+
 	var viaMCP, viaREST host.Info
 	s.call(api.ToolGetHost, nil, &viaMCP)
 	assert.Equal(t, host.Tool{Found: true, Version: "11.1.1"}, viaMCP.QEMU)
