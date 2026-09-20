@@ -9,10 +9,42 @@
 # a machine executor (hack/guest-image-build.sh; the docker executor cannot
 # run privileged containers) and published as the OCI artifact
 # gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version> by
-# `vm-manager image push` (pkg/guestimage). The chart's guestImage.tag
-# defaults to its appVersion, so a release is complete once this job is green.
+# `vm-manager image push` (pkg/guestimage), then signed at its digest with
+# cosign keyless under this job's CircleCI OIDC identity through the architect
+# orb's cosign-sign-verify command — the same signature shape (a Sigstore
+# bundle stored as an OCI referrer) and identity the orb puts on the container
+# image and the chart, so one keyless attestor admits all three artifacts. The
+# chart's guestImage.tag defaults to its appVersion, so a release is complete
+# once this job is green.
 # Tags only: branch builds keep the GitHub Actions image and KVM e2e workflows
 # (test-only), and the ATS smoke installs the chart with the fetch off.
+commands:
+  # Install a pinned cosign into the machine image, which does not carry one:
+  # the same cosign major the orb's architect executor signs with, so the
+  # signature here has the shape of the orb's (v3: a Sigstore bundle stored as
+  # an OCI referrer of the signed digest).
+  install-cosign:
+    parameters:
+      version:
+        description: cosign release to install.
+        type: string
+        # repo: sigstore/cosign
+        default: "v3.1.3"
+    steps:
+      - run:
+          name: Install cosign << parameters.version >>
+          command: |
+            set -euo pipefail
+            RELEASE="https://github.com/sigstore/cosign/releases/download/<< parameters.version >>"
+            curl -fsSL "${RELEASE}/cosign-linux-amd64" -o /tmp/cosign
+            curl -fsSL "${RELEASE}/cosign_checksums.txt" \
+              | grep ' cosign-linux-amd64$' | sed 's#  .*#  /tmp/cosign#' | sha256sum -c -
+            SUDO=""
+            [ "$(id -u)" -eq 0 ] || SUDO=sudo
+            ${SUDO} install -m 0755 /tmp/cosign /usr/local/bin/cosign
+            rm -f /tmp/cosign
+            cosign version
+
 jobs:
   guest-image:
     machine:
@@ -24,6 +56,7 @@ jobs:
       GO_IMAGE: golang:1.27.1
     steps:
       - checkout
+      - install-cosign
       - run:
           name: Cache key (the image inputs, per ISO week)
           # mkosi's incremental cache freezes the Arch package set it was
@@ -63,7 +96,23 @@ jobs:
               echo "no gsoci credentials in the architect context"; exit 1
             fi
             echo "$password" | docker login gsoci.azurecr.io -u "$username" --password-stdin
-            bin/vm-manager image push "${GUEST_IMAGE_REPOSITORY}:${CIRCLE_TAG#v}" --image-dir images/build
+            bin/vm-manager image push "${GUEST_IMAGE_REPOSITORY}:${CIRCLE_TAG#v}" --image-dir images/build \
+              | tee /tmp/guest-image-push.log
+      - run:
+          name: Record the pushed digest for signing
+          # `image push` prints `pushed <reference> (<digest>)`; the orb's
+          # cosign-sign-verify command signs and verifies every reference in
+          # /tmp/.cosign_refs at that digest with the credentials docker login
+          # wrote to ~/.docker/config.json. A push whose digest cannot be read
+          # must not publish unsigned on a green build, so the step fails.
+          command: |
+            set -euo pipefail
+            digest=$(sed -n 's/^pushed .* (\(sha256:[0-9a-f]\{64\}\))$/\1/p' /tmp/guest-image-push.log)
+            if [ -z "$digest" ]; then
+              echo "could not read the pushed digest from the push output" >&2; exit 1
+            fi
+            echo "${GUEST_IMAGE_REPOSITORY}@${digest}" | tee /tmp/.cosign_refs
+      - architect/cosign-sign-verify
       - store_artifacts:
           path: images/build/policy.json
           destination: policy.json
