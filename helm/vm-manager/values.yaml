@@ -244,6 +244,19 @@ service:
   # -- Service port (container listens on 8080).
   port: 8080
 
+serviceMonitor:
+  # -- Render a ServiceMonitor for `GET /metrics` (`vm_manager_*` and
+  # `vm_guest_*`). Also needs `metrics.enabled`; the meta chart turns this on
+  # once the tenant label is set.
+  enabled: false
+  # -- Scrape interval; empty uses the Prometheus Operator default.
+  interval: ""
+  # -- Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm
+  # observability platform routes a scrape to a Mimir tenant by
+  # `observability.giantswarm.io/tenant`; a monitor without it writes to no
+  # tenant.
+  labels: {}  # @schema additionalProperties: true
+
 # -- Container resources. The VMs are QEMU processes inside this container,
 # so a memory limit bounds the sum of their memory too; none by default.
 resources:

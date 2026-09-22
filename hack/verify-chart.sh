@@ -110,6 +110,20 @@ if render --set networkPolicy.enabled=true --set networkPolicy.guestEgress=false
   fail "guestEgress off still admits every destination"
 fi
 
+# The ServiceMonitor: off by default, needs both metrics.enabled and
+# serviceMonitor.enabled, scrapes the Service's own port and path, and
+# carries the tenant label the platform sets through serviceMonitor.labels.
+if render --show-only templates/servicemonitor.yaml 2>/dev/null | grep -q 'kind: ServiceMonitor'; then
+  fail "the ServiceMonitor renders by default"
+fi
+if render --set serviceMonitor.enabled=true --set metrics.enabled=false --show-only templates/servicemonitor.yaml 2>/dev/null | grep -q 'kind: ServiceMonitor'; then
+  fail "serviceMonitor.enabled still renders the ServiceMonitor with metrics.enabled=false"
+fi
+sm=$(render --set serviceMonitor.enabled=true --set-json 'serviceMonitor.labels={"observability.giantswarm.io/tenant":"giantswarm"}' --show-only templates/servicemonitor.yaml)
+echo "$sm" | grep -q '^ *observability.giantswarm.io/tenant: giantswarm$' || fail "serviceMonitor.labels is not rendered on the ServiceMonitor"
+echo "$sm" | grep -q '^ *- port: http$' || fail "the ServiceMonitor does not scrape the http port"
+echo "$sm" | grep -q '^ *path: /metrics$' || fail "the ServiceMonitor does not scrape /metrics"
+
 # The schema refuses a key the chart does not know.
 if helm template vmm "$CHART" --set bogus=1 >/dev/null 2>&1; then
   fail "values.schema.json accepted an unknown key"

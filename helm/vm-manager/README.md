@@ -82,6 +82,9 @@ chart installs it as `components.vm-manager`.
 | securityContext | object | `{"privileged":true,"runAsGroup":0,"runAsUser":0}` | Container security context. Privileged, on purpose: the container runtime gives a privileged container the node's devices, /dev/kvm (hardware virtualization) and /dev/vhost-vsock (the guests' READY=1 and ssh) among them, with the device cgroup open — nothing is mounted from the node. A device plugin handing out the two devices to an unprivileged pod is the refinement. No capability is used beyond that (no bridges, no tap devices, no CAP_NET_ADMIN: the networks are userspace). A node without the devices starts the pod all the same; GET /api/v1/host names them under `missing`. |
 | service.type | string | `"ClusterIP"` | Service type. |
 | service.port | int | `8080` | Service port (container listens on 8080). |
+| serviceMonitor.enabled | bool | `false` | Render a ServiceMonitor for `GET /metrics` (`vm_manager_*` and `vm_guest_*`). Also needs `metrics.enabled`; the meta chart turns this on once the tenant label is set. |
+| serviceMonitor.interval | string | `""` | Scrape interval; empty uses the Prometheus Operator default. |
+| serviceMonitor.labels | object | `{}` | Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant. |
 | resources | object | `{"requests":{"cpu":"250m","memory":"512Mi"}}` | Container resources. The VMs are QEMU processes inside this container, so a memory limit bounds the sum of their memory too; none by default. |
 | logging.verbose | bool | `false` | Enable debug logging. |
 | extraArgs | list | `[]` | Extra container arguments. |
