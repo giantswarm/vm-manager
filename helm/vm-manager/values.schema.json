@@ -474,6 +474,25 @@
                 }
             }
         },
+        "serviceMonitor": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Render a ServiceMonitor for `GET /metrics` (`vm_manager_*` and `vm_guest_*`). Also needs `metrics.enabled`; the meta chart turns this on once the tenant label is set."
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Scrape interval; empty uses the Prometheus Operator default."
+                },
+                "labels": {
+                    "type": "object",
+                    "description": "Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant.",
+                    "additionalProperties": true
+                }
+            }
+        },
         "subscriptionID": {
             "type": "string"
         },
