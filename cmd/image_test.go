@@ -99,6 +99,23 @@ func TestImageGolden(t *testing.T) {
 	assert.Equal(t, policyPath, cat.PolicyPath(img))
 	assert.Contains(t, string(img.Policy), `"golden"`)
 
+	// --clear removes the golden values and keeps the rest, the first step
+	// of recording them again for another firmware.
+	c := opts("")
+	c.clear = true
+	out.Reset()
+	require.NoError(t, runImageGolden(ctx, c, "giantswarm-vm-base", &out))
+	assert.Contains(t, out.String(), "cleared the golden PCR values of giantswarm-vm-base_0.1.0 in "+policyPath)
+	raw, err = os.ReadFile(policyPath) // #nosec G304 -- test temp dir.
+	require.NoError(t, err)
+	doc = nil
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	assert.NotContains(t, doc, "golden")
+	p, err = attest.ParsePolicy(raw)
+	require.NoError(t, err)
+	assert.Equal(t, hexOf(1), p.PCR11[attest.PhaseInitrd], "the rest of the file is kept")
+	require.NoError(t, runImageGolden(ctx, c, "giantswarm-vm-base", io.Discard), "clearing a policy without golden values is a no-op")
+
 	// An image without any policy is refused rather than given a bare one.
 	require.NoError(t, os.Remove(policyPath))
 	assert.ErrorContains(t, runImageGolden(ctx, opts("vm-ready"), "giantswarm-vm-base", io.Discard), "has no policy.json")

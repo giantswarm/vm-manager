@@ -2,6 +2,8 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,10 +16,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeRunner answers by command name; unknown commands are "not found".
+// fakeRunner answers by command name, or by name and first argument for a
+// tool asked two different questions; unknown commands are "not found".
 type fakeRunner map[string]string
 
-func (f fakeRunner) Output(_ context.Context, name string, _ ...string) (string, error) {
+func (f fakeRunner) Output(_ context.Context, name string, args ...string) (string, error) {
+	if len(args) > 0 {
+		if out, ok := f[name+" "+args[0]]; ok {
+			return out, nil
+		}
+	}
 	out, ok := f[name]
 	if !ok {
 		return "", errors.New(name + ": executable file not found in $PATH")
@@ -25,10 +33,41 @@ func (f fakeRunner) Output(_ context.Context, name string, _ ...string) (string,
 	return out, nil
 }
 
+// with is f plus the entries of more.
+func (f fakeRunner) with(more fakeRunner) fakeRunner {
+	out := fakeRunner{}
+	for k, v := range f {
+		out[k] = v
+	}
+	for k, v := range more {
+		out[k] = v
+	}
+	return out
+}
+
 var allTools = fakeRunner{
 	QEMUBinary:  "QEMU emulator version 11.1.1\nCopyright (c) 2003-2025 Fabrice Bellard and the QEMU Project developers\n",
 	SwtpmBinary: "TPM emulator version 0.10.2, Copyright (c) 2014-2022 IBM Corp. and others\n",
 	"systemctl": "systemd 261 (261.3-1-arch)\n+PAM +AUDIT -SELINUX\n",
+}
+
+// Firmware locations of the fixtures: Arch's, and Ubuntu's with the Secure
+// Boot build next to it, as ovmf-generic ships them.
+const (
+	archOVMF          = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
+	ubuntuOVMF        = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+	ubuntuSecbootOVMF = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
+)
+
+// dpkgOVMF answers the two dpkg-query questions for ubuntuOVMF.
+var dpkgOVMF = fakeRunner{
+	DpkgQuery + " --search": "ovmf-generic: " + ubuntuOVMF + "\n",
+	DpkgQuery + " --show":   "2025.11-3ubuntu7.2",
+}
+
+func digest(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 // fixture builds a fake root; each entry of files is created as a regular
@@ -53,7 +92,7 @@ func fullHost(t *testing.T) string {
 		"proc/sys/kernel/osrelease":                    "7.2.4-arch1-2\n",
 		"proc/meminfo":                                 "MemTotal:       65536000 kB\nMemFree:        1000 kB\n",
 		"usr/share/edk2/x64/OVMF_CODE.4m.fd":           "fw",
-		"usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd":   "fw",
+		"usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd":   "secboot fw",
 		"run/systemd/io.systemd.StorageProvider/fs":    "",
 		"run/systemd/io.systemd.StorageProvider/block": "",
 	})
@@ -64,6 +103,7 @@ func TestGet(t *testing.T) {
 	tests := []struct {
 		name   string
 		root   func(t *testing.T) string
+		ovmf   string // the configured code image, archOVMF when empty
 		runner Runner
 		check  func(t *testing.T, info *Info)
 	}{
@@ -83,7 +123,11 @@ func TestGet(t *testing.T) {
 				assert.Equal(t, Tool{Found: true, Version: "11.1.1"}, info.QEMU)
 				assert.Equal(t, Tool{Found: true, Version: "0.10.2"}, info.Swtpm, "trailing comma dropped")
 				assert.Equal(t, Tool{Found: true, Version: "261"}, info.Systemd)
-				assert.Equal(t, "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd", info.OVMFCode, "secure boot build preferred")
+				assert.Equal(t, archOVMF, info.OVMFCode, "the configured image, not the Secure Boot build next to it")
+				require.NotNil(t, info.Firmware)
+				assert.Equal(t, digest("fw"), info.Firmware.SHA256)
+				assert.Empty(t, info.Firmware.Package, "no dpkg on this host")
+				assert.Contains(t, info.Firmware.Error, "not found")
 				assert.Equal(t, []string{"block", "fs"}, info.StorageProviders)
 			},
 		},
@@ -93,7 +137,9 @@ func TestGet(t *testing.T) {
 			runner: fakeRunner{},
 			check: func(t *testing.T, info *Info) {
 				assert.False(t, info.Ready)
-				assert.Equal(t, []string{KVMDevice, VsockDevice, QEMUBinary, SwtpmBinary, "OVMF code image"}, info.Missing)
+				assert.Equal(t, []string{KVMDevice, VsockDevice, QEMUBinary, SwtpmBinary, "OVMF code image " + archOVMF}, info.Missing)
+				assert.Empty(t, info.OVMFCode)
+				assert.Nil(t, info.Firmware)
 				assert.Equal(t, "", info.Kernel)
 				assert.Equal(t, uint64(0), info.MemoryBytes)
 				assert.Equal(t, "no such file or directory", info.KVM.Error, "path errors carry the reason only")
@@ -115,20 +161,60 @@ func TestGet(t *testing.T) {
 			},
 		},
 		{
-			name: "debian firmware location and only the fs provider",
+			name: "ubuntu firmware names its package build, and only the fs provider",
 			root: func(t *testing.T) string {
 				return fixture(t, map[string]string{
-					"dev/kvm":                        "",
-					"dev/vhost-vsock":                "",
-					"usr/share/OVMF/OVMF_CODE_4M.fd": "fw",
-					"run/systemd/io.systemd.StorageProvider/fs": "",
+					"dev/kvm":                      "",
+					"dev/vhost-vsock":              "",
+					ubuntuOVMF[1:]:                 "fw",
+					ubuntuSecbootOVMF[1:]:          "secboot fw",
+					StorageProviderDir[1:] + "/fs": "",
 				})
 			},
-			runner: allTools,
+			ovmf:   ubuntuOVMF,
+			runner: allTools.with(dpkgOVMF),
 			check: func(t *testing.T, info *Info) {
 				assert.True(t, info.Ready, "missing: %v", info.Missing)
-				assert.Equal(t, "/usr/share/OVMF/OVMF_CODE_4M.fd", info.OVMFCode)
+				assert.Equal(t, ubuntuOVMF, info.OVMFCode)
+				assert.Equal(t, &Firmware{SHA256: digest("fw"), Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}, info.Firmware)
 				assert.Equal(t, []string{"fs"}, info.StorageProviders)
+			},
+		},
+		{
+			name: "a package query dpkg cannot answer leaves the digest",
+			root: func(t *testing.T) string {
+				root := fullHost(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(ubuntuOVMF)), 0o750))
+				require.NoError(t, os.WriteFile(filepath.Join(root, ubuntuOVMF), []byte("fw"), 0o600))
+				return root
+			},
+			ovmf: ubuntuOVMF,
+			runner: RunnerFunc(func(ctx context.Context, name string, args ...string) (string, error) {
+				if name == DpkgQuery {
+					return "", errors.New("dpkg-query: exit status 1: dpkg-query: no path found matching pattern " + ubuntuOVMF)
+				}
+				return allTools.Output(ctx, name, args...)
+			}),
+			check: func(t *testing.T, info *Info) {
+				assert.True(t, info.Ready, "an unknown package does not block create_vm: %v", info.Missing)
+				require.NotNil(t, info.Firmware)
+				assert.Equal(t, digest("fw"), info.Firmware.SHA256)
+				assert.Empty(t, info.Firmware.Package)
+				assert.Contains(t, info.Firmware.Error, "no path found")
+			},
+		},
+		{
+			name: "a firmware path that is a directory is missing",
+			root: func(t *testing.T) string {
+				root := fixture(t, nil)
+				require.NoError(t, os.MkdirAll(filepath.Join(root, ubuntuOVMF), 0o750))
+				return root
+			},
+			ovmf:   ubuntuOVMF,
+			runner: allTools,
+			check: func(t *testing.T, info *Info) {
+				assert.Contains(t, info.Missing, "OVMF code image "+ubuntuOVMF)
+				assert.Nil(t, info.Firmware)
 			},
 		},
 		{
@@ -147,12 +233,24 @@ func TestGet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := New(Options{Runner: tt.runner, Root: tt.root(t), Logger: quiet})
+			ovmf := tt.ovmf
+			if ovmf == "" {
+				ovmf = archOVMF
+			}
+			svc := New(Options{Runner: tt.runner, Root: tt.root(t), OVMFCode: ovmf, Logger: quiet})
 			info, err := svc.Get(context.Background())
 			require.NoError(t, err)
 			tt.check(t, info)
 		})
 	}
+}
+
+func TestFirmwareUnconfigured(t *testing.T) {
+	_, err := New(Options{Root: t.TempDir()}).Firmware(context.Background())
+	require.Error(t, err)
+	info, err := New(Options{Runner: allTools, Root: t.TempDir()}).Get(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, info.Missing, "OVMF code image")
 }
 
 func TestFieldAfter(t *testing.T) {

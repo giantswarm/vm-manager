@@ -28,6 +28,7 @@ const goldenHTTPTimeout = 10 * time.Second
 type imageGoldenOptions struct {
 	imageDirOptions
 	fromVM string
+	clear  bool
 	server string
 	token  string
 }
@@ -134,14 +135,21 @@ one per release; a lab pushes a local build to its own registry.`,
 func newImageGoldenCmd() *cobra.Command {
 	o := &imageGoldenOptions{}
 	cmd := &cobra.Command{
-		Use:   "golden <image-ref> --from-vm <id>",
+		Use:   "golden <image-ref> (--from-vm <id> | --clear)",
 		Short: "Record the golden PCR values of an attested VM into the image's policy.json",
 		Long: `Read the verified ready-stage quote of a VM from the running server and write
 its PCRs 0, 2-4, 6, 7 and 13 as the golden values into the policy.json of the image, so
 the verifier (--attestation=verify) can compare every later boot of that image
 against a known-good one. The VM must have attested with --attestation=verify;
 during bring-up start the server with --attestation-learn-golden so the first
-boot is accepted without golden values.`,
+boot is accepted without golden values.
+
+--clear removes the image's golden values instead, the first step of recording
+them again after the firmware changed (PCR 0 measures it): learn mode accepts
+only a PCR without a value, so over stale values the learn boot fails with the
+same golden mismatch. The server reads the policy at start: restart it with
+--attestation-learn-golden, boot one VM, record with --from-vm, restart
+without.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runImageGolden(cmd.Context(), o, args[0], cmd.OutOrStdout())
@@ -149,10 +157,12 @@ boot is accepted without golden values.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.fromVM, "from-vm", "", "ID of the VM whose verified ready-stage quote supplies the values")
+	f.BoolVar(&o.clear, "clear", false, "Remove the image's golden values, to record them again after a firmware change")
 	f.StringVar(&o.server, "server", envOr("VM_MANAGER_SERVER", "http://127.0.0.1:8080"), "Base URL of the running vm-manager server (VM_MANAGER_SERVER)")
 	f.StringVar(&o.token, "token", os.Getenv("VM_MANAGER_TOKEN"), "Bearer token for a server started with --enable-oauth (VM_MANAGER_TOKEN)")
 	o.addFlags(f)
-	_ = cmd.MarkFlagRequired("from-vm")
+	cmd.MarkFlagsOneRequired("from-vm", "clear")
+	cmd.MarkFlagsMutuallyExclusive("from-vm", "clear")
 	return cmd
 }
 
@@ -169,6 +179,14 @@ func runImageGolden(ctx context.Context, o *imageGoldenOptions, ref string, out 
 	if img.Policy == nil {
 		return fmt.Errorf("image %s has no policy.json in %s; run make image-verify and copy build/policy.json next to the image", img.Ref(), o.imageDir)
 	}
+	path := catalog.PolicyPath(img)
+	if o.clear {
+		if err := writeGolden(path, nil); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(out, "cleared the golden PCR values of %s in %s; restart the server with --attestation-learn-golden, boot one VM and record them with --from-vm\n", img.Ref(), path)
+		return nil
+	}
 
 	att, err := fetchAttestation(ctx, o, o.fromVM)
 	if err != nil {
@@ -182,7 +200,6 @@ func runImageGolden(ctx context.Context, o *imageGoldenOptions, ref string, out 
 		return fmt.Errorf("ready quote of vm %s carries %d of the %d golden PCRs; the server must run with --attestation=verify", o.fromVM, len(golden), len(attest.GoldenIndexes))
 	}
 
-	path := catalog.PolicyPath(img)
 	if err := writeGolden(path, golden); err != nil {
 		return err
 	}
@@ -219,8 +236,9 @@ func fetchAttestation(ctx context.Context, o *imageGoldenOptions, vmID string) (
 	return att, nil
 }
 
-// writeGolden sets golden.sha256 in the policy file, keeping every other
-// field, and validates the result before replacing the file.
+// writeGolden sets golden.sha256 in the policy file, or removes the golden
+// values when golden is nil, keeping every other field, and validates the
+// result before replacing the file.
 func writeGolden(path string, golden map[int]string) error {
 	raw, err := os.ReadFile(path) // #nosec G304 -- the path comes from the image catalog.
 	if err != nil {
@@ -230,8 +248,9 @@ func writeGolden(path string, golden map[int]string) error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	doc["golden"], err = json.Marshal(map[string]map[int]string{attest.Bank: golden})
-	if err != nil {
+	if golden == nil {
+		delete(doc, "golden")
+	} else if doc["golden"], err = json.Marshal(map[string]map[int]string{attest.Bank: golden}); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")

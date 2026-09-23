@@ -60,7 +60,7 @@ Design decisions and their reasons are in [docs/design.md](docs/design.md), the 
 | Operation | REST | MCP tool | Writes |
 |---|---|---|---|
 | This server's build (release version, commit, build time) and the names of its tools | — | `get_info` | no |
-| Host capabilities: kernel, CPUs, memory, `/dev/kvm`, `/dev/vhost-vsock`, qemu / swtpm / systemd versions, OVMF image, storage providers, `ready` + `missing` | `GET /api/v1/host` | `get_host` | no |
+| Host capabilities: kernel, CPUs, memory, `/dev/kvm`, `/dev/vhost-vsock`, qemu / swtpm / systemd versions, OVMF image and its build, storage providers, `ready` + `missing` | `GET /api/v1/host` | `get_host` | no |
 | List the bootable images (id, version, UKI, disk, Kubernetes sysext versions, PCR policy) | `GET /api/v1/images` | `list_images` | no |
 | Describe one image (`<id>_<version>` or bare id = newest) | `GET /api/v1/images/{ref}` | `get_image` | no |
 | List the virtual networks with gateway and leases | `GET /api/v1/networks` | `list_networks` | no |
@@ -248,6 +248,35 @@ boot on other firmware is rejected; `e2e/attestation_test.go` proves it with a s
 build (`golden mismatch` on PCR 0 and 7, user-data gated, Ignition in its fetch loop).
 Learn mode is never for production, it would accept any firmware; `--attestation=noop`
 (opt-in) verifies nothing and does not gate user-data.
+
+What invalidates golden values. They belong to one image and one firmware build. A new
+image changes PCR 4 (boot loader and UKI), and PCR 13 with its Kubernetes sysext; a new
+OVMF build changes PCR 0, which measures the firmware, and PCR 7 when its variable store
+template changes. In the container image the firmware is Ubuntu's `ovmf-generic`, pinned
+in the `Dockerfile`: a new build arrives as a pull request and release note of its own
+(`update OVMF to <version>, re-record golden PCRs`), and no other release changes it. On
+a host install it is the host's package, which a system update replaces. `get_host`
+reports the build VMs boot with (`firmware`: the SHA-256 of `ovmfCode`, the dpkg package
+and version) and `serve` logs it at start; values recorded under another build fail
+every quote with `golden mismatch: pcr 0`.
+
+Recording golden values again. Learn mode accepts only a PCR without a golden value, so
+over stale values the learn boot fails with the same mismatch: `vm-manager image golden
+<image> --clear` removes them first. In the pod, whose state claim (the chart's
+`persistence`) holds the image directory and its `policy.json`, `vm-manager image` reaches
+the pod's server and directory without flags:
+
+```sh
+kubectl -n <namespace> exec deploy/vm-manager -c vm-manager -- vm-manager image golden <image> --clear
+# chart value vm.learnGolden: true; the upgrade restarts the pod, which reads the policy at start
+# create one VM with require_attestation: true and wait for ready (create_vm, POST /api/v1/vms), then
+kubectl -n <namespace> exec deploy/vm-manager -c vm-manager -- \
+  vm-manager image golden <image> --from-vm <id> --token <bearer token, with OAuth on>
+# delete the VM and set vm.learnGolden: false: after that restart every boot is compared
+```
+
+Without a state claim the pod fetches the guest image at every start and forgets the
+values recorded into it.
 
 ## Networking
 
