@@ -1,7 +1,8 @@
 // Package e2e holds the T3 boot end-to-end tests of docs/design.md "Testing
 // strategy": real QEMU on KVM, swtpm, OVMF and the mkosi image from images/.
-// TestInstallBoot drives them through internal/runtime/qemu and internal/tpm
-// with user networking; the others (TestNetworkIMDS, TestIgnition,
+// TestInstallBoot and TestInstallBootSystemdBoot (the installer booted
+// through systemd-boot instead of -kernel) drive them through
+// internal/runtime/qemu and internal/tpm with user networking; the others (TestNetworkIMDS, TestIgnition,
 // TestPersistentEtc, TestKubernetesSysext, TestAttestation) build and start
 // vm-manager serve and drive it through its MCP endpoint, so the guest gets a
 // virtual network with the IMDS; TestAttestation runs three servers in turn
