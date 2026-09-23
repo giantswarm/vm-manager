@@ -471,9 +471,10 @@ honours; without it `systemd-imds` would socket-activate `systemd-imdsd` against
 address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
 `/usr/lib/vm-manager/kubernetes` once per boot:
 
-1. `systemd-imds /kubernetes-version`. `KeyNotFound` (VM without a Kubernetes version)
-   and `NotSupported` (no IMDS provider matched, e.g. `scripts/smoke-boot`) end the unit
-   successfully with nothing to do; any other error fails it.
+1. `systemd-imds /kubernetes-version`. `KeyNotFound` (VM without a Kubernetes version,
+   which `systemd-imds` prints as `Key not available.`) and `NotSupported` (no IMDS
+   provider matched, e.g. `scripts/smoke-boot`) end the unit successfully with nothing to
+   do; any other error fails it. `TestNetworkIMDS` boots such a VM.
 2. Every other `kubernetes_*.raw` in `/var/lib/extensions/` is deleted: systemd-sysext
    merges every image it finds, so exactly one version may be present.
 3. `systemd-sysupdate --component=kubernetes update <kv>` (the transfer is

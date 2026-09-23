@@ -45,16 +45,19 @@ pcr=13
 log() { echo "vm-kubernetes: $*"; }
 fail() { echo "vm-kubernetes: $*" >&2; exit 1; }
 
-# systemd-imds exits 1 with the varlink error name of systemd-imdsd on stderr:
+# systemd-imds exits 1 on every error; stderr tells them apart. systemd-imdsd's
 # KeyNotFound for an unset key (vm-manager's bodyless 404: the VM was created
-# without a Kubernetes version), NotSupported when no IMDS provider matched
-# the machine (a boot outside vm-manager, e.g. scripts/smoke-boot). Both mean
-# there is nothing to pull; CommunicationFailure, Timeout and NotAvailable
-# are failures of a VM that should have a version.
+# without a Kubernetes version) prints as "Key not available." (the tool maps
+# KeyNotFound and WellKnownKeyUnset to that line, src/imds/imds-tool.c);
+# NotSupported, when no IMDS provider matched the machine (a boot outside
+# vm-manager, e.g. scripts/smoke-boot), prints its varlink error name. Both
+# mean there is nothing to pull; CommunicationFailure, Timeout and
+# NotAvailable are failures of a VM that should have a version.
 err=/run/vm-kubernetes.imds-err
+nothing_to_pull='^Key not available\.$|InstanceMetadata\.NotSupported'
 if ! version="$(/usr/lib/systemd/systemd-imds /kubernetes-version 2>"$err")"; then
-        if /usr/bin/grep -q -E "InstanceMetadata\.(KeyNotFound|NotSupported)" "$err"; then
-                log "no /kubernetes-version from the IMDS ($(/usr/bin/grep -o -E "InstanceMetadata\.[A-Za-z]+" "$err" | head -1)), this VM runs without Kubernetes"
+        if reason="$(/usr/bin/grep -m1 -o -E "$nothing_to_pull" "$err")"; then
+                log "no /kubernetes-version from the IMDS ($reason), this VM runs without Kubernetes"
                 exit 0
         fi
         fail "cannot read /kubernetes-version from the IMDS: $(tr '\n' ' ' <"$err")"
