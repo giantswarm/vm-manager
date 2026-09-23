@@ -1,0 +1,21 @@
+{
+  // Repo-specific Renovate rules for vm-manager. Pulled in as the last `extends`
+  // entry of the generated renovate.json5; class-wide rules belong in
+  // giantswarm/renovate-presets.
+  packageRules: [
+    {
+      // gvisor.dev/gvisor has no releases: Renovate proposes digests of its
+      // default branch `master`, which is the Bazel source layout and does not
+      // build with the go tool (several packages per directory, e.g. `stack`
+      // and `bridge` in pkg/tcpip/stack). Go modules consume gvisor's generated
+      // `go` branch. vm-manager needs gvisor at the version
+      // github.com/containers/gvisor-tap-vsock pins (the netstack it runs is
+      // gvisor-tap-vsock's; our tests drive it directly), so the version moves
+      // with a gvisor-tap-vsock bump and never on its own.
+      description: 'gvisor master is not go-buildable; the version follows github.com/containers/gvisor-tap-vsock',
+      matchManagers: ['gomod'],
+      matchPackageNames: ['gvisor.dev/gvisor'],
+      enabled: false,
+    },
+  ],
+}
