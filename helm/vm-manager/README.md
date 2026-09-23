@@ -44,7 +44,7 @@ chart installs it as `components.vm-manager`.
 | vm.bootTimeout | string | `"4m"` | `READY=1` ceiling, then `running`; raise it when user-data runs `kubeadm init` with image pulls. |
 | vm.stopTimeout | string | `"30s"` | Graceful power-down before SIGKILL, also on shutdown. |
 | vm.attestation | string | `"verify"` | How guest TPM quotes are judged: `verify` (against the image policy and its golden values) or `noop`. |
-| vm.learnGolden | bool | `false` | Bring-up of a new image or firmware only: accept golden PCRs the image policy has no value for and record them for `vm-manager image golden`. |
+| vm.learnGolden | bool | `false` | Bring-up of a guest image without released golden values (a local build) or of another firmware only: accept golden PCRs the image policy has no value for and record them for `vm-manager image golden`. |
 | vm.ovmf.code | string | `""` | OVMF firmware code image and variable store template; empty probes the known locations (the image ships Ubuntu's under /usr/share/OVMF). |
 | vm.ovmf.vars | string | `""` |  |
 | metrics.enabled | bool | `true` | Serve the Prometheus exposition at GET /metrics, outside the OAuth guard like /healthz. |

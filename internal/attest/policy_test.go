@@ -38,6 +38,8 @@ func TestParsePolicy(t *testing.T) {
 		{name: "golden index not a number", raw: strings.Replace(valid, `"13":`, `"pcr13":`, 1), wantErr: "policy:"},
 		{name: "golden value", raw: strings.Replace(valid, `"7":"`+hexB, `"7":"`+hexB[:10], 1), wantErr: "golden.sha256[7]"},
 		{name: "pcr13 value", raw: strings.Replace(valid, `"1.36.4":"`+hexB, `"1.36.4":"zz`, 1), wantErr: `pcr13["1.36.4"]: not hex`},
+		{name: "golden firmware", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"`+hexB+`","package":"ovmf-generic","version":"2025.11-3ubuntu7.2"},"golden":`, 1)},
+		{name: "golden firmware digest", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"abcd"},"golden":`, 1), wantErr: "golden_firmware.sha256: 2 bytes, want 32"},
 		{name: "pcr13 version", raw: strings.Replace(valid, `"1.36.4":`, `"":`, 1), wantErr: "pcr13 has an entry without a kubernetes version"},
 	}
 	for _, tt := range tests {
@@ -64,6 +66,15 @@ func TestParsePolicy(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, map[string]string{"1.36.4": hexB}, p.PCR13)
 	assert.Empty(t, p.KubernetesVersion, "not part of policy.json")
+	assert.Nil(t, p.GoldenFirmware, "values recorded before the firmware was")
+}
+
+func TestFirmware(t *testing.T) {
+	fw := Firmware{SHA256: hexA, Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}
+	assert.Equal(t, "ovmf-generic 2025.11-3ubuntu7.2 (sha256 aaaaaaaaaaaaaaaa)", fw.String())
+	assert.Equal(t, "sha256 bbbbbbbbbbbbbbbb", Firmware{SHA256: hexB}.String(), "a build no package manager knows")
+	assert.True(t, fw.SameBuild(Firmware{SHA256: strings.ToUpper(hexA)}), "the digest decides, in any case")
+	assert.False(t, fw.SameBuild(Firmware{SHA256: hexB, Package: fw.Package, Version: fw.Version}))
 }
 
 // The PCR 13 expectation: the pcr13 entry of the VM's Kubernetes version,

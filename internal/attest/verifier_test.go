@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,22 +63,29 @@ func newEnv(t *testing.T, learn bool) *env {
 		e.policy.Golden[attest.Bank][i] = hex.EncodeToString(values[i])
 	}
 	require.NoError(t, e.policy.Validate())
+	e.newVerifier(learn, nil)
+	return e
+}
 
+// newVerifier replaces the verifier; firmware is the build it is told VMs
+// boot with.
+func (e *env) newVerifier(learn bool, firmware *attest.Firmware) {
+	e.t.Helper()
 	var err error
 	e.v, err = attest.New(attest.Options{
 		Policies: attest.PolicyProviderFunc(func(_ context.Context, id string) (attest.Policy, error) {
-			require.Equal(t, vmID, id)
+			require.Equal(e.t, vmID, id)
 			if e.policyErr != nil {
 				return attest.Policy{}, e.policyErr
 			}
 			return e.policy, nil
 		}),
 		LearnGolden: learn,
+		Firmware:    firmware,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:         func() time.Time { return e.now },
 	})
-	require.NoError(t, err)
-	return e
+	require.NoError(e.t, err)
 }
 
 // toReady moves the guest on: the remaining phases into PCR 11, a sysext
@@ -217,6 +225,49 @@ func TestVerifierRejectsPolicyMismatch(t *testing.T) {
 		assert.False(t, res.Verified)
 		assert.Contains(t, res.Message, "golden mismatch: pcr 4 expected "+e.policy.Golden[attest.Bank][1]+", got ")
 		assert.NotContains(t, res.Message, "pcr 5")
+	})
+
+	t.Run("golden firmware", func(t *testing.T) {
+		recorded := &attest.Firmware{SHA256: strings.Repeat("ab", 32), Package: "ovmf-generic", Version: "2025.11-3ubuntu7"}
+		other := &attest.Firmware{SHA256: strings.Repeat("cd", 32), Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}
+		for _, tt := range []struct {
+			name     string
+			recorded *attest.Firmware
+			booted   *attest.Firmware
+			pcr      int
+			want     string
+		}{
+			{name: "recorded for another build", recorded: recorded, booted: other, pcr: 0,
+				want: "; the golden values were recorded for firmware ovmf-generic 2025.11-3ubuntu7 (sha256 abababababababab), this server boots ovmf-generic 2025.11-3ubuntu7.2 (sha256 cdcdcdcdcdcdcdcd): record them again for this firmware"},
+			{name: "same build", recorded: recorded, booted: &attest.Firmware{SHA256: strings.ToUpper(recorded.SHA256)}, pcr: 7,
+				want: "; the firmware is the build the golden values were recorded for (sha256 ABABABABABABABAB)"},
+			{name: "values older than the firmware record", booted: other, pcr: 0},
+			{name: "booted build unknown", recorded: recorded, pcr: 0},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				e := newEnv(t, false)
+				e.policy.GoldenFirmware = tt.recorded
+				e.newVerifier(false, tt.booted)
+				e.policy.Golden[attest.Bank][tt.pcr] = e.policy.Golden[attest.Bank][1]
+				res := e.submit(e.request(e.ak, imds.StageInitrd))
+				assert.False(t, res.Verified)
+				prefix := fmt.Sprintf("golden mismatch: pcr %d expected %s, got ", tt.pcr, e.policy.Golden[attest.Bank][1])
+				require.True(t, strings.HasPrefix(res.Message, prefix), res.Message)
+				assert.Equal(t, tt.want, res.Message[len(prefix)+64:])
+			})
+		}
+
+		// A PCR 13 mismatch alone says nothing about the firmware.
+		e := newEnv(t, false)
+		e.policy.GoldenFirmware = recorded
+		e.newVerifier(false, other)
+		require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+		e.toReady()
+		e.policy.Golden[attest.Bank][13] = e.policy.Golden[attest.Bank][1]
+		res := e.submit(e.request(e.ak, imds.StageReady))
+		assert.False(t, res.Verified)
+		assert.Contains(t, res.Message, "golden mismatch: pcr 13 expected ")
+		assert.NotContains(t, res.Message, "firmware")
 	})
 
 	t.Run("golden missing", func(t *testing.T) {
