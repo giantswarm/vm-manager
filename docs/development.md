@@ -313,8 +313,8 @@ automation. The tiers are those of [design.md](design.md) "Testing strategy".
 | Workflow | Runs on | When | What |
 |---|---|---|---|
 | `test.yml` | `ubuntu-latest` | every PR, push to main | `make test vet-e2e` (T0/T1, plus `go vet -tags e2e ./e2e/...` so the e2e package cannot rot unnoticed) and `make lint lint-e2e` |
-| `image.yml` | `archlinux:latest` container (`--privileged`) on `ubuntu-24.04` | PRs touching `images/**`, `cmd/vm-agent/**`, `internal/agent/**` or the workflow; push to main with the same paths; manual; called by `e2e.yml` | `make -C images` (all: keys, base image, every Kubernetes sysext of `KUBERNETES_VERSIONS`, verify; T2), sizes and the expected PCR 11 values in the job summary, `images/build/` (UKI, disk image, split partitions, `sysupdate/`, `policy.json`; not `base/`) as the **`guest-image`** artifact, 7 days (30 on main) |
-| `e2e.yml` | `ubuntu-24.04` (nested KVM) | every PR, push to main: **fast** subset; nightly 02:17 UTC and manual: **full** suite | T3: `go test -tags e2e` against the artifact, consoles and logs as the **`e2e-logs-<suite>`** artifact |
+| `image.yml` | `archlinux:latest` container (`--privileged`) on `ubuntu-26.04` | PRs touching `images/**`, `cmd/vm-agent/**`, `internal/agent/**` or the workflow; push to main with the same paths; manual; called by `e2e.yml` | `make -C images` (all: keys, base image, every Kubernetes sysext of `KUBERNETES_VERSIONS`, verify; T2), sizes and the expected PCR 11 values in the job summary, `images/build/` (UKI, disk image, split partitions, `sysupdate/`, `policy.json`; not `base/`) as the **`guest-image`** artifact, 7 days (30 on main) |
+| `e2e.yml` | `ubuntu-26.04` (nested KVM) | every PR, push to main: **fast** subset; nightly 02:17 UTC and manual: **full** suite | T3: `go test -tags e2e` against the artifact, consoles and logs as the **`e2e-logs-<suite>`** artifact |
 | `chart.yml` | `ubuntu-latest` | every PR, push to main | `make helm-lint helm-verify`: the chart lints and the render assertions of `hack/verify-chart.sh` hold (privileged, no hostPath, the guest-image init container and its reference, the state claim, OAuth from the identity contract, the MCPServer CR) |
 
 The image build runs in an Arch container because the image is Arch (mkosi 27, systemd 261,
@@ -332,16 +332,15 @@ the newest unexpired `guest-image` of a green `image.yml` or `e2e.yml` run on `m
 (and if there is none, it builds). Nightly and manual runs always build; the `image_run_id` input
 of a manual run reuses that run's artifact instead. `test` enables `/dev/kvm` (udev rule
 `99-kvm4all.rules`, mode 0666) and `vhost_vsock` (`modprobe`, chmod), installs `qemu-system-x86`
-and `ovmf` from apt and `swtpm` from `ppa:stefanberger/swtpm-noble` (noble's swtpm 0.7.3 rejects
-the `terminate` ctrl option of swtpm 0.8+ that `internal/tpm` passes) and unloads Ubuntu's
-AppArmor profile for swtpm, which denies sockets and state outside its allowed paths (the
-per-test directories under `/mnt/e2e` are). Noble's QEMU is 8.2.2: `internal/runtime/qemu`
-probes the release once and passes the network's `-netdev stream` re-dial option as
-`reconnect=<s>` there instead of the `reconnect-ms=` of QEMU 9.2+ (the runner's systemd 255
-has no `systemd-ssh-proxy` and no storage provider: the harness dials ssh over AF_VSOCK from Go
-and vm-manager falls back to file-backed volumes), downloads the artifact to `/mnt/e2e/image` and
-runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short socket paths) and
-`VM_MANAGER_E2E_KEEP=1`.
+(10.2), `swtpm` (0.10; `internal/tpm` passes its `terminate` ctrl option, swtpm 0.8+) and `ovmf`
+from the Ubuntu archive and unloads Ubuntu's AppArmor profile for swtpm, which denies sockets and
+state outside its allowed paths (the per-test directories under `/mnt/e2e` are). The harness
+dials ssh over AF_VSOCK from Go, so the host needs no `systemd-ssh-proxy`, and vm-manager falls
+back to file-backed volumes on a host without a systemd storage provider. On a QEMU older than
+9.2 (Ubuntu 24.04's 8.2) `internal/runtime/qemu` passes the network's `-netdev stream` re-dial
+option as `reconnect=<s>` instead of `reconnect-ms=`. `test` downloads the artifact to
+`/mnt/e2e/image` and runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short
+socket paths) and `VM_MANAGER_E2E_KEEP=1`.
 
 Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestNetworkIMDS`,
 `TestPersistentEtc`, `TestKubernetesSysext`. Full suite (nightly, 60 minutes): those plus
