@@ -1,15 +1,18 @@
 // Package host reports what the KVM host offers vm-manager: kernel and
 // hardware, the devices and tools the QEMU runtime needs, the firmware the
-// images boot with, and the systemd services the provisioner talks to. It is
-// the first thing an agent calls: get_host says whether VMs can be created
-// here and, if not, what is missing.
+// VMs boot with and its build, and the systemd services the provisioner
+// talks to. It is the first thing an agent calls: get_host says whether VMs
+// can be created here and, if not, what is missing.
 package host
 
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -33,22 +36,12 @@ const (
 const (
 	QEMUBinary  = "qemu-system-x86_64"
 	SwtpmBinary = "swtpm"
+	// DpkgQuery names the package that installed the firmware image.
+	DpkgQuery = "dpkg-query"
 )
 
 // StorageProviderFS is the systemd storage provider VM volumes come from.
 const StorageProviderFS = "fs"
-
-// ovmfCodeCandidates are the OVMF firmware code images, in preference order:
-// the 4 MiB Secure Boot capable builds first, Arch (edk2-ovmf) then Debian
-// and Ubuntu (ovmf) locations.
-var ovmfCodeCandidates = []string{
-	"/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
-	"/usr/share/edk2/x64/OVMF_CODE.4m.fd",
-	"/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
-	"/usr/share/OVMF/OVMF_CODE_4M.fd",
-	"/usr/share/OVMF/OVMF_CODE.secboot.fd",
-	"/usr/share/OVMF/OVMF_CODE.fd",
-}
 
 // probeTimeout bounds each tool invocation.
 const probeTimeout = 5 * time.Second
@@ -94,20 +87,24 @@ type Options struct {
 	// Root is the filesystem root the device, firmware and /proc probes are
 	// relative to; empty is "/". Tests point it at a fixture tree.
 	Root string
+	// OVMFCode is the firmware code image VMs boot with, serve's
+	// --ovmf-code.
+	OVMFCode string
 	// Logger for probe failures; nil uses slog.Default().
 	Logger *slog.Logger
 }
 
 // Service answers host capability queries.
 type Service struct {
-	run  Runner
-	root string
-	log  *slog.Logger
+	run      Runner
+	root     string
+	ovmfCode string
+	log      *slog.Logger
 }
 
 // New builds a Service.
 func New(opts Options) *Service {
-	s := &Service{run: opts.Runner, root: opts.Root, log: opts.Logger}
+	s := &Service{run: opts.Runner, root: opts.Root, ovmfCode: opts.OVMFCode, log: opts.Logger}
 	if s.run == nil {
 		s.run = ExecRunner{}
 	}
@@ -142,9 +139,11 @@ type Info struct {
 	// Systemd is the host systemd, which provides the storage provider and
 	// the transient units VMs run in.
 	Systemd Tool `json:"systemd"`
-	// OVMFCode is the UEFI firmware code image VMs boot with; empty when no
-	// known location holds one.
+	// OVMFCode is the UEFI firmware code image VMs boot with (serve's
+	// --ovmf-code); empty when that file does not exist.
 	OVMFCode string `json:"ovmfCode,omitempty"`
+	// Firmware is the build of OVMFCode; absent with it.
+	Firmware *Firmware `json:"firmware,omitempty"`
 	// StorageProviders are the io.systemd.StorageProvider sockets present.
 	StorageProviders []string `json:"storageProviders"`
 	// Ready is true when every prerequisite of create_vm is met.
@@ -159,6 +158,22 @@ type Device struct {
 	Path       string `json:"path"`
 	Accessible bool   `json:"accessible"`
 	Error      string `json:"error,omitempty"`
+}
+
+// Firmware identifies the build of the firmware code image. PCR 0 measures
+// the firmware, so golden PCR values recorded under one build fail to verify
+// under any other: the build a policy's values were recorded with is the one
+// this must report.
+type Firmware struct {
+	// SHA256 is the hex digest of the code image, the build's exact identity
+	// on any host.
+	SHA256 string `json:"sha256"`
+	// Package and Version name the dpkg package that installed the image,
+	// e.g. ovmf-generic 2025.11-3ubuntu7.2 in the vm-manager container image;
+	// empty on a host whose image dpkg does not know, Error says why.
+	Package string `json:"package,omitempty"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Tool is a host binary and the version it reports.
@@ -186,21 +201,25 @@ func (s *Service) Get(ctx context.Context) (*Info, error) {
 		QEMU:             s.tool(ctx, QEMUBinary, "--version", "version"),
 		Swtpm:            s.tool(ctx, SwtpmBinary, "--version", "version"),
 		Systemd:          s.tool(ctx, "systemctl", "--version", "systemd"),
-		OVMFCode:         s.ovmfCode(),
 		StorageProviders: s.storageProviders(),
 	}
-	info.Missing = missing(info)
+	if fw, err := s.Firmware(ctx); err != nil {
+		s.log.Debug("firmware code image unavailable", "path", s.ovmfCode, "error", err)
+	} else {
+		info.OVMFCode, info.Firmware = s.ovmfCode, fw
+	}
+	info.Missing = s.missing(info)
 	info.Ready = len(info.Missing) == 0
 	return info, nil
 }
 
 // missing lists the create_vm prerequisites info does not satisfy: the two
-// devices, the two binaries and a firmware image. systemd and the fs storage
+// devices, the two binaries and the firmware image. systemd and the fs storage
 // provider are reported (Systemd, StorageProviders) but not required: without
 // a service manager VMs run as plain child processes (--launcher process), and
 // without the provider volumes are plain files below the state directory — the
 // shape of vm-manager in a pod.
-func missing(info *Info) []string {
+func (s *Service) missing(info *Info) []string {
 	var out []string
 	if !info.KVM.Accessible {
 		out = append(out, KVMDevice)
@@ -215,7 +234,7 @@ func missing(info *Info) []string {
 		out = append(out, SwtpmBinary)
 	}
 	if info.OVMFCode == "" {
-		out = append(out, "OVMF code image")
+		out = append(out, strings.TrimSpace("OVMF code image "+s.ovmfCode))
 	}
 	return out
 }
@@ -281,13 +300,57 @@ func (s *Service) tool(ctx context.Context, name, arg, marker string) Tool {
 	return Tool{Found: true, Version: fieldAfter(firstLine(out), marker)}
 }
 
-func (s *Service) ovmfCode() string {
-	for _, c := range ovmfCodeCandidates {
-		if st, err := os.Stat(s.path(c)); err == nil && st.Mode().IsRegular() {
-			return c
-		}
+// Firmware reads the build of the firmware code image VMs boot with: its
+// digest, and the dpkg package and version that installed it when dpkg
+// knows the file. The error is a missing or unreadable image.
+func (s *Service) Firmware(ctx context.Context) (*Firmware, error) {
+	if s.ovmfCode == "" {
+		return nil, errors.New("no firmware code image configured")
 	}
-	return ""
+	st, err := os.Stat(s.path(s.ovmfCode))
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", s.ovmfCode)
+	}
+	f, err := os.Open(s.path(s.ovmfCode)) // #nosec G304 -- the configured firmware image
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, fmt.Errorf("read %s: %w", s.ovmfCode, err)
+	}
+	fw := &Firmware{SHA256: hex.EncodeToString(h.Sum(nil))}
+	if fw.Package, fw.Version, err = s.dpkgPackage(ctx, s.ovmfCode); err != nil {
+		fw.Error = err.Error()
+	}
+	return fw, nil
+}
+
+// dpkgPackage is the package that installed path and its version:
+// dpkg-query --search prints "ovmf-generic: /usr/share/OVMF/OVMF_CODE_4M.fd"
+// (a comma-separated list when several packages ship the path, the first
+// wins), --show the version of that package.
+func (s *Service) dpkgPackage(ctx context.Context, path string) (pkg, version string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := s.run.Output(ctx, DpkgQuery, "--search", path)
+	if err != nil {
+		return "", "", err
+	}
+	owners, _, ok := strings.Cut(firstLine(out), ": ")
+	if !ok {
+		return "", "", fmt.Errorf("%s --search %s: unexpected output %q", DpkgQuery, path, firstLine(out))
+	}
+	pkg, _, _ = strings.Cut(owners, ", ")
+	out, err = s.run.Output(ctx, DpkgQuery, "--show", "--showformat=${Version}", pkg)
+	if err != nil {
+		return "", "", err
+	}
+	return pkg, strings.TrimSpace(out), nil
 }
 
 // storageProviders are the non-directory entries (the provider sockets) of

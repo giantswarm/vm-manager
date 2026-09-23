@@ -146,7 +146,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		"Read-only. Report this server's build (version — the release, or dev for a local build —, commit and build time) and the names of its tools.",
 		hintRead), t.getInfo)
 	s.AddTool(newTool(ToolGetHost,
-		"Read-only. Report the KVM host's capabilities: hostname, kernel, CPUs and memory; whether /dev/kvm and /dev/vhost-vsock are accessible; the qemu-system-x86_64, swtpm and systemd versions; the OVMF firmware image found; the systemd storage providers present; and ready plus the list of missing prerequisites. Call it before creating VMs.",
+		"Read-only. Report the KVM host's capabilities: hostname, kernel, CPUs and memory; whether /dev/kvm and /dev/vhost-vsock are accessible; the qemu-system-x86_64, swtpm and systemd versions; the OVMF firmware image VMs boot with and its build (SHA-256, dpkg package and version), the build golden PCR values must have been recorded with; the systemd storage providers present; and ready plus the list of missing prerequisites. Call it before creating VMs.",
 		hintRead), t.getHost)
 	s.AddTool(newTool(ToolListImages,
 		"Read-only. List the bootable images in the catalog (id, version, UKI and disk paths, the Kubernetes versions available as a sysext, the PCR policy). Empty means no image was built or --image-dir points elsewhere; create_vm needs at least one.",

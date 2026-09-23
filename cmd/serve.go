@@ -220,7 +220,9 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	reg.SetSource(c.vm)
 
-	svc := api.Services{Host: host.New(host.Options{Logger: log}), VM: c.vm, Images: c.images, Metrics: reg}
+	hostSvc := host.New(host.Options{OVMFCode: o.ovmfCode, Logger: log})
+	logFirmware(ctx, hostSvc, o.ovmfCode, log)
+	svc := api.Services{Host: hostSvc, VM: c.vm, Images: c.images, Metrics: reg}
 	cfg := server.Config{Addr: o.listen, MCPPath: o.mcpPath}
 	if o.metricsEnabled {
 		cfg.Metrics = reg.Handler()
@@ -255,6 +257,21 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	// them (--detach-vms-on-exit), then the networks and the notify
 	// listener.
 	return errors.Join(err, c.close(log))
+}
+
+// logFirmware names the build of the firmware VMs boot with, the one golden
+// PCR values must have been recorded with.
+func logFirmware(ctx context.Context, h *host.Service, path string, log *slog.Logger) {
+	fw, err := h.Firmware(ctx)
+	if err != nil {
+		log.Warn("firmware code image unavailable: create_vm fails until --ovmf-code names one", "path", path, "err", err)
+		return
+	}
+	attrs := []any{"path", path, "sha256", fw.SHA256, "package", fw.Package, "version", fw.Version}
+	if fw.Error != "" {
+		attrs = append(attrs, "packageErr", fw.Error)
+	}
+	log.Info("firmware VMs boot with; golden PCR values belong to this build", attrs...)
 }
 
 // components are the host services behind the VM service, built in the
