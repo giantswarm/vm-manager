@@ -207,6 +207,8 @@ func TestAttestation(t *testing.T) {
 		assert.Equal(t, vm.StateAttesting, v.State, "get_vm keeps the VM at attesting")
 		assert.False(t, v.Attestation.UserDataReleased, "get_vm agrees with get_vm_attestation")
 		assert.Nil(t, v.ReadyAt, "the guest cannot reach READY=1 while its initrd waits for user-data")
+		assert.True(t, strings.HasPrefix(v.LastError, "initrd attestation rejected: "), "get_vm names the rejection, no vTPM stall in front: %q", v.LastError)
+		assert.Regexp(t, goldenMismatch, v.LastError, "lastError carries the verifier's reason")
 	})
 
 	var deleted api.DeletedResponse

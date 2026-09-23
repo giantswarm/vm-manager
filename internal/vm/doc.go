@@ -64,8 +64,11 @@
 // imds.ReportSink (last systemd-report upload, report.json) and wraps the
 // configured imds.Attestor so that a verified initrd quote sets
 // Attestation.UserDataReleased (imds.ReleasesUserData); the ready-stage quote
-// is recorded for get_vm_attestation. Attestation is reset on every installed
-// boot, so user-data is gated again after Start. Without RequireAttestation
+// is recorded for get_vm_attestation. The first rejected quote of a boot is
+// LastError (READY=1 keeps it), behind the vtpm not responding note when the
+// run's console shows the guest's TPM calls failing, a firmware vTPM stall
+// that loses the measurements the quote is checked against. Attestation is
+// reset on every installed boot, so user-data is gated again after Start. Without RequireAttestation
 // user-data is released as soon as phase B starts.
 //
 // # State directory

@@ -154,7 +154,9 @@ func (s *Service) onNonce(vmID string) {
 	s.broadcastLocked()
 }
 
-// recordQuote stores the verdict and releases user-data when it applies.
+// recordQuote stores the verdict, releases user-data when it applies and
+// keeps LastError on the first rejected quote of the boot (a retry that
+// verifies clears the rejection it replaces).
 func (s *Service) recordQuote(vmID string, stage imds.Stage, q *Quote) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,11 +164,15 @@ func (s *Service) recordQuote(vmID string, stage imds.Stage, q *Quote) {
 	if err != nil {
 		return
 	}
+	prev := attestationError(e)
 	switch stage {
 	case imds.StageInitrd:
 		e.rec.Attestation.Initrd = q
 	case imds.StageReady:
 		e.rec.Attestation.Ready = q
+	}
+	if msg := attestationError(e); !q.Verified || e.rec.LastError == prev {
+		e.rec.LastError = msg
 	}
 	if imds.ReleasesUserData(stage, q.Verified) {
 		e.rec.Attestation.UserDataReleased = true
@@ -174,6 +180,24 @@ func (s *Service) recordQuote(vmID string, stage imds.Stage, q *Quote) {
 	s.save(e)
 	s.broadcastLocked()
 	s.log.Info("attestation quote", "id", vmID, "stage", stage, "verified", q.Verified, "ak", q.AKFingerprint, "userDataReleased", e.rec.Attestation.UserDataReleased)
+}
+
+// attestationError is LastError for the current boot's first rejected
+// quote, "" when none was rejected. A vTPM that stalled in the firmware
+// loses the measurements the quote is checked against (pcr 11 all zeros),
+// so the stall the run's console shows is named in front of the verdict;
+// the caller holds s.mu.
+func attestationError(e *entry) string {
+	a := e.rec.Attestation
+	for _, sq := range []struct {
+		stage imds.Stage
+		quote *Quote
+	}{{imds.StageInitrd, a.Initrd}, {imds.StageReady, a.Ready}} {
+		if sq.quote != nil && !sq.quote.Verified {
+			return withVTPMFailure(e.rec.Paths.Console, fmt.Sprintf("%s attestation rejected: %s", sq.stage, sq.quote.Message))
+		}
+	}
+	return ""
 }
 
 // IMDSDeps is the imds.Handler wiring of this service: resolver, recording
