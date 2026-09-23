@@ -124,6 +124,26 @@ echo "$sm" | grep -q '^ *observability.giantswarm.io/tenant: giantswarm$' || fai
 echo "$sm" | grep -q '^ *- port: http$' || fail "the ServiceMonitor does not scrape the http port"
 echo "$sm" | grep -q '^ *path: /metrics$' || fail "the ServiceMonitor does not scrape /metrics"
 
+# The helm.sh/chart label is a valid label value (at most 63 characters,
+# alphanumeric at both ends) for any chart version: the cut of a long dev
+# version can land on ".", on "_" (from "+") or on a run like "--.". The
+# version is set by packaging, since `helm template --version` does not apply
+# to a chart directory.
+pkg=$(mktemp -d)
+trap 'rm -rf "$pkg"' EXIT
+label_re='^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
+for v in 0.1.0 \
+  0.22.1-dev.renovate-ubuntu-26-x.2026-09-22.14-54-24.h1a2b3c4 \
+  0.22.1-dev.renovate-ubuntu-26-x.2026-09-22.14-54-24+h1a2b3c4 \
+  0.22.1-dev.renovate-ubuntu-26-x.2026-09-22.14-54---.h1a2b3c4; do
+  helm package "$CHART" --version "$v" -d "$pkg" >/dev/null
+  labels=$(helm template vmm "$pkg/vm-manager-$v.tgz" | sed -n 's/^ *helm\.sh\/chart: *//p' | sort -u)
+  [ -n "$labels" ] || fail "version $v renders no helm.sh/chart label"
+  while IFS= read -r l; do
+    [[ ${#l} -le 63 && $l =~ $label_re ]] || fail "version $v renders helm.sh/chart '$l', not a valid label value"
+  done <<<"$labels"
+done
+
 # The schema refuses a key the chart does not know.
 if helm template vmm "$CHART" --set bogus=1 >/dev/null 2>&1; then
   fail "values.schema.json accepted an unknown key"
