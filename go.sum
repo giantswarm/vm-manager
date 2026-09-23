@@ -217,7 +217,7 @@ google.golang.org/protobuf v1.36.12/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 h1:uRGJdciOHaEIrze2W8Q3AKkepLTh2hOroT7a+7czfdQ=
 gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7/go.mod h1:dt/ZhP58zS4L8KSrWDmTeBkI65Dw0HsyUHuEVlX15mw=
-gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f h1:O2w2DymsOlM/nv2pLNWCMCYOldgBBMkD7H0/prN5W2k=
-gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f/go.mod h1:sxc3Uvk/vHcd3tj7/DHVBoR5wvWT/MmRq2pj7HRJnwU=
+gvisor.dev/gvisor v0.0.0-20250709194456-2a7b29d5230c h1:PFIDkVGZ/zMaLAOP+nV9LyQsi34NIOaZjrRlyO3utrA=
+gvisor.dev/gvisor v0.0.0-20250709194456-2a7b29d5230c/go.mod h1:i8iCZyAdwRnLZYaIi2NUL1gfNtAveqxkKAe0JfAv9Bs=
 oras.land/oras-go/v2 v2.6.2 h1:N04RXngAp1LJKTG6ifz3xHPipasEkWr+hFmInja5YKo=
 oras.land/oras-go/v2 v2.6.2/go.mod h1:PlTtg4JTDJkDe8yVHpM2wz7/YDc00GVas+i4jAW2TZ4=
