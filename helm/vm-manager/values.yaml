@@ -71,13 +71,15 @@ guestImage:
   # -- Secret of type kubernetes.io/dockerconfigjson with the registry's
   # credentials, for a private mirror; empty pulls anonymously.
   pullSecret: ""
-  # -- Resources of the init container (it streams files to the volume).
+  # -- Resources of the init container. It streams the artifact's files to
+  # the volume, so its memory is the page cache of what it writes, and a
+  # memory limit turns a registry that delivers faster than the volume writes
+  # back into an OOM kill of the pull (seen at 256Mi with a registry on the
+  # node). The chart sets requests only; a limit is the installation's call.
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
-    limits:
-      memory: 256Mi
 
 vm:
   # -- CIDR of the default network, created at startup when missing.
