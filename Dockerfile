@@ -1,7 +1,6 @@
 # vm-manager as a platform pod: the binary next to the runtime a KVM node
 # needs — QEMU, swtpm and OVMF from Ubuntu 26.04 LTS, the lineage the e2e tests
-# run on (Debian trixie's swtpm is 0.7.1, below the 0.8 internal/tpm needs for
-# the terminate ctrl option). The image is x86-64 only (qemu-system-x86_64,
+# run on (Debian trixie's swtpm is 0.7.1). The image is x86-64 only (qemu-system-x86_64,
 # the x64 OVMF), like the guests it boots.
 #
 # The Go binary is built by CircleCI (architect/go-build) and attached to the

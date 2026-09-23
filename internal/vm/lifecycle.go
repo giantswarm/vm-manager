@@ -25,6 +25,9 @@ const (
 	firstBootCmdline = "ignition.firstboot"
 	// consoleTailLines is how much console goes into LastError on failure.
 	consoleTailLines = 40
+	// consoleScanBytes is how much of the console is searched for
+	// vtpmMarkers; the firmware and early kernel come first.
+	consoleScanBytes = 4 << 20
 	// idBytes is the length of the random VM id in bytes (hex doubles it).
 	idBytes = 4
 	// machineIDBytes is the length of system.machine_id (32 hex characters).
@@ -509,7 +512,7 @@ func (s *Service) onTimeout(e *entry, p *process, timeout time.Duration) {
 		}
 	case p.phase == qemu.PhaseBoot && (e.rec.State == StateBooting || e.rec.State == StateAttesting):
 		e.rec.State = StateRunning
-		e.rec.LastError = fmt.Sprintf("no READY=1 within %s; the guest is up but has not reported ready", timeout)
+		e.rec.LastError = withVTPMFailure(e.rec.Paths.Console, fmt.Sprintf("no READY=1 within %s; the guest is up but has not reported ready", timeout))
 		s.save(e)
 		s.broadcastLocked()
 	}
@@ -583,6 +586,21 @@ func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout tim
 	}
 }
 
+// vtpmMarkers are console lines of a guest whose vTPM stopped answering:
+// the EFI stub's TCG2 measurement failing in the firmware phase (with
+// EFI_DEVICE_ERROR) and the kernel TPM driver's command timeout.
+var vtpmMarkers = []string{"Failed to measure data for event", "tpm tpm0: Operation Timed out"}
+
+// withVTPMFailure puts tpm.ErrUnresponsive and the console line that shows
+// it in front of msg when the run's console has one of vtpmMarkers.
+func withVTPMFailure(console, msg string) string {
+	line := firstLineContaining(console, vtpmMarkers, consoleScanBytes)
+	if line == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s: the guest's TPM calls failed (console: %s); %s", tpm.ErrUnresponsive, line, msg)
+}
+
 // failureMessage is LastError for a process that ended badly; the caller
 // holds s.mu.
 func (s *Service) failureMessage(e *entry, what string, exit proc.ExitStatus, timedOut bool, timeout time.Duration) string {
@@ -590,6 +608,7 @@ func (s *Service) failureMessage(e *entry, what string, exit proc.ExitStatus, ti
 	if timedOut {
 		msg = fmt.Sprintf("%s did not finish within %s", what, timeout)
 	}
+	msg = withVTPMFailure(e.rec.Paths.Console, msg)
 	if tail, err := tailLines(e.rec.Paths.Console, consoleTailLines); err == nil && tail != "" {
 		msg += "\nconsole:\n" + tail
 	}
