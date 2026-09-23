@@ -1,7 +1,7 @@
 name: e2e
 
 # T3 of docs/design.md "Testing strategy": the KVM boot tests of e2e/ on a
-# hosted ubuntu-24.04 runner (nested virtualization: /dev/kvm is there, the
+# hosted ubuntu-26.04 runner (nested virtualization: /dev/kvm is there, the
 # udev rule below opens it; vhost_vsock is a module).
 #
 #   pull_request, push main   fast subset (~10 min): TestInstallBoot,
@@ -172,11 +172,11 @@ jobs:
           free -h
 
       - name: Install QEMU, swtpm and OVMF
-        # swtpm from the upstream maintainer's PPA: noble's 0.7.3 predates
-        # the `terminate` ctrl option (0.8+) that internal/tpm passes so an
-        # emulator ends with the QEMU it served.
+        # All three from the Ubuntu archive. internal/tpm passes swtpm's
+        # `terminate` ctrl option (0.8+) so an emulator ends with the QEMU it
+        # served; 26.04 ships swtpm 0.10, so no PPA is needed (24.04's 0.7.3
+        # predated the option).
         run: |
-          sudo add-apt-repository -y ppa:stefanberger/swtpm-noble
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf
           # Ubuntu confines swtpm with AppArmor (usr.bin.swtpm): sockets and
