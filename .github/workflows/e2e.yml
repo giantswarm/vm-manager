@@ -218,8 +218,11 @@ jobs:
 
       - name: Locate the image
         id: image
+        # sysupdate/base/ serves a copy of the same UKI and find lists in the
+        # filesystem's directory order: prune the sysupdate tree so the build
+        # directory is the one found.
         run: |
-          uki="$(find "$E2E_ROOT/image" -name 'giantswarm-vm-base_*.efi' | head -1)"
+          uki="$(find "$E2E_ROOT/image" -path '*/sysupdate' -prune -o -name 'giantswarm-vm-base_*.efi' -print | head -1)"
           test -n "$uki" || { echo "no UKI in the artifact"; find "$E2E_ROOT/image" | head; exit 1; }
           dir="$(dirname "$uki")"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
