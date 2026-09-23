@@ -23,7 +23,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
-	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f
+	gvisor.dev/gvisor v0.0.0-20250709194456-2a7b29d5230c
 	oras.land/oras-go/v2 v2.6.2
 )
 
