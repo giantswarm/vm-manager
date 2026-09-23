@@ -518,7 +518,8 @@ func (s *Service) onTimeout(e *entry, p *process, timeout time.Duration) {
 	}
 }
 
-// onNotify records STATUS= and turns READY=1 into StateReady.
+// onNotify records STATUS= and turns READY=1 into StateReady, which clears
+// LastError but for a rejected attestation quote.
 func (s *Service) onNotify(e *entry, n qemu.Notification) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -531,7 +532,7 @@ func (s *Service) onNotify(e *entry, n qemu.Notification) {
 			e.rec.State = StateReady
 			e.rec.ReadyAt = s.now()
 			e.rec.Booted = true
-			e.rec.LastError = ""
+			e.rec.LastError = attestationError(e)
 			if e.rec.BootedAt != nil {
 				s.opts.Metrics.ObserveBootToReady(e.rec.ReadyAt.Sub(*e.rec.BootedAt))
 			}
