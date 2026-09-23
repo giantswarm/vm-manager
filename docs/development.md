@@ -341,9 +341,9 @@ probes the release once and passes the network's `-netdev stream` re-dial option
 has no `systemd-ssh-proxy` and no storage provider: the harness dials ssh over AF_VSOCK from Go
 and vm-manager falls back to file-backed volumes), downloads the artifact to `/mnt/e2e/image` and
 runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short socket paths) and
-`VM_MANAGER_E2E_KEEP=1`. `e2e.yml` stays on ubuntu-24.04, and Renovate holds its runner there,
-until [#84](https://github.com/giantswarm/vm-manager/issues/84) is fixed: on ubuntu-26.04's
-QEMU, OVMF and swtpm the vTPM stalls in the firmware of some VMs.
+`VM_MANAGER_E2E_KEEP=1`. `e2e.yml` stays on ubuntu-24.04 until
+[#84](https://github.com/giantswarm/vm-manager/issues/84) is fixed: on ubuntu-26.04's QEMU, OVMF
+and swtpm the vTPM stalls in the firmware of some VMs.
 
 Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestNetworkIMDS`,
 `TestPersistentEtc`, `TestKubernetesSysext`. Full suite (nightly, 60 minutes): those plus

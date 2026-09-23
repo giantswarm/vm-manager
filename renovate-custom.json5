@@ -17,18 +17,5 @@
       matchPackageNames: ['gvisor.dev/gvisor'],
       enabled: false,
     },
-    {
-      // The e2e job is the KVM host of the boot tests: QEMU, OVMF and swtpm
-      // come from the runner's apt. On ubuntu-26.04's stack the vTPM stalls
-      // in the firmware of some VMs (#84), so e2e.yml stays on ubuntu-24.04
-      // with the swtpm PPA. Remove this rule with the fix of #84. image.yml
-      // builds in an Arch container and follows the runner updates.
-      description: 'e2e.yml stays below ubuntu-26.04 until giantswarm/vm-manager#84 (vTPM stall on the 26.04 host) is fixed',
-      matchManagers: ['github-actions'],
-      matchDatasources: ['github-runners'],
-      matchPackageNames: ['ubuntu'],
-      matchFileNames: ['.github/workflows/e2e.yml'],
-      allowedVersions: '<26',
-    },
   ],
 }
