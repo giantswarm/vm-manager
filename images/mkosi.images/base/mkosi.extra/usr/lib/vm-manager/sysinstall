@@ -40,8 +40,19 @@ find_uki() {
         uki="${candidates[0]}"
 }
 
+# A gpt-auto mount point is where the tmpfs below goes (/boot) or under it
+# (/boot/efi): the ESP stays reachable through a bind mount under /run, and
+# systemd-sysinstall reads the UKI from there. The bind is made private: as
+# a peer of the shared ESP mount it would receive the tmpfs as well.
 for esp in /efi /boot /boot/efi; do
-        find_uki "$esp" && break
+        find_uki "$esp" || continue
+        mnt=/run/vm-sysinstall/booted-esp
+        mkdir -p "$mnt"
+        mount --bind "$esp" "$mnt"
+        mount --make-private "$mnt"
+        uki="$mnt/${uki#"$esp"/}"
+        echo "vm-sysinstall: using the booted ESP mounted at $esp"
+        break
 done
 
 if [[ -z "$uki" ]]; then
@@ -72,10 +83,11 @@ fi
 # token it derived (IMAGE_ID, the image has no machine ID) to the same path
 # inside the target root, which under the default /etc/kernel fails with
 # EROFS; the ESP is the only writable place there. So the conf root points
-# into the ESP, and this system's /boot (empty in the image, nothing mounts
-# it during the installer boot) carries layout=uki on a tmpfs: without it
-# kernel-install assumes Type #1 entries and puts the UKI and its credentials
-# into an entry directory instead of EFI/Linux/, where sysupdate expects them.
+# into the ESP, and this system's /boot (empty in the image; after a boot
+# through systemd-boot the booted ESP, bind-mounted above) carries
+# layout=uki on a tmpfs: without it kernel-install assumes Type #1 entries
+# and puts the UKI and its credentials into an entry directory instead of
+# EFI/Linux/, where sysupdate expects them.
 export KERNEL_INSTALL_CONF_ROOT=/boot/kernel-install
 mount -t tmpfs -o mode=0755 tmpfs /boot
 mkdir -p "$KERNEL_INSTALL_CONF_ROOT"
