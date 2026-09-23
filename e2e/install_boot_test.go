@@ -108,7 +108,7 @@ const sysinstallTargetSerial = "sysinstall"
 func systemdBootInstaller(t *testing.T, h *Harness, tp *tpm.Instance) (qemu.Spec, string) {
 	t.Helper()
 	ddi := filepath.Join(h.Dir, "installer.raw")
-	out, err := exec.Command("cp", "--sparse=always", "--reflink=auto", h.Image.DDI, ddi).CombinedOutput()
+	out, err := exec.Command("cp", "--sparse=always", "--reflink=auto", h.Image.DDI, ddi).CombinedOutput() // #nosec G204 -- fixed binary
 	require.NoError(t, err, "copy the base DDI: %s", out)
 
 	spec := h.Spec(qemu.PhaseBoot, tp, "install")

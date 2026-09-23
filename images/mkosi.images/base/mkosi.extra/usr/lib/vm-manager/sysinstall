@@ -42,12 +42,14 @@ find_uki() {
 
 # A gpt-auto mount point is where the tmpfs below goes (/boot) or under it
 # (/boot/efi): the ESP stays reachable through a bind mount under /run, and
-# systemd-sysinstall reads the UKI from there.
+# systemd-sysinstall reads the UKI from there. The bind is made private: as
+# a peer of the shared ESP mount it would receive the tmpfs as well.
 for esp in /efi /boot /boot/efi; do
         find_uki "$esp" || continue
         mnt=/run/vm-sysinstall/booted-esp
         mkdir -p "$mnt"
         mount --bind "$esp" "$mnt"
+        mount --make-private "$mnt"
         uki="$mnt/${uki#"$esp"/}"
         echo "vm-sysinstall: using the booted ESP mounted at $esp"
         break
