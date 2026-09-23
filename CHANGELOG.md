@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chart: the `helm.sh/chart` label is a valid label value for any chart version. The 63-character cut of a long development version could end in `.`, `_` or `-`, and the API server refused the ServiceAccount, Service and Deployment; every non-alphanumeric character at the ends of the cut is now trimmed, and the render assertions check the label for such versions.
 - The released image reported `version=dev`: the version, commit and build time are now resolved from the Go build info (the tag at HEAD, `vcs.revision`, `vcs.time`) when the build passed no `-ldflags -X`; the start-up log names the commit next to the version.
 
+### Changed
+
+- `gvisor.dev/gvisor` moves from `v0.0.0-20240916094835-a174eb65023f` to `v0.0.0-20250709194456-2a7b29d5230c`, a commit of gvisor's `go` branch, the branch Go consumers build from (`master` is the Bazel layout the go tool cannot build). It is the newest `go`-branch commit `github.com/containers/gvisor-tap-vsock` v0.8.9 compiles against: the next one changes `udp.NewForwarder` to take a handler returning `handled bool`, which gvisor-tap-vsock adopts only after v0.8.9.
+
 ### Added
 
 - `get_info` MCP tool reporting the server's version, commit, build time and tool names, as the other Agent Platform managers do.
