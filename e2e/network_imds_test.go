@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
+	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -82,12 +83,14 @@ const (
 )
 
 // TestNetworkIMDS drives a real vm-manager serve process through its MCP
-// endpoint: create a network and a VM on it, prove that the guest reached the
-// IMDS over the virtual network (hostname, ssh keys and instance id answered,
-// the credential import ran, the metrics upload arrived), that the installed
-// system is healthy (running, no failed unit), that the console and a port
-// forward work, and that delete_vm and delete_network leave nothing behind,
-// including after the server's own SIGTERM shutdown.
+// endpoint: create a network and a VM without Kubernetes on it, prove that
+// the guest reached the IMDS over the virtual network (hostname, ssh keys and
+// instance id answered, the credential import ran, the metrics upload
+// arrived), that the installed system is healthy (running, no failed unit,
+// vm-kubernetes.service took the IMDS's missing /kubernetes-version as "no
+// Kubernetes" and succeeded), that the console and a port forward work, and
+// that delete_vm and delete_network leave nothing behind, including after the
+// server's own SIGTERM shutdown.
 func TestNetworkIMDS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), apiTestTimeout)
 	defer cancel()
@@ -96,7 +99,12 @@ func TestNetworkIMDS(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 
-	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
+	// Without its sysupdate tree the image offers no Kubernetes version, so
+	// create_vm pins none and the IMDS has no /kubernetes-version: the plain
+	// VM path of /usr/lib/vm-manager/kubernetes, which every other test skips
+	// by creating its VMs with the image's newest version.
+	imageDir := privateImageDir(t, image.Dir, filepath.Join(dir, "images"), images.SysupdateDirName)
+	srv := startServer(ctx, t, dir, imageDir, flagLearnGolden)
 	m := newMCPClient(ctx, t, srv.URL)
 
 	tools, err := m.c.ListTools(ctx, mcp.ListToolsRequest{})
@@ -128,6 +136,7 @@ func TestNetworkIMDS(t *testing.T) {
 
 	m.call(ctx, api.ToolGetVM, map[string]any{"id": v.ID}, &v)
 	require.Equal(t, vm.StateReady, v.State, "get_vm: lastError %q", v.LastError)
+	require.Empty(t, v.KubernetesVersion, "an image without Kubernetes versions pins none")
 	assert.True(t, prefix.Contains(netip.MustParseAddr(v.IP)), "ip %s outside %s", v.IP, apiCIDR)
 	assert.Equal(t, apiHostname, v.Hostname)
 	require.NotNil(t, v.InstalledAt, "installedAt")
@@ -147,6 +156,7 @@ func TestNetworkIMDS(t *testing.T) {
 	g := &guest{m: m, id: v.ID}
 	g.waitSSH(ctx)
 	assertGuest(ctx, t, g, v, testKey)
+	assertNoKubernetes(ctx, t, g)
 
 	// The console is the installed boot's: the firmware picked the boot
 	// manager entry bootctl installed (the installer phase is a -kernel
@@ -219,6 +229,22 @@ func assertGuest(ctx context.Context, t *testing.T, g *guest, v vm.VM, testKey s
 	state, err := g.run(ctx, "systemctl is-system-running")
 	require.NoError(t, err)
 	assert.Equal(t, "running", strings.TrimSpace(state.Stdout), "system state (exit %d)", state.ExitCode)
+}
+
+// noKubernetesLine is what /usr/lib/vm-manager/kubernetes logs when
+// systemd-imds answers /kubernetes-version with KeyNotFound, vm-manager's
+// bodyless 404 for a VM created without a Kubernetes version.
+const noKubernetesLine = "no /kubernetes-version from the IMDS (InstanceMetadata.KeyNotFound), this VM runs without Kubernetes"
+
+// assertNoKubernetes checks vm-kubernetes.service on a VM without a
+// Kubernetes version: it recognised the missing key (with the guest's grep,
+// which a missing package turns into a failed unit) and ended successfully.
+func assertNoKubernetes(ctx context.Context, t *testing.T, g *guest) {
+	t.Helper()
+	journal := g.sh(ctx, "journalctl -b -u "+kubernetesUnit+" -o cat --no-pager")
+	assert.Contains(t, journal, noKubernetesLine, "%s journal:\n%s", kubernetesUnit, journal)
+	assert.Equal(t, "active", g.sh(ctx, "systemctl show "+kubernetesUnit+" -p ActiveState --value"), "%s journal:\n%s", kubernetesUnit, journal)
+	assert.Equal(t, "success", g.sh(ctx, "systemctl show "+kubernetesUnit+" -p Result --value"), "%s journal:\n%s", kubernetesUnit, journal)
 }
 
 // assertReport waits for the guest's first vm-report-upload.timer run to

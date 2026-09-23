@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,7 @@ func TestAttestation(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 	imageDir := privateImageDir(t, image.Dir, filepath.Join(dir, "images"))
+	require.FileExists(t, filepath.Join(imageDir, policyFile), "run `make -C images verify`")
 	userData := ignitionConfig(t)
 
 	create := func(t *testing.T, m *mcpClient, name string, waitFor vm.WaitFor) vm.VM {
@@ -213,19 +215,21 @@ func TestAttestation(t *testing.T) {
 	srv.stop()
 }
 
-// privateImageDir stages an image directory for one test: every artifact is a
-// symlink into src (the shared build directory), policy.json is a copy, so
-// `vm-manager image golden` writes golden values without touching the
-// artifacts the other tests and the next run read.
-func privateImageDir(t *testing.T, src, dst string) string {
+// privateImageDir stages an image directory for one test: every artifact but
+// the omitted names is a symlink into src (the shared build directory),
+// policy.json is a copy, so `vm-manager image golden` writes golden values
+// without touching the artifacts the other tests and the next run read.
+func privateImageDir(t *testing.T, src, dst string, omit ...string) string {
 	t.Helper()
 	src, err := filepath.Abs(src)
 	require.NoError(t, err)
 	entries, err := os.ReadDir(src)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(dst, 0o750))
-	copied := false
 	for _, e := range entries {
+		if slices.Contains(omit, e.Name()) {
+			continue
+		}
 		from, to := filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())
 		if e.Name() != policyFile {
 			require.NoError(t, os.Symlink(from, to))
@@ -234,9 +238,7 @@ func privateImageDir(t *testing.T, src, dst string) string {
 		b, err := os.ReadFile(from) // #nosec G304 -- build artifact under the configured image dir
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(to, b, 0o600)) // #nosec G703 -- under the test's state dir
-		copied = true
 	}
-	require.True(t, copied, "%s has no %s; run `make -C images verify`", src, policyFile)
 	return dst
 }
 
