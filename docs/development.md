@@ -139,8 +139,11 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
   answers `GetInfo`, plain files below `<state-dir>/volumes` otherwise
   (`storage.Detect`).
 - `internal/tpm` — one swtpm per VM: `Manager.Start` creates the state dir, runs
-  `swtpm socket --tpm2` with a unixio control socket that ends the process when
-  QEMU disconnects, waits for the socket; `Instance` stops it.
+  `swtpm socket --tpm2 --terminate` with a unixio control socket (the process
+  ends once QEMU closes its data channel), returns once swtpm has answered
+  `CMD_GET_CAPABILITY` on the control socket (`tpm.ErrUnresponsive` after
+  `StartTimeout`), logs every command at level 2 to `swtpm.log` in the state
+  dir (the previous run's in `swtpm.prev.log`); `Instance` stops it.
 - `internal/tpmquote` — pure parsing and cryptographic verification of a
   `TPM2_Quote` (TPMS_ATTEST, TPMT_SIGNATURE, AK TPMT_PUBLIC): magic and type,
   AK attributes, signature, nonce, PCR digest. `tpmquote/quotetest` produces
@@ -332,8 +335,7 @@ the newest unexpired `guest-image` of a green `image.yml` or `e2e.yml` run on `m
 (and if there is none, it builds). Nightly and manual runs always build; the `image_run_id` input
 of a manual run reuses that run's artifact instead. `test` enables `/dev/kvm` (udev rule
 `99-kvm4all.rules`, mode 0666) and `vhost_vsock` (`modprobe`, chmod), installs `qemu-system-x86`
-and `ovmf` from apt and `swtpm` from `ppa:stefanberger/swtpm-noble` (noble's swtpm 0.7.3 rejects
-the `terminate` ctrl option of swtpm 0.8+ that `internal/tpm` passes) and unloads Ubuntu's
+and `ovmf` from apt and `swtpm` from `ppa:stefanberger/swtpm-noble` (noble's own is 0.7.3) and unloads Ubuntu's
 AppArmor profile for swtpm, which denies sockets and state outside its allowed paths (the
 per-test directories under `/mnt/e2e` are). Noble's QEMU is 8.2.2: `internal/runtime/qemu`
 probes the release once and passes the network's `-netdev stream` re-dial option as

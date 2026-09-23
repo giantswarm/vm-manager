@@ -122,7 +122,7 @@ func TestIntegrationFirmwareBoot(t *testing.T) {
 	case st := <-tp.Wait():
 		t.Logf("swtpm exited with qemu: %s", st)
 	case <-time.After(10 * time.Second):
-		t.Fatal("swtpm did not terminate after qemu closed the control channel")
+		t.Fatal("swtpm did not terminate after qemu closed its data channel")
 	}
 }
 
