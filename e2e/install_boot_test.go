@@ -103,7 +103,7 @@ func runInstallPhase(ctx context.Context, t *testing.T, h *Harness) time.Duratio
 	case st := <-tp.Wait():
 		t.Logf("swtpm followed the installer qemu out: %s", st)
 	case <-time.After(10 * time.Second):
-		t.Fatal("swtpm did not terminate after the installer qemu closed its control channel")
+		t.Fatal("swtpm did not terminate after the installer qemu closed its data channel")
 	}
 	assert.Less(t, elapsed, installCeiling)
 	return elapsed

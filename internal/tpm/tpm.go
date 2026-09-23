@@ -6,22 +6,34 @@
 // seals during the installer boot are unsealed by the same vTPM on every
 // installed boot, and the PCR quotes internal/attest verifies come from it.
 //
-// swtpm is told to terminate when QEMU drops the control connection, so a
-// VM that exits takes its TPM with it; Stop covers the cases where QEMU
-// never connected.
+// Start returns only once swtpm has answered CMD_GET_CAPABILITY on its
+// control channel, the first command QEMU sends, so QEMU never starts
+// against a vTPM that is not serving yet; a swtpm that does not answer in
+// time is ErrUnresponsive. The probe is why the control channel does not
+// carry swtpm's terminate option (it would end swtpm when the probe hangs
+// up): --terminate ends swtpm once QEMU closes the data channel instead, so
+// a VM that exits still takes its TPM with it; Stop covers the cases where
+// QEMU never connected.
 //
 // Like QEMU, swtpm is launched through a proc.Exec; with the systemd
 // launcher it is the transient unit vm-manager-<id>-swtpm and survives a
 // vm-manager restart, after which Manager.Attach picks it up again from
 // the Handle the caller persisted. Its own output goes to swtpm.log in the
-// state directory so it is not lost with the vm-manager that started it.
+// state directory so it is not lost with the vm-manager that started it,
+// at a level that logs every control and TPM command and its response, so
+// a command swtpm never answered is the last one in the log. Start moves
+// the previous run's log to PrevLogName, which bounds the logs to the
+// current and the previous run (the installer's, once the VM has booted).
 package tpm
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +54,19 @@ const DefaultSocketName = "swtpm.sock"
 // LogName is the file in the state directory swtpm's own output goes to.
 const LogName = "swtpm.log"
 
+// PrevLogName is the previous run's LogName, moved aside by Start.
+const PrevLogName = "swtpm.prev.log"
+
+// ErrUnresponsive is a swtpm that did not answer on its control channel.
+var ErrUnresponsive = errors.New("vtpm not responding")
+
+// cmdGetCapability is swtpm's CMD_GET_CAPABILITY: a big-endian command
+// code on the control channel, answered with the 8-byte capability mask.
+const (
+	cmdGetCapability = 1
+	capabilityLen    = 8
+)
+
 // UnitRole names the swtpm process in its transient unit (proc.UnitName).
 const UnitRole = "swtpm"
 
@@ -49,8 +74,9 @@ const UnitRole = "swtpm"
 const (
 	DefaultStartTimeout = 5 * time.Second
 	DefaultStopGrace    = 5 * time.Second
-	DefaultLogLevel     = 1
-	socketPoll          = 20 * time.Millisecond
+	// DefaultLogLevel is the lowest swtpm level that logs each command.
+	DefaultLogLevel = 2
+	socketPoll      = 20 * time.Millisecond
 )
 
 // Options configure the Manager.
@@ -61,7 +87,8 @@ type Options struct {
 	Binary string
 	// Logger for lifecycle events; nil uses slog.Default().
 	Logger *slog.Logger
-	// StartTimeout bounds the wait for the control socket to appear.
+	// StartTimeout bounds the wait for swtpm to answer on its control
+	// socket.
 	StartTimeout time.Duration
 	// StopGrace is how long Stop waits after SIGTERM before SIGKILL.
 	StopGrace time.Duration
@@ -135,15 +162,16 @@ func (c Config) socket() string {
 	return filepath.Join(c.StateDir, DefaultSocketName)
 }
 
-// Args are the swtpm arguments for cfg: a TPM 2.0 in socket mode whose
-// control channel is a unixio socket that ends the process when its peer
-// (QEMU) disconnects.
+// Args are the swtpm arguments for cfg: a TPM 2.0 in socket mode with a
+// unixio control socket, ending once its client (QEMU) closes the data
+// channel it passed over that socket.
 func Args(cfg Config, logLevel int) []string {
 	return []string{
 		"socket",
 		"--tpm2",
 		"--tpmstate", "dir=" + cfg.StateDir,
-		"--ctrl", "type=unixio,path=" + cfg.socket() + ",terminate",
+		"--ctrl", "type=unixio,path=" + cfg.socket(),
+		"--terminate",
 		"--log", "level=" + strconv.Itoa(logLevel),
 	}
 }
@@ -158,8 +186,9 @@ type Instance struct {
 	log    *slog.Logger
 }
 
-// Start creates the state directory, launches swtpm and returns once the
-// control socket accepts QEMU, or fails with what swtpm printed.
+// Start creates the state directory, launches swtpm and returns once it
+// has answered on its control socket, or fails with what swtpm printed
+// (ErrUnresponsive when it did not answer within Options.StartTimeout).
 func (m *Manager) Start(ctx context.Context, cfg Config) (*Instance, error) {
 	if cfg.StateDir == "" {
 		return nil, fmt.Errorf("%w: tpm state dir is required", apierr.ErrInvalid)
@@ -171,6 +200,9 @@ func (m *Manager) Start(ctx context.Context, cfg Config) (*Instance, error) {
 	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("stale tpm socket: %w", err)
 	}
+	if err := rotateLog(cfg.Log); err != nil {
+		return nil, err
+	}
 	stderr := proc.NewTail(0)
 	cmd := proc.Cmd{Path: m.binary, Args: Args(cfg, m.logLevel), Stdout: stderr, Stderr: stderr, Log: cfg.Log, Unit: proc.UnitName(cfg.ID, UnitRole)}
 	p, err := m.exec.Start(ctx, cmd)
@@ -178,7 +210,7 @@ func (m *Manager) Start(ctx context.Context, cfg Config) (*Instance, error) {
 		return nil, fmt.Errorf("swtpm: %w", err)
 	}
 	inst := m.instance(cfg, p, stderr)
-	if err := inst.waitSocket(ctx, m.startTimeout); err != nil {
+	if err := inst.waitReady(ctx, m.startTimeout); err != nil {
 		_ = p.Kill()
 		return nil, err
 	}
@@ -208,26 +240,67 @@ func (m *Manager) instance(cfg Config, p proc.Process, stderr *proc.Tail) *Insta
 	return &Instance{proc: p, cfg: cfg, socket: cfg.socket(), stderr: stderr, grace: m.stopGrace, log: m.log}
 }
 
-// waitSocket polls for the control socket until it exists, swtpm exits, ctx
-// ends or timeout passes.
-func (i *Instance) waitSocket(ctx context.Context, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+// rotateLog moves the previous run's log to PrevLogName next to it.
+func rotateLog(path string) error {
+	if path == "" {
+		return nil
+	}
+	err := os.Rename(path, filepath.Join(filepath.Dir(path), PrevLogName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("rotate swtpm log: %w", err)
+	}
+	return nil
+}
+
+// waitReady probes the control socket until swtpm answers, swtpm exits,
+// ctx ends or timeout passes.
+func (i *Instance) waitReady(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	exited := i.proc.Wait()
 	for {
-		if _, err := os.Stat(i.socket); err == nil {
+		err := probe(ctx, i.socket, deadline)
+		if err == nil {
 			return nil
 		}
 		select {
 		case st := <-exited:
-			return fmt.Errorf("swtpm exited before its socket came up (%s): %s", st, i.stderr)
+			return fmt.Errorf("swtpm exited before its control socket answered (%s): %s", st, i.Stderr())
 		case <-ctx.Done():
 			return fmt.Errorf("swtpm: %w", ctx.Err())
-		case <-deadline.C:
-			return fmt.Errorf("swtpm socket %s did not appear within %s: %s", i.socket, timeout, i.stderr)
+		case <-timer.C:
+			return fmt.Errorf("%w: swtpm control socket %s did not answer within %s (%v): %s", ErrUnresponsive, i.socket, timeout, err, i.Stderr())
 		case <-time.After(socketPoll):
 		}
 	}
+}
+
+// probe sends CMD_GET_CAPABILITY over the control socket and reads the
+// answer, giving up at deadline or when ctx ends.
+func probe(ctx context.Context, socket string, deadline time.Time) error {
+	dctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dctx, "unix", socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(dctx, func() { _ = conn.Close() })
+	defer stop()
+	req := binary.BigEndian.AppendUint32(nil, cmdGetCapability)
+	if _, err := conn.Write(req); err != nil {
+		return err
+	}
+	var caps [capabilityLen]byte
+	if _, err := io.ReadFull(conn, caps[:]); err != nil {
+		if dctx.Err() != nil {
+			return fmt.Errorf("no answer to CMD_GET_CAPABILITY: %w", dctx.Err())
+		}
+		return err
+	}
+	return nil
 }
 
 // SocketPath is the control socket QEMU's tpm chardev connects to.

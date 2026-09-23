@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -29,6 +30,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/storage"
+	"github.com/giantswarm/vm-manager/internal/tpm"
 	"github.com/giantswarm/vm-manager/internal/vm"
 	"github.com/giantswarm/vm-manager/internal/vm/vmtest"
 )
@@ -624,6 +626,39 @@ func TestQEMUStartFailureLeavesNothing(t *testing.T) {
 	require.ErrorContains(t, err, "swtpm missing")
 	assert.Empty(t, h.svc.List())
 	assert.Empty(t, h.store.Names())
+}
+
+// TestUnresponsiveVTPM: a vTPM that stops answering is named in LastError,
+// from the console during a run and from swtpm itself at a start.
+func TestUnresponsiveVTPM(t *testing.T) {
+	t.Run("firmware TPM calls fail, installer times out", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("vtpm-stall")
+		console := "BdsDxe: loading Boot0001\nEFI stub: WARNING: Failed to measure data for event 1: 0x8000000000000007\nWelcome\n"
+		require.NoError(t, os.WriteFile(v.Paths.Console, []byte(console), 0o600))
+		h.waitInstances(1)
+		h.waitTimers(1)
+		h.clock.Advance(vm.DefaultInstallTimeout)
+		v = h.waitState(v.ID, vm.StateFailed)
+		assert.True(t, strings.HasPrefix(v.LastError, "vtpm not responding: the guest's TPM calls failed (console: EFI stub: WARNING: Failed to measure data for event 1: 0x8000000000000007); installer did not finish within 5m0s\nconsole:\n"), v.LastError)
+	})
+	t.Run("healthy console keeps the plain message", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("no-stall")
+		require.NoError(t, os.WriteFile(v.Paths.Console, []byte("tpm_crb MSFT0101:00: ready\n"), 0o600))
+		h.waitInstances(1).Exit(3)
+		v = h.waitState(v.ID, vm.StateFailed)
+		assert.True(t, strings.HasPrefix(v.LastError, "installer exited: exit status 3"), v.LastError)
+	})
+	t.Run("swtpm does not answer at the installed boot", func(t *testing.T) {
+		h := newHarness(t)
+		v := h.create("vtpm-silent")
+		inst := h.waitInstances(1)
+		h.tpm.StartErr = fmt.Errorf("%w: swtpm control socket did not answer within 5s", tpm.ErrUnresponsive)
+		inst.Exit(0)
+		v = h.waitState(v.ID, vm.StateFailed)
+		assert.Contains(t, v.LastError, "start installed boot: start swtpm: vtpm not responding")
+	})
 }
 
 func TestPhaseBStartFailure(t *testing.T) {

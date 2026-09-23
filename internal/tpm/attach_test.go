@@ -14,7 +14,7 @@ import (
 
 func TestAttach(t *testing.T) {
 	ctx := context.Background()
-	fake := &proc.FakeExec{Hook: createSocket}
+	fake := &proc.FakeExec{Hook: createSocket(t)}
 	dir := filepath.Join(t.TempDir(), "tpm")
 	cfg := Config{ID: "ab12", StateDir: dir, Log: filepath.Join(dir, LogName)}
 	inst, err := New(Options{Exec: fake, Logger: quiet}).Start(ctx, cfg)

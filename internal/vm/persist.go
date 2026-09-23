@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -118,6 +119,28 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return writeAtomic(dst, data, 0o600)
+}
+
+// firstLineContaining is the first line among the first limit bytes of the
+// file that contains one of subs, trimmed; "" when none does or the file
+// cannot be read.
+func firstLineContaining(path string, subs []string, limit int64) string {
+	f, err := os.Open(path) // #nosec G304 -- state dir file.
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(io.LimitReader(f, limit))
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		for _, sub := range subs {
+			if strings.Contains(line, sub) {
+				return strings.TrimSpace(line)
+			}
+		}
+	}
+	return ""
 }
 
 // tailLines returns the last n lines of the file, reading at most the final
