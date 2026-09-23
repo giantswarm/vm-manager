@@ -232,9 +232,9 @@ func assertGuest(ctx context.Context, t *testing.T, g *guest, v vm.VM, testKey s
 }
 
 // noKubernetesLine is what /usr/lib/vm-manager/kubernetes logs when
-// systemd-imds answers /kubernetes-version with KeyNotFound, vm-manager's
-// bodyless 404 for a VM created without a Kubernetes version.
-const noKubernetesLine = "no /kubernetes-version from the IMDS (InstanceMetadata.KeyNotFound), this VM runs without Kubernetes"
+// systemd-imds reports systemd-imdsd's KeyNotFound for /kubernetes-version,
+// vm-manager's bodyless 404 for a VM created without a Kubernetes version.
+const noKubernetesLine = "no /kubernetes-version from the IMDS (Key not available.), this VM runs without Kubernetes"
 
 // assertNoKubernetes checks vm-kubernetes.service on a VM without a
 // Kubernetes version: it recognised the missing key (with the guest's grep,
