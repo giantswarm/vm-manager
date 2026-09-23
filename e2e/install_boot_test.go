@@ -5,6 +5,8 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
+	"github.com/giantswarm/vm-manager/internal/tpm"
 )
 
 // Ceilings. docs/design.md budgets the installer phase at < 60 s and the
@@ -50,13 +53,25 @@ const hostname = "e2e-install-boot"
 // over vsock, answers ssh over vsock with the sealed hostname, no failed
 // units and the imported credentials, and powers down on request.
 func TestInstallBoot(t *testing.T) {
+	testInstallBoot(t, directKernelInstaller)
+}
+
+// TestInstallBootSystemdBoot is the same flow with the installer booted
+// through systemd-boot from the base DDI's ESP instead of -kernel: what
+// OVMF falls back to when it does not take the direct kernel boot, for
+// example after the vTPM stalled in the firmware.
+func TestInstallBootSystemdBoot(t *testing.T) {
+	testInstallBoot(t, systemdBootInstaller)
+}
+
+func testInstallBoot(t *testing.T, installer installerBoot) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	h := New(t)
 
 	afterInstall, afterFirstBoot := expectedLayout(imageID + "_" + h.Image.Version)
 
-	install := runInstallPhase(ctx, t, h)
+	install := runInstallPhase(ctx, t, h, installer)
 	parts := PartitionTable(t, h.Target)
 	assertLayout(t, "after the installer", parts, afterInstall)
 	assertSlotUUIDs(t, h, parts)
@@ -69,12 +84,47 @@ func TestInstallBoot(t *testing.T) {
 	fmt.Printf("install_seconds=%.1f\nboot_to_ready_seconds=%.1f\n", install.Seconds(), boot.Seconds())
 }
 
-// runInstallPhase boots the UKI with the base DDI and the blank target and
-// returns how long the guest took from QEMU start to its reboot.
-func runInstallPhase(ctx context.Context, t *testing.T, h *Harness) time.Duration {
+// installerBoot is one way to boot the installer onto h.Target: the QEMU
+// spec, and the console line vm-sysinstall prints for how it found the UKI,
+// which proves the boot took that path.
+type installerBoot func(t *testing.T, h *Harness, tp *tpm.Instance) (spec qemu.Spec, ukiFound string)
+
+// directKernelInstaller is vm-manager's installer boot: the UKI via
+// -kernel, so no ESP is automounted and vm-sysinstall searches the base
+// DDI's ESP itself.
+func directKernelInstaller(_ *testing.T, h *Harness, tp *tpm.Instance) (qemu.Spec, string) {
+	return h.Spec(qemu.PhaseInstall, tp, "install"), "vm-sysinstall: searching ESP"
+}
+
+// sysinstallTargetSerial is the blank disk's serial in the systemd-boot
+// installer boot, where "target" is the boot disk.
+const sysinstallTargetSerial = "sysinstall"
+
+// systemdBootInstaller boots systemd-boot from a scratch copy of the base
+// DDI: PhaseBoot passes no -kernel and gives the spec's Target bootindex 0,
+// so the copy goes there and the blank disk is an extra drive that
+// vm.install-target names. systemd-gpt-auto-generator then automounts the
+// booted ESP at /boot, which vm-sysinstall covers with a tmpfs.
+func systemdBootInstaller(t *testing.T, h *Harness, tp *tpm.Instance) (qemu.Spec, string) {
+	t.Helper()
+	ddi := filepath.Join(h.Dir, "installer.raw")
+	out, err := exec.Command("cp", "--sparse=always", "--reflink=auto", h.Image.DDI, ddi).CombinedOutput()
+	require.NoError(t, err, "copy the base DDI: %s", out)
+
+	spec := h.Spec(qemu.PhaseBoot, tp, "install")
+	spec.Target = ddi
+	spec.ExtraDrives = []qemu.Drive{{Path: h.Target, Serial: sysinstallTargetSerial}}
+	spec.NoReboot = true
+	spec.Credentials[qemu.CredentialInstallTarget] = "/dev/disk/by-id/virtio-" + sysinstallTargetSerial
+	return spec, "vm-sysinstall: using the booted ESP mounted at /"
+}
+
+// runInstallPhase boots the installer with the blank target and returns how
+// long the guest took from QEMU start to its reboot.
+func runInstallPhase(ctx context.Context, t *testing.T, h *Harness, installer installerBoot) time.Duration {
 	t.Helper()
 	tp := h.StartTPM(ctx)
-	spec := h.Spec(qemu.PhaseInstall, tp, "install")
+	spec, ukiFound := installer(t, h, tp)
 	spec.Credentials[qemu.CredentialHostname] = hostname
 	spec.Credentials[qemu.CredentialSSHAuthorizedKeysRoot] = h.AuthorizedKey
 
@@ -89,6 +139,7 @@ func runInstallPhase(ctx context.Context, t *testing.T, h *Harness) time.Duratio
 	// rebooted (which -no-reboot turned into the exit we just saw). The
 	// unit logs to the console (SYSTEMD_LOG_TARGET=console) as sysinstall[PID].
 	for _, want := range []string{
+		ukiFound,
 		"vm-sysinstall: installing",
 		"Installation succeeded.",
 		"vm-sysinstall: installation complete, rebooting",

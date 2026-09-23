@@ -33,6 +33,7 @@ below are the last full run on the development host.
 | Test | Drives | Proves | Measured |
 |---|---|---|---|
 | `TestInstallBoot` | QEMU directly (`internal/runtime/qemu`, `internal/tpm`) with user networking and `systemd.imds=no` | installer boot, sysinstall onto a blank disk, partition UUIDs, installed boot to `READY=1`, ssh over vsock | `install_seconds=12`, `boot_to_ready_seconds=11-15` |
+| `TestInstallBootSystemdBoot` | as `TestInstallBoot`, the installer booted through systemd-boot from a copy of the base DDI instead of `-kernel` (the firmware's fallback) | sysinstall finds the UKI on the ESP automounted at `/boot` and installs; the rest as `TestInstallBoot` | as `TestInstallBoot` |
 | `TestNetworkIMDS` | `vm-manager serve` as a child process through `/mcp`, the image directory without its sysupdate tree | `create_network`, `create_vm` with `wait_for: ready` and no Kubernetes version; hostname, ssh key and instance id from the IMDS; `is-system-running` clean, `vm-kubernetes.service` succeeded on the missing `/kubernetes-version`; `systemd-report` upload arrived; `forward_port` serves sshd; `delete_vm`, `delete_network`, SIGTERM leave no qemu or swtpm | `api_install_seconds`, `api_boot_to_ready_seconds` in the same range |
 | `TestIgnition` | MCP | user-data as Ignition JSON: the first installed boot applies its files and unit from the initrd stages, a reboot leaves Ignition idle | first installed boot |
 | `TestPersistentEtc` | MCP | a file and an enabled unit in `/etc` survive `reboot_vm`; host key and machine ID unchanged; var unmounted cleanly (no `recovering journal`) | `reboot_to_ready_seconds=11` |
@@ -345,7 +346,7 @@ runs the tests with `TMPDIR=/mnt/e2e` (the runner's large data disk, short socke
 [#84](https://github.com/giantswarm/vm-manager/issues/84) is fixed: on ubuntu-26.04's QEMU, OVMF
 and swtpm the vTPM stalls in the firmware of some VMs.
 
-Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestNetworkIMDS`,
+Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestInstallBootSystemdBoot`, `TestNetworkIMDS`,
 `TestPersistentEtc`, `TestKubernetesSysext`. Full suite (nightly, 60 minutes): those plus
 `TestIgnition`, `TestKubernetesVersions` (one VM per published sysext version),
 `TestAttestation` (the tamper case uses Ubuntu's `OVMF_CODE_4M.secboot.fd`) and

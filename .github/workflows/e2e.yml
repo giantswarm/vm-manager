@@ -4,8 +4,8 @@ name: e2e
 # hosted ubuntu-24.04 runner (nested virtualization: /dev/kvm is there, the
 # udev rule below opens it; vhost_vsock is a module).
 #
-#   pull_request, push main   fast subset (~10 min): TestInstallBoot,
-#                             TestNetworkIMDS, TestPersistentEtc,
+#   pull_request, push main   fast subset (~10 min): TestInstallBoot and
+#                             TestInstallBootSystemdBoot, TestNetworkIMDS, TestPersistentEtc,
 #                             TestKubernetesSysext
 #   schedule (nightly)        full suite: also TestIgnition, TestKubernetesVersions
 #                             (one VM per sysext version), TestAttestation (three
