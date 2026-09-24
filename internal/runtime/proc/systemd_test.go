@@ -195,6 +195,15 @@ func newSystemdExec(f *fakeSystemd) *SystemdExec {
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+func TestSystemdRunArgsNoIOUring(t *testing.T) {
+	x := &SystemdExec{}
+	filter := []string{"--property=SystemCallFilter=~io_uring_setup", "--property=SystemCallErrorNumber=EPERM"}
+	args := x.runArgs("u.service", "/bin/qemu", Cmd{NoIOUring: true, Args: []string{"-S"}})
+	assert.Subset(t, args, filter)
+	assert.Equal(t, []string{"--", "/bin/qemu", "-S"}, args[len(args)-3:], "command last")
+	assert.NotSubset(t, x.runArgs("u.service", "/bin/qemu", Cmd{}), filter[:1])
+}
+
 func TestSystemdExecStart(t *testing.T) {
 	f := newFakeSystemd(t)
 	x := newSystemdExec(f)
