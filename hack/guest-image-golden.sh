@@ -14,14 +14,11 @@
 # What a boot measures into those PCRs are files: the firmware code and
 # variable store (PCRs 0 and 7), the virtio-net option ROM (PCR 2, QEMU's
 # efi-virtio.rom), the boot loader, UKI and sysext of the guest image (PCRs 4
-# and 13), separators (3, 6). All of them come from <vm-manager-image> — the
-# image's OVMF_CODE_4M.fd, OVMF_VARS_4M.fd and efi-virtio.rom, mounted where
-# the pod has them, and the image's own vm-manager binary. The emulator that
-# boots them is not measured, so the VMs run in a recorder container on
-# Ubuntu 24.04's QEMU 8.2 with swtpm from its PPA. The image's own QEMU 10.2
-# lost firmware TPM commands in its io_uring main loop
-# (giantswarm/vm-manager#84); since v0.23.4 vm-manager keeps QEMU off io_uring,
-# so the recorder can move to the image's stack.
+# and 13), separators (3, 6). The VMs boot on <vm-manager-image> itself, as a
+# pod of it does: its vm-manager serves them with the process launcher, its
+# QEMU, swtpm and OVMF_CODE_4M.fd / OVMF_VARS_4M.fd. vm-manager keeps QEMU off
+# the io_uring main loop that lost firmware TPM commands
+# (giantswarm/vm-manager#84), so the image's QEMU 10.2 boots without stalls.
 #
 #  1. learn: a server with --attestation-learn-golden over a policy without
 #     golden values boots one VM with attestation required to ready;
@@ -37,9 +34,9 @@
 # the image's own policy before any golden value is taken.
 #
 # The host needs docker, /dev/kvm, /dev/vhost-vsock (the vhost_vsock module)
-# and no AppArmor profile confining swtpm (Ubuntu's usr.bin.swtpm refuses the
-# container's sockets); vsock CIDs are host-global: never run this next to
-# another vm-manager on the same host.
+# and no AppArmor profile confining swtpm (Ubuntu's usr.bin.swtpm also confines
+# the image's /usr/bin/swtpm and refuses its sockets); vsock CIDs are
+# host-global: never run this next to another vm-manager on the same host.
 set -euo pipefail
 
 image=${1:?usage: $0 <vm-manager-image> [<image-dir>]}
@@ -54,7 +51,6 @@ boot_timeout=${GOLDEN_BOOT_TIMEOUT:-150s}
 ready_within=$(( ${install_timeout%s} + ${boot_timeout%s} + 60 ))
 name="vm-manager-golden"
 volume="vm-manager-golden-state"
-recorder="vm-manager-golden-recorder"
 api="http://127.0.0.1:${port}/api/v1"
 
 policy="$dir/policy.json"
@@ -75,42 +71,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The measured inputs and the binary, from the image.
-inputs=(/usr/local/bin/vm-manager /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/qemu/efi-virtio.rom)
 # A registry reference is pulled, a local build (make docker-build) used as is.
 docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null
+# The image's binary also runs on the host, for `image golden`.
 cid=$(docker create "$image")
-for f in "${inputs[@]}"; do docker cp -L "$cid:$f" "$work/" >/dev/null; done
+docker cp -L "$cid:/usr/local/bin/vm-manager" "$work/" >/dev/null
 docker rm "$cid" >/dev/null
-log "recording the golden PCR values of $ref with the inputs of $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "$image"):"
-(cd "$work" && sha256sum OVMF_CODE_4M.fd OVMF_VARS_4M.fd efi-virtio.rom) >&2
+log "recording the golden PCR values of $ref on $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "$image"), which measures:"
+docker run --rm --entrypoint sha256sum "$image" \
+  /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/qemu/efi-virtio.rom >&2
 
-# The recorder: Ubuntu 24.04's QEMU 8.2 and the PPA's swtpm, until it moves to
-# the vm-manager image's own stack (the e2e workflow runs on 26.04). Its own
-# OVMF (a recommendation) stays out, so only the image's firmware exists.
-docker build -q -t "$recorder" - >/dev/null <<'EOF'
-FROM ubuntu:24.04
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common gpg-agent \
- && add-apt-repository -y ppa:stefanberger/swtpm-noble \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm \
- && rm -rf /var/lib/apt/lists/*
-EOF
-docker run --rm "$recorder" sh -c 'qemu-system-x86_64 --version | head -1; swtpm --version' >&2
-
-# start_server [serve flags...]: one server in a fresh recorder container, the
-# image's inputs where the pod has them, the state (networks, VM records and
-# disks) on a volume that outlives it.
+# start_server [serve flags...]: one server in a fresh container of the image,
+# the state (networks, VM records and disks) on a volume that outlives it.
 start_server() {
   stop_server
   docker run -d --name "$name" --privileged \
     -p "127.0.0.1:${port}:8080" \
     -v "$dir:/images" -v "$volume:/state" \
-    -v "$work/vm-manager:/usr/local/bin/vm-manager:ro" \
-    -v "$work/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_CODE_4M.fd:ro" \
-    -v "$work/OVMF_VARS_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd:ro" \
-    -v "$work/efi-virtio.rom:/usr/share/qemu/efi-virtio.rom:ro" \
-    "$recorder" vm-manager serve --listen=:8080 --launcher=process \
+    "$image" serve --listen=:8080 --launcher=process \
     --state-dir=/state --image-dir=/images --attestation=verify \
     --ovmf-code=/usr/share/OVMF/OVMF_CODE_4M.fd --ovmf-vars=/usr/share/OVMF/OVMF_VARS_4M.fd \
     --install-timeout="$install_timeout" --boot-timeout="$boot_timeout" "$@" >/dev/null
@@ -189,7 +167,7 @@ docker volume create "$volume" >/dev/null
 start_server --attestation-learn-golden
 call GET /host | jq -e '
   if (.missing // []) != [] then error("host lacks \(.missing | join(", "))") else . end
-  | "firmware sha256 \(.firmware.sha256), qemu \(.qemu.version // "?"), swtpm \(.swtpm.version // "?")"' >&2
+  | "firmware \(.firmware.package // "?") \(.firmware.version // "?") (sha256 \(.firmware.sha256)), qemu \(.qemu.version // "?"), swtpm \(.swtpm.version // "?")"' >&2
 id=$(boot_attested golden-learn)
 "$work/vm-manager" image golden "$ref" --from-vm "$id" --server="http://127.0.0.1:${port}" --image-dir="$dir" >&2
 call DELETE "/vms/$id" >/dev/null
