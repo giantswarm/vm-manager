@@ -62,6 +62,11 @@ type Cmd struct {
 	// Unit names the transient unit a systemd launcher runs the command as
 	// (UnitName builds it); launchers without units ignore it.
 	Unit string
+	// NoIOUring makes io_uring_setup fail with EPERM in the process, through
+	// a seccomp filter, as kernel.io_uring_disabled=2 does host-wide. QEMU
+	// 10.2+ then monitors its main loop with epoll instead of io_uring, whose
+	// fd monitoring loses TPM emulator commands (vm-manager#84).
+	NoIOUring bool
 }
 
 // Handle identifies a launched process for Attacher.Attach. The caller
@@ -153,7 +158,11 @@ func (OSExec) Start(ctx context.Context, c Cmd) (Process, error) {
 		defer func() { _ = f.Close() }() // the child holds its own descriptor
 		cmd.Stdout, cmd.Stderr = f, f
 	}
-	if err := cmd.Start(); err != nil {
+	start := cmd.Start
+	if c.NoIOUring {
+		start = func() error { return startDenyingIOUring(cmd) }
+	}
+	if err := start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", c.Path, err)
 	}
 	p := &osProcess{cmd: cmd, done: make(chan struct{})}

@@ -154,7 +154,11 @@ func (r *Runtime) Start(ctx context.Context, spec Spec) (*Instance, error) {
 		return nil, err
 	}
 	stderr := proc.NewTail(0)
-	cmd := proc.Cmd{Path: r.binary, Args: args, Stdout: stderr, Stderr: stderr, Log: spec.ProcessLog, Unit: proc.UnitName(spec.ID, UnitRole)}
+	// NoIOUring keeps QEMU's main loop off io_uring (epoll instead): since
+	// QEMU 10.2 its io_uring fd monitoring loses TPM emulator commands, which
+	// stalls the firmware for minutes and leaves PCR 11 unmeasured. No disk
+	// uses aio=io_uring (driveArgs), so nothing else needs io_uring.
+	cmd := proc.Cmd{Path: r.binary, Args: args, Stdout: stderr, Stderr: stderr, Log: spec.ProcessLog, Unit: proc.UnitName(spec.ID, UnitRole), NoIOUring: true}
 	p, err := r.exec.Start(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("qemu: %w", err)
