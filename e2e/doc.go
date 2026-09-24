@@ -22,7 +22,7 @@
 // images/build, or in $VM_MANAGER_E2E_IMAGE_DIR). ssh into the guest is
 // dialed over AF_VSOCK from Go, so no ssh client or systemd-ssh-proxy is
 // needed on the host. A host without them skips with a message saying what
-// is missing. .github/workflows/e2e.yml runs them on a hosted ubuntu-24.04
+// is missing. .github/workflows/e2e.yml runs them on a hosted ubuntu-26.04
 // runner (KVM and vhost_vsock enabled there), see docs/development.md "CI".
 //
 // On failure the per-test state directory (serial consoles, TPM state, target
