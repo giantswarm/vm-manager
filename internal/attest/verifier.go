@@ -26,7 +26,10 @@
 //     (Options.LearnGolden) and reported in Result.Learned; PCR 13 is
 //     compared at the ready stage against the policy's pcr13 entry for the
 //     VM's Kubernetes version, else against the golden value, and recorded
-//     when the policy has neither.
+//     when the policy has neither. A mismatch of a firmware PCR names the
+//     firmware build the values were recorded under next to the one this
+//     server boots (Policy.GoldenFirmware, Options.Firmware), which tells a
+//     firmware change apart from a boot that differs on the same firmware.
 //
 // Every verdict is kept per VM and stage (Results) for get_vm_attestation
 // and `vm-manager image golden`.
@@ -70,6 +73,10 @@ type Options struct {
 	// and records the observed values (Result.Learned); for bring-up of a
 	// new image or firmware, never for production.
 	LearnGolden bool
+	// Firmware is the build of the firmware code image VMs boot with, named
+	// in a golden mismatch against the policy's GoldenFirmware; nil when
+	// unknown.
+	Firmware *Firmware
 	// Logger for verdicts and AK enrolment; nil uses slog.Default().
 	Logger *slog.Logger
 	// Now is the clock; nil means time.Now.
@@ -192,6 +199,7 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	}
 	var mismatched, unknown, learned []string
 	sysext := ""
+	firmwareMismatch := false
 	compare := func(index int) {
 		got := res.PCRs[index]
 		want, kubernetes, ok := policy.expected(index)
@@ -205,6 +213,7 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s for kubernetes %s, got %s", index, want, kubernetes, got))
 		case want != got:
 			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s, got %s", index, want, got))
+			firmwareMismatch = firmwareMismatch || index != PCRSysext
 		case kubernetes != "":
 			sysext = kubernetes
 		}
@@ -216,7 +225,11 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 		compare(PCRSysext)
 	}
 	if len(mismatched) > 0 {
-		return reject("golden mismatch: %s", strings.Join(mismatched, "; "))
+		msg := "golden mismatch: " + strings.Join(mismatched, "; ")
+		if firmwareMismatch {
+			msg += v.firmwareVerdict(policy.GoldenFirmware)
+		}
+		return reject("%s", msg)
 	}
 	if len(unknown) > 0 {
 		return reject("no golden value for pcr %s in the image policy: record one with `vm-manager image golden` or run with --attestation-learn-golden", strings.Join(unknown, ","))
@@ -242,6 +255,20 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 		v.log.Info("attestation accepted pcrs without golden value", "vm", vmID, "stage", req.Stage, "learn", v.opts.LearnGolden, "pcrs", strings.Join(learned, " "))
 	}
 	return imds.QuoteResult{Verified: true, Message: res.Message}, nil
+}
+
+// firmwareVerdict is the suffix of a golden mismatch of a firmware PCR:
+// whether this server boots the firmware build the values were recorded
+// under. Empty when either build is unknown.
+func (v *Verifier) firmwareVerdict(recorded *Firmware) string {
+	booted := v.opts.Firmware
+	if recorded == nil || booted == nil {
+		return ""
+	}
+	if !recorded.SameBuild(*booted) {
+		return fmt.Sprintf("; the golden values were recorded for firmware %s, this server boots %s: record them again for this firmware", recorded, booted)
+	}
+	return fmt.Sprintf("; the firmware is the build the golden values were recorded for (%s)", booted)
 }
 
 // Results returns the last verdict per stage for a VM, nil when none.

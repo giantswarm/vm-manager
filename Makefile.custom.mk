@@ -99,6 +99,10 @@ docker-build: build-linux-amd64 ## Build the container image locally (TAG=vm-man
 guest-image: ## Build the guest image in a privileged archlinux container (hack/guest-image-build.sh) into images/build/; `make image` is the native Arch build.
 	hack/guest-image-build.sh
 
+.PHONY: guest-image-golden
+guest-image-golden: ## Record and verify the golden PCR values of images/build with a vm-manager container image (VM_MANAGER_IMAGE, default vm-manager:dev) on this KVM host, as the release pipeline does (hack/guest-image-golden.sh).
+	hack/guest-image-golden.sh $(or $(VM_MANAGER_IMAGE),vm-manager:dev) images/build
+
 .PHONY: helm-lint
 helm-lint: ## Lint the chart.
 	helm lint helm/vm-manager

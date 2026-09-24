@@ -87,8 +87,8 @@ var goldenMismatch = regexp.MustCompile(`golden mismatch: .*\bpcr [02-47] expect
 //     against them, nothing learned.
 //  3. tamper: a server booting the Secure Boot OVMF build against the same
 //     golden values; the initrd quote is rejected with a golden mismatch of
-//     a firmware PCR, user-data stays gated and Ignition sits in its fetch
-//     loop.
+//     a firmware PCR that names the build the values were recorded for,
+//     user-data stays gated and Ignition sits in its fetch loop.
 func TestAttestation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), attestTestTimeout)
 	defer cancel()
@@ -164,6 +164,8 @@ func TestAttestation(t *testing.T) {
 		assert.Len(t, golden[index], 64, "policy.json golden.%s.%d", attest.Bank, index)
 	}
 	assert.Len(t, golden, len(attest.GoldenIndexes), "golden values: the golden firmware PCRs and 13")
+	require.NotNil(t, policy.GoldenFirmware, "policy.json names the firmware build the values belong to")
+	assert.Len(t, policy.GoldenFirmware.SHA256, 64, "golden_firmware.sha256")
 	remove(t, m, learnID)
 	srv.stop()
 
@@ -198,6 +200,8 @@ func TestAttestation(t *testing.T) {
 		t.Logf("initrd quote of the tampered VM: verified %v, message %q", att.Initrd.Verified, att.Initrd.Message)
 		assert.False(t, att.Initrd.Verified, "a boot on other firmware must not verify")
 		assert.Regexp(t, goldenMismatch, att.Initrd.Message, "the rejection names a golden firmware PCR")
+		assert.Contains(t, att.Initrd.Message, "the golden values were recorded for firmware "+policy.GoldenFirmware.String(),
+			"the rejection names the build the values belong to, not the one this server boots")
 		assert.False(t, att.UserDataReleased, "user-data stays gated")
 		assert.Nil(t, att.Ready, "no ready quote: the boot does not get past the fetch stage")
 
@@ -207,6 +211,8 @@ func TestAttestation(t *testing.T) {
 		assert.Equal(t, vm.StateAttesting, v.State, "get_vm keeps the VM at attesting")
 		assert.False(t, v.Attestation.UserDataReleased, "get_vm agrees with get_vm_attestation")
 		assert.Nil(t, v.ReadyAt, "the guest cannot reach READY=1 while its initrd waits for user-data")
+		assert.True(t, strings.HasPrefix(v.LastError, "initrd attestation rejected: "), "get_vm names the rejection, no vTPM stall in front: %q", v.LastError)
+		assert.Regexp(t, goldenMismatch, v.LastError, "lastError carries the verifier's reason")
 	})
 
 	var deleted api.DeletedResponse

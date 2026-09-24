@@ -214,13 +214,14 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		MaxGuestSeries: o.metricsGuestSeriesLimit,
 		Logger:         log,
 	})
-	c, err := newComponents(ctx, o, reg, log)
+	hostSvc := host.New(host.Options{OVMFCode: o.ovmfCode, Logger: log})
+	c, err := newComponents(ctx, o, bootFirmware(ctx, hostSvc, o.ovmfCode, log), reg, log)
 	if err != nil {
 		return err
 	}
 	reg.SetSource(c.vm)
 
-	svc := api.Services{Host: host.New(host.Options{Logger: log}), VM: c.vm, Images: c.images, Metrics: reg}
+	svc := api.Services{Host: hostSvc, VM: c.vm, Images: c.images, Metrics: reg}
 	cfg := server.Config{Addr: o.listen, MCPPath: o.mcpPath}
 	if o.metricsEnabled {
 		cfg.Metrics = reg.Handler()
@@ -257,6 +258,43 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	return errors.Join(err, c.close(log))
 }
 
+// bootFirmware names the build of the firmware VMs boot with, the one golden
+// PCR values must have been recorded with, and returns it for the verifier;
+// nil when the code image is unavailable.
+func bootFirmware(ctx context.Context, h *host.Service, path string, log *slog.Logger) *attest.Firmware {
+	fw, err := h.Firmware(ctx)
+	if err != nil {
+		log.Warn("firmware code image unavailable: create_vm fails until --ovmf-code names one", "path", path, "err", err)
+		return nil
+	}
+	attrs := []any{"path", path, "sha256", fw.SHA256, "package", fw.Package, "version", fw.Version}
+	if fw.Error != "" {
+		attrs = append(attrs, "packageErr", fw.Error)
+	}
+	log.Info("firmware VMs boot with; golden PCR values belong to this build", attrs...)
+	return &attest.Firmware{SHA256: fw.SHA256, Package: fw.Package, Version: fw.Version}
+}
+
+// warnStaleGolden names every image whose golden PCR values were recorded
+// under another firmware build than fw, the one VMs boot with: every attested
+// VM of such an image fails PCR 0 until the values are recorded again.
+func warnStaleGolden(catalog *images.Catalog, fw *attest.Firmware, log *slog.Logger) {
+	if fw == nil {
+		return
+	}
+	for _, img := range catalog.List() {
+		if img.Policy == nil {
+			continue
+		}
+		p, err := attest.ParsePolicy(img.Policy)
+		if err != nil || p.GoldenFirmware == nil || p.GoldenFirmware.SameBuild(*fw) {
+			continue
+		}
+		log.Warn("golden PCR values of this image were recorded for another firmware: attested VMs fail until they are recorded again (vm-manager image golden --help)",
+			"image", img.Ref(), "recordedFor", p.GoldenFirmware.String(), "boots", fw.String())
+	}
+}
+
 // components are the host services behind the VM service, built in the
 // order internal/vm documents: storage, networks, notify, swtpm and QEMU
 // runtimes, images, then the service itself.
@@ -270,7 +308,7 @@ type components struct {
 	stopTimeout time.Duration
 }
 
-func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, log *slog.Logger) (_ *components, err error) {
+func newComponents(ctx context.Context, o *serveOptions, fw *attest.Firmware, reg *metrics.Registry, log *slog.Logger) (_ *components, err error) {
 	// c is a local, not the named result: the error returns below hand back
 	// nil, and the deferred close must still see the partially built set.
 	c := &components{stopTimeout: o.stopTimeout}
@@ -309,8 +347,9 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 	} else {
 		log.Info("image catalog loaded", "imageDir", o.imageDir, "images", n)
 	}
+	warnStaleGolden(c.images, fw, log)
 
-	attestor, err := c.attestor(o, log)
+	attestor, err := c.attestor(o, fw, log)
 	if err != nil {
 		return nil, err
 	}
@@ -356,8 +395,9 @@ func newComponents(ctx context.Context, o *serveOptions, reg *metrics.Registry, 
 // attestor builds the imds.Attestor for --attestation. The verifier reads
 // each VM's image policy from the VM service, which is built after it, so
 // the provider resolves c.vm at call time (quotes only arrive once a VM
-// boots, long after both exist).
-func (c *components) attestor(o *serveOptions, log *slog.Logger) (imds.Attestor, error) {
+// boots, long after both exist). fw, the firmware VMs boot with, is named in
+// a golden mismatch.
+func (c *components) attestor(o *serveOptions, fw *attest.Firmware, log *slog.Logger) (imds.Attestor, error) {
 	if o.attestation != attestationVerify {
 		log.Warn("attestation=noop: guest quotes are not verified and user-data gating is not enforced; run with --attestation=verify")
 		return &imds.NoopAttestor{}, nil
@@ -370,6 +410,7 @@ func (c *components) attestor(o *serveOptions, log *slog.Logger) (imds.Attestor,
 			return c.vm.PolicyFor(ctx, vmID)
 		}),
 		LearnGolden: o.learnGolden,
+		Firmware:    fw,
 		Logger:      log,
 	})
 }

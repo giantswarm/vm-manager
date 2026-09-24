@@ -38,7 +38,7 @@ below are the last full run on the development host.
 | `TestIgnition` | MCP | user-data as Ignition JSON: the first installed boot applies its files and unit from the initrd stages, a reboot leaves Ignition idle | first installed boot |
 | `TestPersistentEtc` | MCP | a file and an enabled unit in `/etc` survive `reboot_vm`; host key and machine ID unchanged; var unmounted cleanly (no `recovering journal`) | `reboot_to_ready_seconds=11` |
 | `TestKubernetesSysext` | MCP | `vm-kubernetes.service` pulls the sysext, merges it, containerd and kubelet up, PCR 13 equals `policy.json` | `kubernetes_pull_seconds=2`, `kubernetes_unit_seconds=2.7` |
-| `TestAttestation` | three servers in turn: learn mode, verify with the recorded golden values, verify on `OVMF_CODE.secboot.4m.fd` | verified initrd and ready quotes, user-data applied; `golden mismatch` on PCR 0 and 7 with the other firmware, user-data gated, Ignition in its fetch loop | 111 s for the three |
+| `TestAttestation` | three servers in turn: learn mode, verify with the recorded golden values, verify on `OVMF_CODE.secboot.4m.fd` | verified initrd and ready quotes, user-data applied, `golden_firmware` recorded; `golden mismatch` on PCR 0 and 7 with the other firmware, naming the recorded build, user-data gated, Ignition in its fetch loop | 111 s for the three |
 | `TestKubernetesCluster` | MCP plus the host's `kubectl` through `forward_port` 6443 | control plane from CAPI-shaped Ignition (`kubeadm init` ordered `After=vm-kubernetes.service`), flannel, a worker joined with a bootstrap token, two Ready nodes with `giantswarm-vm://` providerIDs, cross-node DNS, clean units and unmanaged CNI links | `cp_ready_seconds=85`, `worker_join_seconds=46`, 2.5 to 3 min in total |
 
 `TestKubernetesCluster` needs `kubectl` on the host and internet access from the VMs
@@ -52,7 +52,8 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
 - `cmd/` — cobra CLI: `serve` (every flag has an environment fallback named in
   its help text, `VM_MANAGER_*` plus the sibling-compatible `DEX_*`, `GOOGLE_*`,
   `OAUTH_TRUSTED_AUDIENCES`, `SSO_ALLOW_PRIVATE_IPS`), `image golden` (records
-  golden PCRs from a VM's verified quote into the image's `policy.json`),
+  golden PCRs from a VM's verified quote and the server's firmware build into the
+  image's `policy.json`),
   `version`; `cmd/vm-agent` is the guest binary (`attest --stage=initrd|ready`,
   `pcrs`, `version`). `cmd/logrus.go` forwards gvisor-tap-vsock's logrus output
   into slog and demotes its per-connection teardown errors to debug.
@@ -84,8 +85,9 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
   `imds.NoopAttestor`, which verifies nothing.
 - `internal/host` — the host capability service behind `get_host`: kernel, CPUs,
   memory, `/dev/kvm` and `/dev/vhost-vsock` access, qemu / swtpm / systemd
-  versions, the OVMF code image, the `io.systemd.StorageProvider` sockets, and
-  the `ready` / `missing` verdict. Commands go through an injectable `Runner`,
+  versions, the OVMF code image VMs boot with (`--ovmf-code`) and its build (the
+  SHA-256, the dpkg package and version), the `io.systemd.StorageProvider`
+  sockets, and the `ready` / `missing` verdict. Commands go through an injectable `Runner`,
   file probes are relative to `Options.Root`, so tests run on a fixture tree.
 - `internal/identity` — the authenticated caller on the request context
   (subject, email, groups, source `sso|oauth`).
@@ -384,7 +386,13 @@ agentlab up                                          # the image-dir mount is fi
 agentlab vm-manager-test                             # 401 anonymous -> token accepted -> tools -> create_vm -> ready -> attestation -> delete_vm
 ```
 
-The pod's OVMF is Ubuntu's, not the host's: an image whose `policy.json` was recorded on
-the host needs `vm-manager image golden` once against a VM the pod booted in learn mode
-(agentlab's docs/vm-manager.md has the recipe), and the proof boots its VM with
-`require_attestation: true` from then on.
+The pod's OVMF is Ubuntu's `ovmf-generic` at the version the `Dockerfile` pins, not the
+host's. A released guest image artifact carries golden values recorded with its release's
+container image; a local build whose `policy.json` was recorded on the host needs
+`vm-manager image golden` once against a VM the pod booted in learn mode, and again after
+a release that changes the firmware (README, Attestation, "Recording golden values
+again"; agentlab's docs/vm-manager.md has the lab recipe), or
+`hack/guest-image-golden.sh vm-manager:dev images/build` before the lab pushes it (no
+other vm-manager may run on the host: vsock CIDs are host-global). `get_host` names the
+build the pod boots with, and the proof boots its VM with `require_attestation: true`
+from then on.

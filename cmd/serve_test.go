@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/attest"
+	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/imds"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
@@ -121,7 +124,7 @@ func TestNewComponentsFailureCleansUp(t *testing.T) {
 	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o600))
 	o := &serveOptions{stateDir: stateDir, imageDir: notADir, networkSubnet: "192.168.222.0/24", defaultNetwork: "default", stopTimeout: time.Second}
 
-	c, err := newComponents(context.Background(), o, metrics.New(metrics.Options{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c, err := newComponents(context.Background(), o, nil, metrics.New(metrics.Options{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.ErrorContains(t, err, "load images")
 	assert.Nil(t, c)
 }
@@ -172,13 +175,48 @@ func TestServeOptionsComplete(t *testing.T) {
 func TestAttestorWiring(t *testing.T) {
 	c := &components{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	a, err := c.attestor(&serveOptions{attestation: attestationNoop}, log)
+	a, err := c.attestor(&serveOptions{attestation: attestationNoop}, nil, log)
 	require.NoError(t, err)
 	assert.IsType(t, &imds.NoopAttestor{}, a)
 
-	a, err = c.attestor(&serveOptions{attestation: attestationVerify, learnGolden: true}, log)
+	a, err = c.attestor(&serveOptions{attestation: attestationVerify, learnGolden: true}, &attest.Firmware{SHA256: "00"}, log)
 	require.NoError(t, err)
 	assert.IsType(t, &attest.Verifier{}, a)
 	_, err = a.SubmitQuote(context.Background(), "vm-1", imds.QuoteRequest{Stage: imds.StageInitrd, Nonce: "00"})
 	assert.NoError(t, err, "an unknown nonce is a rejection, not an error, and the policy is never consulted")
+}
+
+// TestWarnStaleGolden names the image whose golden values belong to another
+// firmware build than the one VMs boot with, and only that one.
+func TestWarnStaleGolden(t *testing.T) {
+	hexOf := func(c string) string { return strings.Repeat(c, 64) }
+	dir := t.TempDir()
+	policy := func(fw string) string {
+		p := `{"pcr11":{"enter-initrd":"` + hexOf("1") + `","enter-initrd:leave-initrd:sysinit:ready":"` + hexOf("2") + `"}`
+		if fw != "" {
+			p += `,"golden":{"sha256":{"0":"` + hexOf("3") + `"}},"golden_firmware":{"sha256":"` + fw + `","package":"ovmf-generic","version":"7"}`
+		}
+		return p + "}"
+	}
+	for image, fw := range map[string]string{"stale_1": hexOf("a"), "current_1": hexOf("b"), "unrecorded_1": ""} {
+		for _, ext := range []string{".efi", ".raw"} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, image+ext), nil, 0o600))
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, image+".policy.json"), []byte(policy(fw)), 0o600))
+	}
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	catalog, err := images.Load(dir, quiet)
+	require.NoError(t, err)
+	require.Len(t, catalog.List(), 3)
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	warnStaleGolden(catalog, &attest.Firmware{SHA256: hexOf("b"), Package: "ovmf-generic", Version: "8"}, log)
+	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), logs.String())
+	assert.Contains(t, logs.String(), "image=stale_1")
+	assert.Contains(t, logs.String(), `recordedFor="ovmf-generic 7 (sha256 aaaaaaaaaaaaaaaa)" boots="ovmf-generic 8 (sha256 bbbbbbbbbbbbbbbb)"`)
+
+	logs.Reset()
+	warnStaleGolden(catalog, nil, log)
+	assert.Empty(t, logs.String(), "no firmware to compare with")
 }

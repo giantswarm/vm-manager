@@ -18,6 +18,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/attest"
+	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -42,9 +43,14 @@ func TestImageGolden(t *testing.T) {
 		"vm-initrd": {Required: true, UserDataReleased: true, Initrd: &vm.Quote{Verified: true}},
 		"vm-noop":   {Required: true, UserDataReleased: true, Ready: &vm.Quote{Verified: true}},
 	}
+	firmware := &host.Firmware{SHA256: hexOf(10), Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == api.Prefix+"/host" {
+			_ = json.NewEncoder(w).Encode(host.Info{OVMFCode: "/usr/share/OVMF/OVMF_CODE_4M.fd", Firmware: firmware})
 			return
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, api.Prefix+"/vms/"), "/attestation")
@@ -74,9 +80,15 @@ func TestImageGolden(t *testing.T) {
 	o.token = ""
 	assert.ErrorContains(t, runImageGolden(ctx, o, "giantswarm-vm-base", io.Discard), "401")
 
+	// The values belong to the server's firmware build: without one there is
+	// nothing to name them by.
+	firmware = nil
+	assert.ErrorContains(t, runImageGolden(ctx, opts("vm-ready"), "giantswarm-vm-base", io.Discard), "the server reports no firmware build")
+	firmware = &host.Firmware{SHA256: hexOf(10), Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}
+
 	var out bytes.Buffer
 	require.NoError(t, runImageGolden(ctx, opts("vm-ready"), "giantswarm-vm-base", &out))
-	assert.Equal(t, "recorded golden sha256 PCRs 0,2,3,4,6,7,13 of vm vm-ready (ak ak-fp) into "+policyPath+"\n", out.String())
+	assert.Equal(t, "recorded golden sha256 PCRs 0,2,3,4,6,7,13 of vm vm-ready (ak ak-fp, firmware ovmf-generic 2025.11-3ubuntu7.2 (sha256 aaaaaaaaaaaaaaaa)) into "+policyPath+"\n", out.String())
 
 	raw, err := os.ReadFile(policyPath) // #nosec G304 -- test temp dir.
 	require.NoError(t, err)
@@ -84,6 +96,7 @@ func TestImageGolden(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, p.Golden[attest.Bank], len(attest.GoldenIndexes))
 	assert.Equal(t, hexOf(13), p.Golden[attest.Bank][13])
+	assert.Equal(t, &attest.Firmware{SHA256: hexOf(10), Package: "ovmf-generic", Version: "2025.11-3ubuntu7.2"}, p.GoldenFirmware)
 	assert.Equal(t, hexOf(1), p.PCR11[attest.PhaseInitrd], "the rest of the file is kept")
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(raw, &doc))
@@ -98,6 +111,24 @@ func TestImageGolden(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, policyPath, cat.PolicyPath(img))
 	assert.Contains(t, string(img.Policy), `"golden"`)
+
+	// --clear removes the golden values and keeps the rest, the first step
+	// of recording them again for another firmware.
+	c := opts("")
+	c.clear = true
+	out.Reset()
+	require.NoError(t, runImageGolden(ctx, c, "giantswarm-vm-base", &out))
+	assert.Contains(t, out.String(), "cleared the golden PCR values of giantswarm-vm-base_0.1.0 in "+policyPath)
+	raw, err = os.ReadFile(policyPath) // #nosec G304 -- test temp dir.
+	require.NoError(t, err)
+	doc = nil
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	assert.NotContains(t, doc, "golden")
+	assert.NotContains(t, doc, "golden_firmware", "the firmware build goes with the values")
+	p, err = attest.ParsePolicy(raw)
+	require.NoError(t, err)
+	assert.Equal(t, hexOf(1), p.PCR11[attest.PhaseInitrd], "the rest of the file is kept")
+	require.NoError(t, runImageGolden(ctx, c, "giantswarm-vm-base", io.Discard), "clearing a policy without golden values is a no-op")
 
 	// An image without any policy is refused rather than given a bare one.
 	require.NoError(t, os.Remove(policyPath))

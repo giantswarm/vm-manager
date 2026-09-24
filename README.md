@@ -60,7 +60,7 @@ Design decisions and their reasons are in [docs/design.md](docs/design.md), the 
 | Operation | REST | MCP tool | Writes |
 |---|---|---|---|
 | This server's build (release version, commit, build time) and the names of its tools | — | `get_info` | no |
-| Host capabilities: kernel, CPUs, memory, `/dev/kvm`, `/dev/vhost-vsock`, qemu / swtpm / systemd versions, OVMF image, storage providers, `ready` + `missing` | `GET /api/v1/host` | `get_host` | no |
+| Host capabilities: kernel, CPUs, memory, `/dev/kvm`, `/dev/vhost-vsock`, qemu / swtpm / systemd versions, OVMF image and its build, storage providers, `ready` + `missing` | `GET /api/v1/host` | `get_host` | no |
 | List the bootable images (id, version, UKI, disk, Kubernetes sysext versions, PCR policy) | `GET /api/v1/images` | `list_images` | no |
 | Describe one image (`<id>_<version>` or bare id = newest) | `GET /api/v1/images/{ref}` | `get_image` | no |
 | List the virtual networks with gateway and leases | `GET /api/v1/networks` | `list_networks` | no |
@@ -169,7 +169,7 @@ the contract of `--image-dir`:
 |---|---|
 | `giantswarm-vm-base_<v>.efi` | the UKI: kernel, initrd (systemd-networkd, systemd-imdsd, `vm-agent`, Ignition), command line with `roothash=`, `.pcrsig` / `.pcrpkey` for PCR 11 |
 | `giantswarm-vm-base_<v>.raw` | the disk image: ESP with systemd-boot and the UKI, erofs root, verity hash and signature partitions |
-| `policy.json` | `pcr11` per phase path (computed with `systemd-measure calculate` by `make -C images verify`), `pcr13` per Kubernetes version, `golden.sha256` for PCRs 0, 2-4, 6, 7, 13 once `vm-manager image golden` ran |
+| `policy.json` | `pcr11` per phase path (computed with `systemd-measure calculate` by `make -C images verify`), `pcr13` per Kubernetes version, `golden.sha256` for PCRs 0, 2-4, 6, 7, 13 and `golden_firmware` (the firmware build they belong to) once `vm-manager image golden` ran; a released guest image artifact carries them |
 | `sysupdate/base/` | the A/B OS update artifacts the image's `/usr/lib/sysupdate.d/` transfers name, with `SHA256SUMS` and `SHA256SUMS.gpg` |
 | `sysupdate/kubernetes/` | `kubernetes_<kv>.raw` per Kubernetes version, `SHA256SUMS`, `SHA256SUMS.gpg` |
 
@@ -239,15 +239,62 @@ PCR 11 does not cover the command-line addition. The integrity story therefore r
 PCRs 0, 4, 7, 11 and 13, and on the verity signature and `SHA256SUMS.gpg` for the content
 itself.
 
-Learn mode versus golden. A fresh `policy.json` has no golden values and the verifier
-rejects every quote. Bring-up of a new image or firmware is: start `serve` with
-`--attestation-learn-golden` (missing golden PCRs are accepted and recorded on the VM),
-boot one VM, `vm-manager image golden <image> --from-vm <id>` writes its verified
-ready-stage PCRs into the image's `policy.json`, restart without the flag. From then on a
-boot on other firmware is rejected; `e2e/attestation_test.go` proves it with a second OVMF
-build (`golden mismatch` on PCR 0 and 7, user-data gated, Ignition in its fetch loop).
-Learn mode is never for production, it would accept any firmware; `--attestation=noop`
-(opt-in) verifies nothing and does not gate user-data.
+Released golden values. The release pipeline records the golden values of every
+release before it pushes and signs the guest image artifact: the `guest-image` job of
+`.circleci/custom.yml` runs `hack/guest-image-golden.sh`, which boots the release's guest
+image with what the release's container image measures (its OVMF code and variable
+store, its virtio-net option ROM) and its vm-manager binary: a learn-mode boot,
+`vm-manager image golden`, then a fresh VM that must verify against the recorded values
+with nothing learned. The emulator, which no PCR measures, is the e2e runner's (Ubuntu
+24.04's QEMU 8.2 and swtpm), because the image's QEMU 10.2 stalls the vTPM on most CI
+boots (#84). A pod of a release therefore verifies both quotes of its first VM without a
+learn-mode boot, and a release that moves the firmware ships the values of the new
+build.
+
+Learn mode versus golden. A local build's `policy.json` has no golden values and the
+verifier rejects every quote. Bring-up of such an image, or of another firmware, is:
+start `serve` with `--attestation-learn-golden` (missing golden PCRs are accepted and
+recorded on the VM), boot one VM, `vm-manager image golden <image> --from-vm <id>` writes
+its verified ready-stage PCRs and the server's firmware build into the image's
+`policy.json`, restart without the flag (`hack/guest-image-golden.sh <vm-manager image>
+<image dir>`, `make guest-image-golden`, does all of it for a container image). From then
+on a boot on other firmware is
+rejected; `e2e/attestation_test.go` proves it with a second OVMF build (`golden mismatch`
+on PCR 0 and 7, user-data gated, Ignition in its fetch loop). Learn mode is never for
+production, it would accept any firmware; `--attestation=noop` (opt-in) verifies nothing
+and does not gate user-data.
+
+What invalidates golden values. They belong to one image and one firmware build. A new
+image changes PCR 4 (boot loader and UKI), and PCR 13 with its Kubernetes sysext; a new
+OVMF build changes PCR 0, which measures the firmware, and PCR 7 when its variable store
+template changes. In the container image the firmware is Ubuntu's `ovmf-generic`, pinned
+in the `Dockerfile`: a new build arrives as a pull request and release note of its own
+(`update OVMF to <version>, re-record golden PCRs`), whose release records the values for
+it, and no other release changes it. On a host install it is the host's package, which a
+system update replaces. `get_host` reports the build VMs boot with (`firmware`: the
+SHA-256 of `ovmfCode`, the dpkg package and version) and `serve` logs it at start, with a
+warning per image whose `golden_firmware` names another build. Values recorded under
+another build fail every quote with `golden mismatch: pcr 0`, and the verdict says which
+build they were recorded for and which one boots; when the build is the recorded one, it
+says so, and the boot itself differs.
+
+Recording golden values again. Learn mode accepts only a PCR without a golden value, so
+over stale values the learn boot fails with the same mismatch: `vm-manager image golden
+<image> --clear` removes them first. In the pod, whose state claim (the chart's
+`persistence`) holds the image directory and its `policy.json`, `vm-manager image` reaches
+the pod's server and directory without flags:
+
+```sh
+kubectl -n <namespace> exec deploy/vm-manager -c vm-manager -- vm-manager image golden <image> --clear
+# chart value vm.learnGolden: true; the upgrade restarts the pod, which reads the policy at start
+# create one VM with require_attestation: true and wait for ready (create_vm, POST /api/v1/vms), then
+kubectl -n <namespace> exec deploy/vm-manager -c vm-manager -- \
+  vm-manager image golden <image> --from-vm <id> --token <bearer token, with OAuth on>
+# delete the VM and set vm.learnGolden: false: after that restart every boot is compared
+```
+
+Without a state claim the pod fetches the guest image at every start and forgets the
+values recorded into it; a released artifact brings its own values back each time.
 
 ## Networking
 

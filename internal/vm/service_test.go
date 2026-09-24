@@ -661,6 +661,71 @@ func TestUnresponsiveVTPM(t *testing.T) {
 	})
 }
 
+// rejectingAttestor is the verifier refusing a quote whose nonce matched:
+// with reason set, every such quote is rejected with it.
+type rejectingAttestor struct {
+	imds.NoopAttestor
+	reason string
+}
+
+func (a *rejectingAttestor) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteRequest) (imds.QuoteResult, error) {
+	res, err := a.NoopAttestor.SubmitQuote(ctx, vmID, req)
+	if err != nil || !res.Verified || a.reason == "" {
+		return res, err
+	}
+	return imds.QuoteResult{Message: a.reason}, nil
+}
+
+// TestAttestationRejected: a rejected quote is LastError through READY=1,
+// behind the vTPM stall when the run's console shows one.
+func TestAttestationRejected(t *testing.T) {
+	const mismatch = "pcr 11 mismatch for phase enter-initrd: expected c6bc2f42, got 00000000"
+	boot := func(t *testing.T, console string) (*harness, *rejectingAttestor, *vm.VM) {
+		h := newHarness(t)
+		att := &rejectingAttestor{reason: mismatch}
+		h.attestor = att
+		h.restart()
+		s := h.spec("attest")
+		s.RequireAttestation = true
+		v, err := h.svc.Create(h.ctx, s)
+		require.NoError(t, err)
+		h.install(v.ID)
+		require.NoError(t, os.WriteFile(v.Paths.Console, []byte(console), 0o600))
+		return h, att, v
+	}
+	quote := func(h *harness, id string, stage imds.Stage) *vm.VM {
+		h.t.Helper()
+		a := h.svc.IMDSDeps().Attestor
+		nonce, err := a.Nonce(h.ctx, id)
+		require.NoError(h.t, err)
+		_, err = a.SubmitQuote(h.ctx, id, imds.QuoteRequest{Stage: stage, Nonce: nonce})
+		require.NoError(h.t, err)
+		v, err := h.svc.Get(id)
+		require.NoError(h.t, err)
+		return v
+	}
+
+	t.Run("firmware vTPM stall, then READY=1", func(t *testing.T) {
+		h, _, v := boot(t, "BdsDxe: loading Boot0001\nEFI stub: WARNING: Failed to measure data for event 1: 0x8000000000000007\ntpm_crb MSFT0101:00: ready\n")
+		want := "vtpm not responding: the guest's TPM calls failed (console: EFI stub: WARNING: Failed to measure data for event 1: 0x8000000000000007); initrd attestation rejected: " + mismatch
+		v = quote(h, v.ID, imds.StageInitrd)
+		assert.Equal(t, want, v.LastError)
+		v = h.ready(v.ID, v.CID)
+		assert.Equal(t, want, v.LastError, "READY=1 keeps the rejection")
+		assert.False(t, v.Attestation.UserDataReleased)
+	})
+	t.Run("no marker keeps the plain mismatch; a verified retry clears it", func(t *testing.T) {
+		h, att, v := boot(t, "tpm_crb MSFT0101:00: ready\n")
+		v = h.ready(v.ID, v.CID)
+		v = quote(h, v.ID, imds.StageReady)
+		assert.Equal(t, "ready attestation rejected: "+mismatch, v.LastError)
+		assert.Equal(t, vm.StateReady, v.State)
+		att.reason = ""
+		v = quote(h, v.ID, imds.StageReady)
+		assert.Empty(t, v.LastError)
+	})
+}
+
 func TestPhaseBStartFailure(t *testing.T) {
 	h := newHarness(t)
 	h.rt.SetFailOn(func(s qemu.Spec) error {

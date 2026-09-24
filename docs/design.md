@@ -345,9 +345,14 @@ policy's `pcr13` entry for the VM's Kubernetes version (written by
 without a policy. Golden values are recorded once per image and firmware: start the
 server with `--attestation-learn-golden` (the verifier accepts golden PCRs without a
 value and reports them as learned), boot one VM, run `vm-manager image golden <image>
---from-vm <id>` (writes `golden.sha256` into the image's `policy.json`, which
-`images/scripts/verify` preserves across rebuilds of the same version), restart without
-the flag. Learn mode is never for production: it would accept any firmware.
+--from-vm <id>` (writes `golden.sha256` and `golden_firmware`, the server's firmware
+build, into the image's `policy.json`, which `images/scripts/verify` preserves across
+rebuilds of the same version), restart without the flag. The release pipeline does this
+for every release with the firmware, option ROM and binary of the release's container
+image (`hack/guest-image-golden.sh`, which then boots a fresh VM against the values
+without learn mode), so a released guest image artifact carries them. A golden mismatch of a firmware PCR names the build the values
+were recorded for next to the one the server boots. Learn mode is never for production:
+it would accept any firmware.
 
 ## How CAPI fits
 

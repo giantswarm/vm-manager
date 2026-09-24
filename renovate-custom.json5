@@ -1,0 +1,39 @@
+{
+  // Repo-specific Renovate rules for vm-manager. Pulled in as the last `extends`
+  // entry of the generated renovate.json5; class-wide rules belong in
+  // giantswarm/renovate-presets.
+  customManagers: [
+    {
+      // An Ubuntu package the Dockerfile pins through an ARG, announced by the
+      // comment above it:
+      //   # renovate: suite=resolute-updates depName=ovmf-generic
+      //   ARG OVMF_GENERIC_VERSION=2025.11-3ubuntu7.2
+      // The suite is the archive pocket that carries the package's newest
+      // build (updates also receives every security update).
+      customType: 'regex',
+      description: 'Ubuntu packages pinned through a Dockerfile ARG',
+      managerFilePatterns: ['/^Dockerfile$/'],
+      matchStrings: [
+        '#\\s*renovate:\\s*suite=(?<suite>\\S+)\\s+depName=(?<depName>\\S+)\\s+ARG\\s+\\w+=(?<currentValue>\\S+)',
+      ],
+      datasourceTemplate: 'deb',
+      versioningTemplate: 'deb',
+      registryUrlTemplate: 'https://archive.ubuntu.com/ubuntu?suite={{suite}}&components=main&binaryArch=amd64',
+    },
+  ],
+  packageRules: [
+    {
+      // ovmf-generic is the firmware every VM boots with and PCR 0 measures
+      // it: golden PCR values recorded under one build fail under the next.
+      // The subject is the release note, so it says so.
+      description: 'A new OVMF build invalidates recorded golden PCR values; its pull request and release note say so',
+      matchDatasources: ['deb'],
+      matchPackageNames: ['ovmf-generic'],
+      commitMessageTopic: 'OVMF',
+      commitMessageExtra: 'to {{{newVersion}}}, re-record golden PCRs',
+      prBodyNotes: [
+        '**Firmware change: golden PCR values must be recorded again.** `ovmf-generic` is the OVMF build every VM boots with, and PCR 0 measures it. Golden values recorded under the current build fail every quote under this one (`golden mismatch: pcr 0`), and a VM created with attestation required never receives its user-data. After this release, record the values again for every image in use: README, section Attestation, "Recording golden values again".',
+      ],
+    },
+  ],
+}
