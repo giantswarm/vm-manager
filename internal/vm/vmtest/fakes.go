@@ -131,6 +131,8 @@ type Runtime struct {
 	hold func(qemu.Spec)
 	// attachable are the PIDs Attach finds, see SetAttachable.
 	attachable map[int]bool
+	// onAttach runs on each Instance Attach hands out, see SetOnAttach.
+	onAttach func(*Instance)
 }
 
 // SetAttachable declares the PIDs a later Attach finds still running, as a
@@ -145,6 +147,15 @@ func (r *Runtime) SetAttachable(pids ...int) {
 	}
 }
 
+// SetOnAttach runs f on each Instance a later Attach hands out, before
+// Attach returns it: a test ends the process there to have it exit while
+// vm-manager reattaches. f must not call back into the Runtime.
+func (r *Runtime) SetOnAttach(f func(*Instance)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onAttach = f
+}
+
 // Attach implements vm.Runtime: an Instance for an attachable PID, whose
 // exit the test drives like any other.
 func (r *Runtime) Attach(_ context.Context, spec qemu.Spec, h proc.Handle) (vm.Instance, error) {
@@ -156,6 +167,9 @@ func (r *Runtime) Attach(_ context.Context, spec qemu.Spec, h proc.Handle) (vm.I
 	}
 	inst := &Instance{spec: spec, ev: r.ev, exit: make(chan proc.ExitStatus, 1), Pid: h.PID}
 	r.insts = append(r.insts, inst)
+	if r.onAttach != nil {
+		r.onAttach(inst)
+	}
 	return inst, nil
 }
 

@@ -179,6 +179,9 @@ func (x *SystemdExec) runArgs(unit, path string, c Cmd) []string {
 	for _, kv := range c.Env {
 		args = append(args, "--setenv="+kv)
 	}
+	if c.NoIOUring {
+		args = append(args, "--property=SystemCallFilter=~io_uring_setup", "--property=SystemCallErrorNumber=EPERM")
+	}
 	args = append(args, "--", path)
 	return append(args, c.Args...)
 }

@@ -6,13 +6,13 @@ toolchain go1.27.1
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
-	github.com/giantswarm/mcp-oauth v1.4.3
+	github.com/giantswarm/mcp-oauth v1.4.6
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.10
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
-	github.com/mark3labs/mcp-go v1.1.0
+	github.com/mark3labs/mcp-go v1.1.1
 	github.com/mdlayher/vsock v1.3.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.24.1

@@ -90,6 +90,7 @@ func TestRuntimeStart(t *testing.T) {
 		require.Len(t, h.exec.Started(), 1)
 		assert.Equal(t, "/opt/qemu", h.exec.Started()[0].Path)
 		assert.Equal(t, want, h.exec.Started()[0].Args)
+		assert.True(t, h.exec.Started()[0].NoIOUring, "QEMU's main loop stays off io_uring")
 		assert.Equal(t, p.PID(), inst.PID())
 		assert.Equal(t, h.spec, inst.Spec())
 		assert.False(t, inst.Exited())
