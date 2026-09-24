@@ -272,16 +272,19 @@ stage retries until its 2-minute timeout and the boot lands in `emergency.target
 without it user-data was released when the boot started and the boot proceeds with the
 failed unit on record. `get_vm_attestation` shows both stages either way.
 
-Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only. The
+Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only; the
+release pipeline adds the golden values of the release's container image before it
+publishes the artifact (`hack/guest-image-golden.sh`). The
 firmware PCRs a golden value can pin across VMs are 0 (firmware code), 2 and 3 (option
 ROMs), 4 (boot loader and UKI), 6 (os-separator only) and 7 (Secure Boot policy). PCR 1
 and 5 are quoted and recorded but not compared: EDK2 measures the SMBIOS tables into
 PCR 1, and the type 11 strings vm-manager passes are per-VM credentials (hostname,
 machine ID, SSH key, notify socket), as is the `Boot####` entry with the ESP's partition
 GUID; PCR 5 holds the GPT of the installed disk with its per-install partition UUIDs.
-Bring-up of a new image or firmware: start vm-manager with
+Bring-up of a local build or another firmware: start vm-manager with
 `--attestation-learn-golden`, boot one VM, `vm-manager image golden giantswarm-vm-base
---from-vm <id> --image-dir <dir>`, restart without the flag; from then on the default
+--from-vm <id> --image-dir <dir>` (golden values and `golden_firmware`, the firmware build
+they belong to), restart without the flag; from then on the default
 `--attestation=verify` rejects a boot on other firmware (`e2e/attestation_test.go` proves
 this with `OVMF_CODE.secboot.4m.fd`: `golden mismatch` on PCR 0 and 7, user-data gated,
 Ignition in its fetch loop).

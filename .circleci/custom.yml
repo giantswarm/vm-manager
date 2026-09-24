@@ -5,17 +5,30 @@
 #
 # guest-image: the third artifact of a release next to the container image
 # (push-to-registries-release) and the chart (push-chart-release) — the guest
-# image the pod boots, built with mkosi in a privileged archlinux container on
-# a machine executor (hack/guest-image-build.sh; the docker executor cannot
-# run privileged containers) and published as the OCI artifact
-# gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version> by
-# `vm-manager image push` (pkg/guestimage), then signed at its digest with
+# image the pod boots, built with mkosi in a privileged archlinux container
+# (hack/guest-image-build.sh; the docker executor cannot run privileged
+# containers), its golden PCR values recorded and proven with the release's
+# container image (hack/guest-image-golden.sh), then published as
+# the OCI artifact gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>
+# by `vm-manager image push` (pkg/guestimage) and signed at its digest with
 # cosign keyless under this job's CircleCI OIDC identity through the architect
 # orb's cosign-sign-verify command — the same signature shape (a Sigstore
 # bundle stored as an OCI referrer) and identity the orb puts on the container
 # image and the chart, so one keyless attestor admits all three artifacts. The
 # chart's guestImage.tag defaults to its appVersion, so a release is complete
-# once this job is green.
+# once this job is green, and its pods verify both attestation quotes of a VM
+# against the shipped values without a learn-mode boot.
+#
+# The golden values follow the container image (PCR 0 measures its pinned
+# ovmf-generic, PCR 2 its QEMU's virtio-net option ROM) and the guest image
+# (PCRs 4 and 13), so they are recorded after push-to-registries-release from
+# that image's firmware, option ROM and binary, booted on the e2e runner's QEMU
+# and swtpm (the image's QEMU 10.2 stalls the vTPM, giantswarm/vm-manager#84),
+# on a machine with /dev/kvm: CircleCI's android machine image is the one with
+# nested virtualization, Ubuntu 24.04 like the e2e runner. The version and the
+# vm-manager binary come from the workspace push-to-registries-release leaves
+# (.build_version, go-build's vm-manager-linux-amd64), so the job itself does
+# not depend on the ref it runs for.
 # Tags only: branch builds keep the GitHub Actions image and KVM e2e workflows
 # (test-only), and the ATS smoke installs the chart with the fetch off.
 commands:
@@ -48,15 +61,25 @@ commands:
 jobs:
   guest-image:
     machine:
-      image: ubuntu-2404:current
+      image: android:2026.05.1
     resource_class: large
     environment:
       GUEST_IMAGE_WORKSPACE: /tmp/mkosi-workspace
       GUEST_IMAGE_REPOSITORY: gsoci.azurecr.io/giantswarm/vm-manager-guest-image
-      GO_IMAGE: golang:1.27.1
+      VM_MANAGER_IMAGE: gsoci.azurecr.io/giantswarm/vm-manager
     steps:
       - checkout
+      - attach_workspace:
+          at: /tmp/workspace
       - install-cosign
+      - run:
+          name: Release version and vm-manager binary
+          command: |
+            set -euo pipefail
+            version=$(tr -d '\n' < /tmp/workspace/.build_version)
+            echo "export VERSION=${version}" >> "$BASH_ENV"
+            install -D -m 0755 /tmp/workspace/vm-manager-linux-amd64 bin/vm-manager
+            bin/vm-manager version
       - run:
           name: Cache key (the image inputs, per ISO week)
           # mkosi's incremental cache freezes the Arch package set it was
@@ -78,15 +101,23 @@ jobs:
           paths:
             - images/mkosi.cache
       - run:
-          name: Build vm-manager
+          name: Record and verify the golden PCR values with the release's container image
+          # A learn-mode boot records PCRs 0, 2-4, 6, 7 and 13 and the
+          # firmware build into images/build/policy.json, a boot without
+          # learn mode must verify against them (the script says how the
+          # image's measured inputs are booted).
+          # The host as the e2e runner prepares it: vhost_vsock is a module
+          # (/dev/vhost-vsock carries the guests' READY=1), and Ubuntu's
+          # AppArmor profile for /usr/bin/swtpm also confines the privileged
+          # container's swtpm, refusing its sockets under the state directory
+          # ("Could not open UnixIO socket: Permission denied").
           command: |
-            # -buildvcs=false: the checkout belongs to the circleci user and the
-            # container runs as root, so git refuses the VCS stamp ("dubious
-            # ownership"); the version and commit come from the ldflags anyway.
-            docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=0 "$GO_IMAGE" \
-              go build -trimpath -buildvcs=false -ldflags "-s -w -X github.com/giantswarm/vm-manager/pkg/project.version=${CIRCLE_TAG#v} -X github.com/giantswarm/vm-manager/pkg/project.gitSHA=$CIRCLE_SHA1" -o bin/vm-manager .
-            sudo chown "$(id -u):$(id -g)" bin/vm-manager
-            bin/vm-manager version
+            sudo modprobe vhost_vsock
+            if [ -e /etc/apparmor.d/usr.bin.swtpm ]; then
+              sudo apparmor_parser -R /etc/apparmor.d/usr.bin.swtpm
+            fi
+            hack/guest-image-golden.sh "${VM_MANAGER_IMAGE}:${VERSION}" images/build
+          no_output_timeout: 30m
       - run:
           name: Push the guest image artifact
           command: |
@@ -96,7 +127,7 @@ jobs:
               echo "no gsoci credentials in the architect context"; exit 1
             fi
             echo "$password" | docker login gsoci.azurecr.io -u "$username" --password-stdin
-            bin/vm-manager image push "${GUEST_IMAGE_REPOSITORY}:${CIRCLE_TAG#v}" --image-dir images/build \
+            bin/vm-manager image push "${GUEST_IMAGE_REPOSITORY}:${VERSION}" --image-dir images/build \
               | tee /tmp/guest-image-push.log
       - run:
           name: Record the pushed digest for signing
@@ -123,7 +154,7 @@ workflows:
       - guest-image:
           context: architect
           requires:
-            - go-build
+            - push-to-registries-release
           filters:
             tags:
               only: /^v.*/

@@ -96,8 +96,9 @@ vm:
   # -- How guest TPM quotes are judged: `verify` (against the image policy and
   # its golden values) or `noop`.
   attestation: verify
-  # -- Bring-up of a new image or firmware only: accept golden PCRs the image
-  # policy has no value for and record them for `vm-manager image golden`.
+  # -- Bring-up of a guest image without released golden values (a local
+  # build) or of another firmware only: accept golden PCRs the image policy has
+  # no value for and record them for `vm-manager image golden`.
   learnGolden: false
   ovmf:
     # -- OVMF firmware code image and variable store template; empty probes

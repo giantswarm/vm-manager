@@ -314,13 +314,16 @@ What the chart renders, and why:
   chart's appVersion by default; `guestImage.digest` pins a manifest, `guestImage.plainHTTP`
   reaches a lab registry over HTTP, `guestImage.pullSecret` names a `dockerconfigjson`
   Secret for a private mirror) into `/var/lib/vm-manager/images` — the image directory is
-  part of the state volume. A directory that already holds that digest
-  (`.guest-image.json`) is left alone, so the golden PCR values `vm-manager image golden`
-  records into its `policy.json` survive pod restarts on a claim; another digest replaces
-  the contents. Recording golden values happens inside the pod, where the directory is
-  writable: `kubectl exec deploy/vm-manager -- vm-manager image golden <id>_<version>
-  --from-vm <id> --token <id_token>` (the server and image directory defaults are the
-  pod's). `guestImage.enabled: false` fetches nothing (the chart's own install smoke).
+  part of the state volume. A released artifact's `policy.json` carries the golden PCR
+  values its release pipeline recorded for the same release's container image, so the
+  pod verifies its VMs' attestation quotes from the first boot. A directory that already
+  holds that digest (`.guest-image.json`) is left alone, so golden values `vm-manager
+  image golden` records into its `policy.json` survive pod restarts on a claim; another
+  digest replaces the contents. Recording golden values happens inside the pod, where the
+  directory is writable: `kubectl exec deploy/vm-manager -- vm-manager image golden
+  <id>_<version> --from-vm <id> --token <id_token>` (the server and image directory
+  defaults are the pod's). `guestImage.enabled: false` fetches nothing (the chart's own
+  install smoke).
 - **OAuth** (`oauth.enabled`) against the platform identity: the issuer, client, client
   secret and CA fall back to `global.identity.*` and the base URL to `global.domain`, the
   way model-manager's chart reads them; `--allow-private-oauth-urls` and
@@ -337,11 +340,14 @@ What the chart renders, and why:
 - Resources: a memory limit bounds the sum of the VMs' memory too (they are processes of
   this container); the chart sets requests only.
 
-Pod restarts and the golden values: the OVMF build inside the image differs from a host's,
-so an image whose `policy.json` was recorded against another firmware needs `vm-manager
-image golden` once against a VM the pod booted in learn mode (`vm.learnGolden: true` for
-that one boot), run from a machine that has the image directory — the recipe of [First
-VM](#first-vm) with the pod's API behind a port-forward or the platform's muster.
+Pod restarts and the golden values: the chart's default guest image is the artifact of
+its own release and brings values recorded for the container image's firmware. A guest
+image from elsewhere (a local build pushed to a lab registry, `guestImage.repository`)
+whose `policy.json` was recorded against another firmware needs `vm-manager image golden`
+once against a VM the pod booted in learn mode (`vm.learnGolden: true` for that one boot),
+run from a machine that has the image directory — the recipe of [First VM](#first-vm)
+with the pod's API behind a port-forward or the platform's muster — or
+`hack/guest-image-golden.sh <vm-manager image> <image dir>` on a KVM host before the push.
 
 ## Known limitations
 

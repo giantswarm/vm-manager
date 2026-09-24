@@ -81,7 +81,8 @@ const OSSeparator = "os-separator"
 //	    "enter-initrd:leave-initrd:sysinit:ready": "<hex>"
 //	  },
 //	  "pcr13": { "1.36.4": "<hex>" },
-//	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } }
+//	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } },
+//	  "golden_firmware": { "sha256": "<hex>", "package": "ovmf-generic", "version": "2025.11-3ubuntu7.2" }
 //	}
 type Policy struct {
 	ImageID      string `json:"image_id,omitempty"`
@@ -94,9 +95,39 @@ type Policy struct {
 	PCR13 map[string]string `json:"pcr13,omitempty"`
 	// Golden maps bank -> PCR index -> value recorded on a known-good boot.
 	Golden map[string]map[int]string `json:"golden,omitempty"`
+	// GoldenFirmware is the firmware build the golden values were recorded
+	// under; absent in values recorded before vm-manager wrote it.
+	GoldenFirmware *Firmware `json:"golden_firmware,omitempty"`
 	// KubernetesVersion selects the PCR13 entry for the VM whose quote is
 	// verified. The PolicyProvider sets it; policy.json does not carry it.
 	KubernetesVersion string `json:"-"`
+}
+
+// Firmware identifies a build of the firmware code image VMs boot with, as
+// get_host reports it: PCR 0 measures the firmware, so golden values
+// recorded under one build fail to verify under any other.
+type Firmware struct {
+	// SHA256 is the hex digest of the code image, the build's identity.
+	SHA256 string `json:"sha256"`
+	// Package and Version name the package that installed the image, empty
+	// when the package manager does not know it.
+	Package string `json:"package,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+// SameBuild reports whether o is the same firmware build: the digests match.
+func (f Firmware) SameBuild(o Firmware) bool {
+	return strings.EqualFold(f.SHA256, o.SHA256)
+}
+
+// String names the build for messages: package, version and the digest's
+// first 16 hex characters.
+func (f Firmware) String() string {
+	name := strings.TrimSpace(f.Package + " " + f.Version)
+	if name == "" {
+		return "sha256 " + short(f.SHA256)
+	}
+	return name + " (sha256 " + short(f.SHA256) + ")"
 }
 
 // SysextMeasurement is the string vm-kubernetes.service measures into PCR
@@ -134,8 +165,8 @@ func ParsePolicy(raw []byte) (Policy, error) {
 	return p, nil
 }
 
-// Validate requires PCR 11 values for both phase paths and well-formed
-// golden entries in the sha256 bank only.
+// Validate requires PCR 11 values for both phase paths, well-formed golden
+// entries in the sha256 bank only and a firmware digest when one is named.
 func (p Policy) Validate() error {
 	for _, phase := range []string{PhaseInitrd, PhaseReady} {
 		v, ok := p.PCR11[phase]
@@ -152,6 +183,11 @@ func (p Policy) Validate() error {
 		}
 		if err := checkDigest(v); err != nil {
 			return fmt.Errorf("policy: pcr13[%q]: %w", version, err)
+		}
+	}
+	if p.GoldenFirmware != nil {
+		if err := checkDigest(p.GoldenFirmware.SHA256); err != nil {
+			return fmt.Errorf("policy: golden_firmware.sha256: %w", err)
 		}
 	}
 	for bank, values := range p.Golden {
