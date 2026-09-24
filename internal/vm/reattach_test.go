@@ -2,6 +2,7 @@ package vm_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,16 +133,42 @@ func TestLoadReattachResumesStop(t *testing.T) {
 	h.install(v.ID)
 	v = h.ready(v.ID, v.CID)
 
-	// A stop interrupted by the restart: the record says stopping.
-	rec := onDisk(t, v)
-	require.NoError(t, h.svc.Close(h.ctx))
-	rec.State = vm.StateStopping
-	require.NoError(t, vm.WriteJSON(filepath.Join(v.Paths.Dir, vm.RecordFile), rec))
-	h.rt.SetAttachable(v.Processes.QEMU.PID)
-	h.nets = vmtest.NewNetworks(h.ev)
-	h.ev.Reset()
-	h.start()
+	// A stop interrupted by the restart: the record says stopping. The
+	// resumed stop may settle the VM before Load is done with it, so what
+	// Load logs is what the reattach found.
+	const pid = 4242
+	restartStopping := func(v *vm.VM) *logBuffer {
+		t.Helper()
+		rec := onDisk(t, v)
+		require.NoError(t, h.svc.Close(h.ctx))
+		rec.State = vm.StateStopping
+		rec.Processes.QEMU.PID = pid
+		require.NoError(t, vm.WriteJSON(filepath.Join(v.Paths.Dir, vm.RecordFile), rec))
+		h.rt.SetAttachable(pid)
+		h.nets = vmtest.NewNetworks(h.ev)
+		h.logs = &logBuffer{}
+		h.ev.Reset()
+		h.start()
+		return h.logs
+	}
+	reattached := fmt.Sprintf(`msg="vm reattached" id=%s state=stopping pid=%d`, v.ID, pid)
+
+	logs := restartStopping(v)
 	after := h.waitState(v.ID, vm.StateStopped)
 	assert.Contains(t, h.ev.List(), "qemu.stop", "the stop is resumed")
 	assert.Nil(t, after.Processes)
+	assert.Contains(t, logs.String(), reattached)
+
+	// The same with a QEMU that exits while it is reattached: its
+	// supervisor settles the record right away, concurrently with Load.
+	_, err := h.svc.Start(h.ctx, v.ID)
+	require.NoError(t, err)
+	h.waitInstances(4)
+	v = h.ready(v.ID, v.CID)
+	h.rt.SetOnAttach(func(i *vmtest.Instance) { i.Exit(0) })
+	logs = restartStopping(v)
+	after = h.waitState(v.ID, vm.StateStopped)
+	assert.Nil(t, after.Processes)
+	assert.Equal(t, 0, h.tpm.Running())
+	assert.Contains(t, logs.String(), reattached)
 }

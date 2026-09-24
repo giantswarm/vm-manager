@@ -294,14 +294,15 @@ func (s *Service) Load(ctx context.Context) error {
 
 // reattachOrStop picks the processes of a VM recorded live back up, or
 // settles the record as stopped with the reason when that is not possible.
+// A reattached VM is its supervisor's from then on: a resumed stop or an
+// exit may already have settled it.
 func (s *Service) reattachOrStop(ctx context.Context, e *entry) {
 	err := s.reattach(ctx, e)
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err == nil {
-		s.log.Info("vm reattached", "id", e.rec.ID, "state", e.rec.State, "pid", e.proc.inst.PID())
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.log.Warn("vm not reattached", "id", e.rec.ID, "state", e.rec.State, "err", err)
 	e.rec.LastError = fmt.Sprintf("vm-manager restarted while the VM was %s and could not reattach to its QEMU (%v); start the VM again", e.rec.State, err)
 	e.rec.State = StateStopped
