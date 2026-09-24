@@ -22,7 +22,8 @@ import (
 // that was in flight is resumed. The record's state is left as it was.
 //
 // Load calls it before any request is served and before the entry is in
-// use, so the record is read without the lock; the caller settles a
+// use, so the record is read without the lock, up to the handover to the
+// supervisor, which may settle it right away; the caller settles a
 // failure.
 func (s *Service) reattach(ctx context.Context, e *entry) (err error) {
 	rec := &e.rec
@@ -70,12 +71,14 @@ func (s *Service) reattach(ctx context.Context, e *entry) (err error) {
 	if rec.Phase == qemu.PhaseBoot {
 		p.notify = s.opts.Notify.Subscribe(rec.CID)
 	}
+	s.log.Info("vm reattached", "id", rec.ID, "state", rec.State, "pid", inst.PID())
+	id, stopping := rec.ID, rec.State == StateStopping
 	s.mu.Lock()
 	e.proc = p
 	s.mu.Unlock()
 	s.supervise(e, p)
-	if rec.State == StateStopping {
-		go s.stopProcess(s.ctx, rec.ID, p)
+	if stopping {
+		go s.stopProcess(s.ctx, id, p)
 	}
 	return nil
 }

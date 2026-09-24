@@ -61,9 +61,30 @@ type harness struct {
 	attestor imds.Attestor
 	// detach is the Options.DetachOnClose of the next start.
 	detach bool
+	// logs, when set, receives the service log of the next start.
+	logs *logBuffer
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// logBuffer collects a service log for assertions: the service writes it
+// from its goroutines while the test reads it.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // metricsRecorder is the harness' vm.Metrics: it keeps what the service
 // reports so the tests can assert the hooks fire on the right transitions.
@@ -134,6 +155,10 @@ func newHarness(t *testing.T) *harness {
 // start builds the vm.Service (again) on the harness' state and fakes.
 func (h *harness) start() {
 	h.t.Helper()
+	logger := quiet()
+	if h.logs != nil {
+		logger = slog.New(slog.NewTextHandler(h.logs, nil))
+	}
 	svc, err := vm.New(vm.Options{
 		StateDir:         h.stateDir,
 		Images:           h.imgs,
@@ -147,7 +172,7 @@ func (h *harness) start() {
 		OVMFCode:         filepath.Join(h.imageDir, "OVMF_CODE.fd"),
 		OVMFVarsTemplate: filepath.Join(h.imageDir, "OVMF_VARS.fd"),
 		Region:           "host1",
-		Logger:           quiet(),
+		Logger:           logger,
 		Clock:            h.clock,
 		Metrics:          h.metrics,
 	})
