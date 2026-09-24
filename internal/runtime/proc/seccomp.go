@@ -14,7 +14,7 @@ import (
 // every other system call. The processes it guards are native binaries, and
 // io_uring_setup has the same number (425) on amd64, arm64 and their 32-bit
 // compat ABIs, so the program needs no architecture check.
-var ioUringDenyFilter = []unix.SockFilter{
+var ioUringDenyFilter = [...]unix.SockFilter{
 	{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0}, // seccomp_data.nr
 	{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: unix.SYS_IO_URING_SETUP},
 	{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
