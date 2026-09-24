@@ -245,9 +245,10 @@ release before it pushes and signs the guest image artifact: the `guest-image` j
 image with what the release's container image measures (its OVMF code and variable
 store, its virtio-net option ROM) and its vm-manager binary: a learn-mode boot,
 `vm-manager image golden`, then a fresh VM that must verify against the recorded values
-with nothing learned. The emulator, which no PCR measures, is the e2e runner's (Ubuntu
-24.04's QEMU 8.2 and swtpm), because the image's QEMU 10.2 stalls the vTPM on most CI
-boots (#84). A pod of a release therefore verifies both quotes of its first VM without a
+with nothing learned. The emulator, which no PCR measures, is Ubuntu 24.04's QEMU 8.2
+with the PPA's swtpm in a recorder container, until the recorder moves to the image's own
+QEMU 10.2 (whose io_uring main loop stalled the vTPM, #84, and which vm-manager keeps off
+io_uring since v0.23.4). A pod of a release therefore verifies both quotes of its first VM without a
 learn-mode boot, and a release that moves the firmware ships the values of the new
 build.
 

@@ -22,11 +22,14 @@
 # The golden values follow the container image (PCR 0 measures its pinned
 # ovmf-generic, PCR 2 its QEMU's virtio-net option ROM) and the guest image
 # (PCRs 4 and 13), so they are recorded after push-to-registries-release from
-# that image's firmware, option ROM and binary, booted on the e2e runner's QEMU
-# and swtpm (the image's QEMU 10.2 stalls the vTPM, giantswarm/vm-manager#84),
-# on a machine with /dev/kvm: CircleCI's android machine image is the one with
-# nested virtualization, Ubuntu 24.04 like the e2e runner. The version and the
-# vm-manager binary come from the workspace push-to-registries-release leaves
+# that image's firmware, option ROM and binary, booted on Ubuntu 24.04's QEMU
+# 8.2 with the PPA's swtpm in the script's recorder container, until it moves
+# to the image's own stack (since v0.23.4 vm-manager keeps QEMU 10.2 off the
+# io_uring main loop that stalled the vTPM, giantswarm/vm-manager#84), on a
+# machine with /dev/kvm: CircleCI's android machine image (Ubuntu 24.04) is
+# the one with nested virtualization; the e2e workflow runs on Ubuntu 26.04.
+# The version and the vm-manager binary come from the workspace
+# push-to-registries-release leaves
 # (.build_version, go-build's vm-manager-linux-amd64), so the job itself does
 # not depend on the ref it runs for.
 # Tags only: branch builds keep the GitHub Actions image and KVM e2e workflows

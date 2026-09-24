@@ -174,7 +174,9 @@ jobs:
       - name: Install QEMU, swtpm and OVMF
         # All three from the Ubuntu archive. internal/tpm passes swtpm's
         # `terminate` ctrl option (0.8+) so an emulator ends with the QEMU it
-        # served; 26.04 ships swtpm 0.10, so no PPA is needed.
+        # served; 26.04 ships swtpm 0.10, so no PPA is needed. Its QEMU 10.2
+        # runs with the io_uring main loop off: vm-manager denies the QEMU
+        # process io_uring_setup (seccomp), which lost TPM commands (#84).
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf

@@ -340,7 +340,10 @@ of a manual run reuses that run's artifact instead. `test` enables `/dev/kvm` (u
 `99-kvm4all.rules`, mode 0666) and `vhost_vsock` (`modprobe`, chmod), installs `qemu-system-x86`
 (10.2), `swtpm` (0.10; `internal/tpm` passes its `terminate` ctrl option, swtpm 0.8+) and `ovmf`
 from the Ubuntu archive and unloads Ubuntu's AppArmor profile for swtpm, which denies sockets and
-state outside its allowed paths (the per-test directories under `/mnt/e2e` are). The harness
+state outside its allowed paths (the per-test directories under `/mnt/e2e` are). QEMU 10.2's
+io_uring main loop loses TPM emulator commands (#84); vm-manager keeps it off by denying the QEMU
+process `io_uring_setup` (a seccomp filter, `SystemCallFilter=` under the systemd launcher), so
+QEMU falls back to epoll. The harness
 dials ssh over AF_VSOCK from Go, so the host needs no `systemd-ssh-proxy`, and vm-manager falls
 back to file-backed volumes on a host without a systemd storage provider. On a QEMU older than
 9.2 (Ubuntu 24.04's 8.2) `internal/runtime/qemu` passes the network's `-netdev stream` re-dial

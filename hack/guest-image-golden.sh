@@ -17,10 +17,11 @@
 # and 13), separators (3, 6). All of them come from <vm-manager-image> — the
 # image's OVMF_CODE_4M.fd, OVMF_VARS_4M.fd and efi-virtio.rom, mounted where
 # the pod has them, and the image's own vm-manager binary. The emulator that
-# boots them is not measured, and the image's QEMU 10.2 loses a firmware TPM
-# command on most boots under nested virtualization (giantswarm/vm-manager#84),
-# so the VMs run on the e2e runner's stack instead: Ubuntu 24.04's QEMU 8.2 and
-# the swtpm PPA the e2e workflow installs, in a recorder container.
+# boots them is not measured, so the VMs run in a recorder container on
+# Ubuntu 24.04's QEMU 8.2 with swtpm from its PPA. The image's own QEMU 10.2
+# lost firmware TPM commands in its io_uring main loop
+# (giantswarm/vm-manager#84); since v0.23.4 vm-manager keeps QEMU off io_uring,
+# so the recorder can move to the image's stack.
 #
 #  1. learn: a server with --attestation-learn-golden over a policy without
 #     golden values boots one VM with attestation required to ready;
@@ -84,9 +85,9 @@ docker rm "$cid" >/dev/null
 log "recording the golden PCR values of $ref with the inputs of $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "$image"):"
 (cd "$work" && sha256sum OVMF_CODE_4M.fd OVMF_VARS_4M.fd efi-virtio.rom) >&2
 
-# The recorder: the e2e runner's userspace (.github/workflows/e2e.yml installs
-# the same packages), on 24.04 until giantswarm/vm-manager#84 is fixed. Its
-# own OVMF (a recommendation) stays out, so only the image's firmware exists.
+# The recorder: Ubuntu 24.04's QEMU 8.2 and the PPA's swtpm, until it moves to
+# the vm-manager image's own stack (the e2e workflow runs on 26.04). Its own
+# OVMF (a recommendation) stays out, so only the image's firmware exists.
 docker build -q -t "$recorder" - >/dev/null <<'EOF'
 FROM ubuntu:24.04
 RUN apt-get update \
