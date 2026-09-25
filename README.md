@@ -340,6 +340,11 @@ stale a guest's data is. `get_vm_metrics` is the per-VM summary of both sides;
 `GET /api/v1/vms/{id}/report` is the raw upload. `internal/metrics` documents the mapping
 and the cardinality policy.
 
+Traces go out over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (the chart's
+`observability.otel.endpoint`); the standard `OTEL_*` variables configure the exporter and the
+sampler. Spans: `POST /mcp`, `mcp.<method>` per JSON-RPC request (`gen_ai.tool.name` on
+`mcp.tools/call`) and `tool.<name>` per tool handler.
+
 ## Identity
 
 The caller, not the host user. With `--enable-oauth` vm-manager is an OAuth 2.1 resource

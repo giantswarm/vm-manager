@@ -87,6 +87,12 @@ chart installs it as `components.vm-manager`.
 | serviceMonitor.labels | object | `{}` | Labels on the ServiceMonitor, beside the chart's own. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`; a monitor without it writes to no tenant. |
 | resources | object | `{"requests":{"cpu":"250m","memory":"512Mi"}}` | Container resources. The VMs are QEMU processes inside this container, so a memory limit bounds the sum of their memory too; none by default. |
 | logging.verbose | bool | `false` | Enable debug logging. |
+| observability.otel.endpoint | string | `""` | OTLP collector the server exports its traces to (`OTEL_EXPORTER_OTLP_ENDPOINT`), e.g. `http://otlp-gateway.kube-system.svc:4317` for gRPC. Empty exports nothing; the W3C propagator still honours an inbound `traceparent`. |
+| observability.otel.protocol | string | `"grpc"` | OTLP protocol: `grpc` or `http/protobuf` (`OTEL_EXPORTER_OTLP_PROTOCOL`). |
+| observability.otel.headers | string | `""` | Extra OTLP headers as `key=value,...` (`OTEL_EXPORTER_OTLP_HEADERS`), e.g. `X-Scope-OrgID=giantswarm` for the collector's tenant. |
+| observability.otel.resourceAttributes | string | `""` | Extra resource attributes as `key=value,...`, appended to the pod's `k8s.pod.name`, `k8s.namespace.name` and `k8s.node.name` (`OTEL_RESOURCE_ATTRIBUTES`). |
+| observability.otel.sampler | string | `"parentbased_traceidratio"` | Trace sampler (`OTEL_TRACES_SAMPLER`). Parent-based: a call arriving with a sampled `traceparent` (muster's) is always kept, a root span is sampled at `samplerArg`. |
+| observability.otel.samplerArg | string | `"0.1"` | Sampler argument (`OTEL_TRACES_SAMPLER_ARG`): the ratio of root spans kept. |
 | extraArgs | list | `[]` | Extra container arguments. |
 | extraEnv | list | `[]` | Extra environment variables. |
 | nodeSelector | object | `{}` | Node selector: the KVM node(s) — a label such as `kvm.giantswarm.io/enabled: "true"` on nodes that expose /dev/kvm. |
