@@ -12,7 +12,10 @@
 #  3. systemd-sysupdate --component=kubernetes update <version> downloads
 #     kubernetes_<version>.raw from the vm-manager IMDS directory, verifying
 #     SHA256SUMS.gpg against /etc/systemd/import-pubring.pgp; an already
-#     present version is a no-op.
+#     present version is a no-op. It runs from /usr/lib/systemd, like
+#     systemd-imds and systemd-pcrextend: systemd 262 no longer installs it in
+#     /usr/bin (updatectl is the command there), and images/scripts/verify
+#     checks every tool these scripts run is in the image.
 #  4. systemd-sysext refresh merges it (a no-op when systemd-sysext.service
 #     already merged this very file early in the boot). The extension carries
 #     EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the manager and the
@@ -78,7 +81,7 @@ else
         # EPOCHREALTIME is seconds with six decimals; strip the point for
         # microsecond integer arithmetic (the base image has no awk or bc).
         start=${EPOCHREALTIME/./}
-        systemd-sysupdate --component=kubernetes update "$version"
+        /usr/lib/systemd/systemd-sysupdate --component=kubernetes update "$version"
         [[ -s "$extensions/$name" ]] || fail "systemd-sysupdate did not install $name"
         ms=$(( (${EPOCHREALTIME/./} - start) / 1000 ))
         log "pulled $name ($(stat -c %s "$extensions/$name") bytes) in $((ms / 1000)).$(printf '%03d' $((ms % 1000))) s"

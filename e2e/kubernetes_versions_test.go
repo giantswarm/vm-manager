@@ -147,7 +147,7 @@ func TestKubernetesVersions(t *testing.T) {
 // extension-release of the merged tree is this version's.
 func assertOtherVersionsUntouched(ctx context.Context, t *testing.T, g *guest, n *node, nodes []*node) {
 	t.Helper()
-	list := g.sh(ctx, "systemd-sysupdate --component=kubernetes list --no-pager 2>&1 || true")
+	list := g.sh(ctx, "/usr/lib/systemd/systemd-sysupdate --component=kubernetes list --no-pager 2>&1 || true")
 	t.Logf("systemd-sysupdate --component=kubernetes list:\n%s", list)
 	journal := g.sh(ctx, "journalctl -b -o cat -u "+kubernetesUnit+" --no-pager")
 	assert.Len(t, pulledLine.FindAllString(journal, -1), 1, "one download")
