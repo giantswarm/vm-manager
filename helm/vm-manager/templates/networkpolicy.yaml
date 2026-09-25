@@ -50,5 +50,22 @@ spec:
         - protocol: TCP
           port: 5556
     {{- end }}
+    {{- with include "vm-manager.otlpTarget" . }}
+    {{- $target := splitList ":" . }}
+    # The OTLP collector (observability.otel.endpoint): its namespace for an
+    # in-cluster Service, any address otherwise.
+    - to:
+        {{- with first $target }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ last $target }}
+    {{- end }}
     {{- end }}
 {{- end }}

@@ -157,6 +157,9 @@ spec:
           env:
             - name: VM_MANAGER_STATE_DIR
               value: {{ include "vm-manager.stateDir" . }}
+            {{- with include "vm-manager.otelEnv" . | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.oauth.enabled }}
             {{- if eq .Values.oauth.provider "google" }}
             {{- if .Values.oauth.google.clientID }}

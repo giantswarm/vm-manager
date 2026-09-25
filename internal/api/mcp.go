@@ -136,10 +136,11 @@ type Info struct {
 // API as tools. Results are JSON text with the same shapes as the REST bodies.
 // build is what get_info and the MCP server identity report as the version.
 func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer("vm-manager", build.Version,
+	opts := append(tracingOptions(),
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions(instructions),
 	)
+	s := mcpserver.NewMCPServer("vm-manager", build.Version, opts...)
 	t := &tools{svc: svc, build: build}
 
 	s.AddTool(newTool(ToolGetInfo,

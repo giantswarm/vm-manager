@@ -12,6 +12,7 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/giantswarm/vm-manager/internal/api"
 )
@@ -81,13 +82,23 @@ func New(cfg Config, svc api.Services, mcpSrv *mcpserver.MCPServer, log *slog.Lo
 
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           otelhttp.NewHandler(mux, "vm-manager", otelhttp.WithFilter(traced)),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: MCP streams and long VM operations outlive any
 		// fixed value.
 		IdleTimeout: 120 * time.Second,
 	}
 	return s, nil
+}
+
+// traced leaves the probes and the Prometheus exposition out of the traces:
+// they are called every few seconds and carry no caller.
+func traced(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/healthz", "/readyz", "/metrics":
+		return false
+	}
+	return true
 }
 
 func ok(w http.ResponseWriter, _ *http.Request) {

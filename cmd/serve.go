@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/giantswarm/mcp-toolkit/tracing"
 	"github.com/spf13/cobra"
 
 	"github.com/giantswarm/vm-manager/internal/api"
@@ -206,6 +207,20 @@ func runServe(ctx context.Context, o *serveOptions) error {
 		return err
 	}
 	bridgeLogrus(log)
+
+	// OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set (the chart's
+	// observability.otel); the W3C propagator either way.
+	shutdownTracing, err := tracing.Init(ctx, tracing.WithServiceName("vm-manager"), tracing.WithServiceVersion(build.Version))
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			log.Warn("tracing shutdown", "error", err)
+		}
+	}()
 
 	reg := metrics.New(metrics.Options{
 		Version:        build.Version,

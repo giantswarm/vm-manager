@@ -144,6 +144,29 @@ for v in 0.1.0 \
   done <<<"$labels"
 done
 
+# OTLP export is opt-in: no OTEL_ variable without observability.otel.endpoint,
+# and with it the exporter, the parent-based sampler and the pod's k8s
+# resource attributes; the policy opens the collector's namespace and port.
+if render | grep -q 'OTEL_'; then
+  fail "the default render sets an OTEL_ variable"
+fi
+otel=$(deployment --set observability.otel.endpoint=http://otlp-gateway.kube-system.svc:4317 --set observability.otel.headers=X-Scope-OrgID=giantswarm)
+for want in \
+  'OTEL_EXPORTER_OTLP_ENDPOINT' 'value: "http://otlp-gateway.kube-system.svc:4317"' \
+  'OTEL_EXPORTER_OTLP_PROTOCOL' 'value: "grpc"' \
+  'OTEL_EXPORTER_OTLP_HEADERS' 'value: "X-Scope-OrgID=giantswarm"' \
+  'OTEL_TRACES_SAMPLER' 'value: "parentbased_traceidratio"' \
+  'OTEL_TRACES_SAMPLER_ARG' 'value: "0.1"' \
+  'value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME)"'; do
+  grep -qF -- "$want" <<<"$otel" || fail "observability.otel.endpoint renders no '$want'"
+done
+otlp_policy=$(render --set networkPolicy.enabled=true --set networkPolicy.guestEgress=false --set observability.otel.endpoint=http://otlp-gateway.kube-system.svc:4317 --show-only templates/networkpolicy.yaml | sed -n '/OTLP collector/,$p')
+grep -q 'kubernetes.io/metadata.name: kube-system' <<<"$otlp_policy" && grep -q 'port: 4317' <<<"$otlp_policy" \
+  || fail "observability.otel.endpoint opens no egress to the collector's namespace on 4317"
+otlp_policy=$(render --set networkPolicy.enabled=true --set networkPolicy.guestEgress=false --set observability.otel.endpoint=https://otlp.example.com --show-only templates/networkpolicy.yaml | sed -n '/OTLP collector/,$p')
+grep -q 'cidr: 0.0.0.0/0' <<<"$otlp_policy" && grep -q 'port: 443' <<<"$otlp_policy" \
+  || fail "an external https collector opens no egress on 443"
+
 # The schema refuses a key the chart does not know.
 if helm template vmm "$CHART" --set bogus=1 >/dev/null 2>&1; then
   fail "values.schema.json accepted an unknown key"
