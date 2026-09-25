@@ -327,10 +327,11 @@ The image build runs in an Arch container because the image is Arch (mkosi 27, s
 erofs-utils, ukify, systemd-measure) and the hosted Ubuntu runner has none of that at the needed
 versions. `--privileged` gives mkosi's sandbox its mount namespaces; the mkosi workspace is
 placed on the runner's bind-mounted temp directory because the sysext's overlayfs cannot stack on
-the container's overlay root. `images/mkosi.cache` (incremental trees) and `~/.cache/mkosi`
-(pacman packages) are cached with `actions/cache`, keyed on the hash of the mkosi configuration
-and scripts plus an ISO-week stamp: within a week the cache is reused (a warm build takes about a
-minute, a cold one three to five), a new week starts from the current Arch repositories.
+the container's overlay root. No mkosi cache is kept between runs: every build installs the
+current Arch repositories (three to five minutes), as the release's CircleCI `guest-image` job
+does, so the nightly e2e boots the package set a release built at the same time ships. A restored
+incremental cache would make mkosi skip the metadata sync and copy its cached trees, freezing the
+package set of the build that seeded it.
 
 `e2e.yml` has three jobs. `plan` decides the suite and where the image comes from: a PR or push
 that touches the image inputs builds it in this run (`image.yml` via `workflow_call`); otherwise
