@@ -11,6 +11,16 @@ name: image
 # namespaces and the sysext's overlayfs; the mkosi workspace lives on the
 # runner's bind-mounted temp directory because overlayfs cannot stack on the
 # container's own overlay root.
+#
+# No mkosi cache survives the job: every build installs the current Arch
+# repositories, as the release's CircleCI guest-image job does
+# (.circleci/custom.yml), so a nightly or a PR touching the image inputs boots
+# the package set a release built at the same time ships. A cache restored
+# with valid incremental trees and cache manifests would make mkosi skip the
+# metadata sync and copy the cached trees, freezing the package set of the
+# build that seeded it. Within the job the incremental cache keeps the second
+# mkosi run (the other KUBERNETES_VERSIONS) on the first one's metadata and
+# base tree.
 
 # Triggered only through e2e.yml (workflow_call, whenever a change touches the
 # image inputs) or by hand: a standalone pull_request/push trigger here would
@@ -41,13 +51,13 @@ jobs:
       image: archlinux:latest
       options: --privileged
     steps:
-      - name: git and zstd for the checkout and the caches
+      - name: git for the checkout
         # Before the checkout: without git, actions/checkout downloads a
         # tarball with no .git, and Make's rev-parse and Go's VCS stamping of
         # vm-agent need one.
         run: |
           pacman-key --init
-          pacman -Syu --noconfirm --needed git zstd
+          pacman -Syu --noconfirm --needed git
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,30 +65,6 @@ jobs:
         # The one list images/README.md documents for the host, shared with
         # hack/guest-image-build.sh (the CircleCI guest-image job).
         run: images/scripts/install-build-deps
-
-      - name: Cache key
-        id: key
-        # Weekly stamp: mkosi's incremental cache freezes the Arch package set
-        # it was built from, so a fresh week starts from the current repos
-        # (restore-keys stay within the week on purpose).
-        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the mkosi caches
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            images/mkosi.cache
-            ~/.cache/mkosi
-          # Folded into one line (equal indentation): the hash of the mkosi
-          # configuration and scripts.
-          key: >-
-            mkosi-${{ steps.key.outputs.week }}-${{
-            hashFiles('images/Makefile', 'images/mkosi.conf', 'images/mkosi.version',
-            'images/mkosi.images/**', 'images/mkosi.initrd.conf/**',
-            'images/mkosi.repart/**', 'images/mkosi.profiles/**',
-            'images/scripts/**') }}
-          restore-keys: |
-            mkosi-${{ steps.key.outputs.week }}-
 
       - name: Build keys, base image and every kubernetes sysext version; verify
         # `make -C images` (all): keys, one mkosi run for base tree, disk
