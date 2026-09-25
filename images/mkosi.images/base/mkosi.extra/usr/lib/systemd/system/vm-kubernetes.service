@@ -21,6 +21,10 @@ After=network-online.target systemd-imds-import.service systemd-sysext.service s
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/vm-manager/kubernetes
+# The reason a pull, merge or measurement failed belongs next to the failed
+# unit on the serial console (get_vm_console, the release job's failure dump).
+StandardOutput=journal+console
+StandardError=journal+console
 # The download is 200 MB from the host over the virtual network, plus the
 # SHA256SUMS.gpg check and the sha256 of the file for the measurement.
 TimeoutStartSec=10min

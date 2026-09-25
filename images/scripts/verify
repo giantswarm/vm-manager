@@ -122,6 +122,37 @@ ok "vm-sysinstall.service enabled, systemd-sysinstall.service masked, sysupdate 
 cmp -s "$tmp/root/etc/systemd/import-pubring.pgp" "$keys/import-pubring.pgp" || fail "import-pubring.pgp differs from $keys"
 ok "/etc/systemd/import-pubring.pgp matches the dev key"
 
+# 5a. Every systemd tool the scripts in /usr/lib/vm-manager run is an
+#     executable in the image: /usr/lib/systemd/<tool> at that path, a bare
+#     systemd-<tool> in /usr/bin. systemd moves its helpers between the two
+#     (262 no longer installs /usr/bin/systemd-sysupdate), and a missing one
+#     otherwise shows only as a failed unit when a VM boots.
+#     runs_in_image <path> follows relative symlinks inside the image.
+runs_in_image() {
+        local p=$1 out="$tmp/tool" target _
+        for _ in 1 2 3 4; do
+                rm -f "$out"
+                fsck.erofs --extract="$out" --no-preserve-owner --path="$p" "$rootfs" >/dev/null 2>&1 || return 1
+                if [[ ! -L "$out" ]]; then
+                        [[ -f "$out" && -x "$out" ]]
+                        return
+                fi
+                target="$(readlink "$out")"
+                [[ "$target" == /* ]] && p="$target" || p="$(realpath -m -s "$(dirname "$p")/$target")"
+        done
+        return 1
+}
+extract /usr/lib/vm-manager
+tools="$(sed -e 's/#.*//' "$tmp/root/usr/lib/vm-manager/"* \
+        | /usr/bin/grep -oE '(^|[;&|(!]|\$\(|then|do|else)[[:space:]]*(/usr/(lib/systemd|bin)/[a-z0-9-]+|systemd-[a-z0-9-]+)' \
+        | /usr/bin/grep -oE '(/usr/(lib/systemd|bin)/[a-z0-9-]+|systemd-[a-z0-9-]+)$' | sort -u)"
+[[ -n "$tools" ]] || fail "found no systemd tool in /usr/lib/vm-manager"
+for t in $tools; do
+        [[ "$t" == /* ]] || t="/usr/bin/$t"
+        runs_in_image "$t" || fail "$t, which /usr/lib/vm-manager runs, is not an executable in the image"
+done
+ok "/usr/lib/vm-manager runs $(tr '\n' ' ' <<<"$tools")all in the image"
+
 # 6. Initrd: networkd + imdsd + generator + our hwdb record.
 zstd -dc "$initrd" 2>/dev/null | cpio -t 2>/dev/null >| "$tmp/initrd.lst" || true
 for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-imdsd usr/lib/systemd/systemd-imds \
