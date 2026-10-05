@@ -79,9 +79,12 @@ func fakeSwtpm(t *testing.T, delay time.Duration, answered *atomic.Int32) func(p
 						return
 					}
 					time.Sleep(time.Until(ready))
-					if _, err := conn.Write(make([]byte, capabilityLen)); err == nil && answered != nil {
+					// Count before writing: Start returns as soon as the
+					// answer arrives, possibly before this goroutine runs on.
+					if answered != nil {
 						answered.Add(1)
 					}
+					_, _ = conn.Write(make([]byte, capabilityLen))
 				}()
 			}
 		}()
