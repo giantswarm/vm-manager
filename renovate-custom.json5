@@ -23,6 +23,16 @@
   ],
   packageRules: [
     {
+      // gvisor-tap-vsock is taken from main (a v0.8.9-0.<date>-<sha>
+      // pseudo-version) for a gvisor that carries CVE-2026-96812's fix. v0.8.9
+      // sorts above it, but its UDP forwarder predates gvisor's handler change
+      // and does not build against that gvisor.
+      description: 'gvisor-tap-vsock: never back to v0.8.9, which does not build against a gvisor with the CVE-2026-96812 fix',
+      matchDatasources: ['go'],
+      matchPackageNames: ['github.com/containers/gvisor-tap-vsock'],
+      allowedVersions: '>0.8.9',
+    },
+    {
       // ovmf-generic is the firmware every VM boots with and PCR 0 measures
       // it: golden PCR values recorded under one build fail under the next.
       // The subject is the release note, so it says so.
