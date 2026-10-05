@@ -16,7 +16,7 @@ FROM ubuntu:26.04
 # pull request; once the archive supersedes the pinned build, apt no longer
 # finds it and the image build fails until that pull request merges.
 # renovate: suite=resolute-updates depName=ovmf-generic
-ARG OVMF_GENERIC_VERSION=2025.11-3ubuntu7.2
+ARG OVMF_GENERIC_VERSION=2025.11-3ubuntu7.3
 # qemu-system-x86: qemu-system-x86_64 10.2; swtpm 0.10 (the vTPM, one per VM);
 # ovmf-generic: the firmware, a location the firmware probe knows;
 # openssh-client: exec_vm; ca-certificates: the identity provider's and the
