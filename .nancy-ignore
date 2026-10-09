@@ -1,2 +1,3 @@
 # Repository-specific nancy ignores, one per line, always time-boxed:
 # CVE-YYYY-NNNNN until=YYYY-MM-DD # module@version: why it cannot be fixed, tracked in giantswarm/vm-manager#NN
+CVE-2026-96812 until=2026-11-09 # gvisor.dev/gvisor@v0.0.0-20261005183124-7d7fec1ac6f4: OSS Index flags every pseudo-version, the pinned commit contains the fix 573a9e73 and only netstack is linked, tracked in giantswarm/vm-manager#134
