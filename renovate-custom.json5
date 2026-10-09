@@ -33,6 +33,16 @@
       allowedVersions: '>0.8.9',
     },
     {
+      // gvisor is taken by hand from its `go` branch, the generated tree Go
+      // builds. The go datasource's digest update follows the proxy's @latest,
+      // a commit on master, whose packages do not build as a Go module.
+      description: 'gvisor: no digest updates; a new commit is taken by hand from its go branch',
+      matchDatasources: ['go'],
+      matchPackageNames: ['gvisor.dev/gvisor'],
+      matchUpdateTypes: ['digest'],
+      enabled: false,
+    },
+    {
       // ovmf-generic is the firmware every VM boots with and PCR 0 measures
       // it: golden PCR values recorded under one build fail under the next.
       // The subject is the release note, so it says so.
