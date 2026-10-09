@@ -13,7 +13,7 @@ require (
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.10
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
-	github.com/mark3labs/mcp-go v1.2.0
+	github.com/mark3labs/mcp-go v1.2.1
 	github.com/mark3labs/mcp-go/otel v0.54.0
 	github.com/mdlayher/vsock v1.3.0
 	github.com/opencontainers/image-spec v1.1.1
