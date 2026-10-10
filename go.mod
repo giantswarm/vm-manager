@@ -11,7 +11,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
-	github.com/google/go-tpm-tools v0.4.10
+	github.com/google/go-tpm-tools v0.4.11
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
 	github.com/mark3labs/mcp-go v1.2.1
 	github.com/mark3labs/mcp-go/otel v0.54.0

@@ -57,8 +57,8 @@ github.com/google/go-tdx-guest v0.3.2-0.20250814004405-ffb0869e6f4d h1:Ff8goEP/u
 github.com/google/go-tdx-guest v0.3.2-0.20250814004405-ffb0869e6f4d/go.mod h1:uHy3VaNXNXhl0fiPxKqTxieeouqQmW6A0EfLcaeCYBk=
 github.com/google/go-tpm v0.9.8 h1:slArAR9Ft+1ybZu0lBwpSmpwhRXaa85hWtMinMyRAWo=
 github.com/google/go-tpm v0.9.8/go.mod h1:h9jEsEECg7gtLis0upRBQU+GhYVH6jMjrFxI8u6bVUY=
-github.com/google/go-tpm-tools v0.4.10 h1:yKN4HVEaYXYR12gwRSCZ/Ej+5HYP8NClIKGAsc4/mC0=
-github.com/google/go-tpm-tools v0.4.10/go.mod h1:5m0NX6bdl0DmD9R2cVBQROaKOeSSFL7FPcgeuQsXkLI=
+github.com/google/go-tpm-tools v0.4.11 h1:+Qgcs+l0XcWXFMU3e2HJJKnlEQZXVrtqr3WaJPVlZaE=
+github.com/google/go-tpm-tools v0.4.11/go.mod h1:rSCvZFOXuv7Ie25XfFHWf2JGG6NVZYNSfNyxo8AEjlY=
 github.com/google/gopacket v1.1.19 h1:ves8RnFZPGiFnTS0uPQStjwru6uO6h+nlr9j6fL7kF8=
 github.com/google/gopacket v1.1.19/go.mod h1:iJ8V8n6KS+z2U1A8pUwu8bW5SyEMkXJB8Yo/Vo+TKTo=
 github.com/google/jsonschema-go v0.4.2 h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbcqoRA8=
