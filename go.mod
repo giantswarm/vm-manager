@@ -2,7 +2,7 @@ module github.com/giantswarm/vm-manager
 
 go 1.26.3
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
