@@ -21,9 +21,9 @@ import (
 // Prefix is the REST base path.
 const Prefix = "/api/v1"
 
-// maxBodyBytes bounds request bodies; user_data (Ignition JSON with embedded
-// certificates) is the largest field.
-const maxBodyBytes = 8 << 20
+// MaxBodyBytes bounds request bodies, the REST API's and the MCP endpoint's;
+// user_data (Ignition JSON with embedded certificates) is the largest field.
+const MaxBodyBytes = 8 << 20
 
 // REST serves the JSON API.
 type REST struct {
@@ -219,7 +219,7 @@ func (h *REST) notFound(w http.ResponseWriter, r *http.Request) {
 // decode reads a JSON body into v; unknown fields and oversized bodies are
 // invalid requests. It answers the error itself and returns false.
 func (h *REST) decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

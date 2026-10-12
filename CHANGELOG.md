@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP endpoint refuses a request body larger than 8 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12) (giantswarm/vm-manager#151).
+
 ### Added
 
 - OTLP traces (giantswarm/giantswarm#36711). The server exports its spans when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, through `github.com/giantswarm/mcp-toolkit/tracing`: a server span per HTTP request (`POST /mcp`; the probes and `/metrics` are not traced), an `mcp.<method>` server span per JSON-RPC request under it carrying `mcp.method`, `mcp.tool.name` and `gen_ai.tool.name` on `mcp.tools/call`, and a `tool.<name>` span around each tool handler. An inbound `traceparent` (muster's) joins the caller's trace. The chart takes `observability.otel.{endpoint,protocol,headers,resourceAttributes,sampler,samplerArg}` and renders the `OTEL_*` env only with an endpoint: gRPC, `parentbased_traceidratio` at `0.1`, the pod's `k8s.pod.name`, `k8s.namespace.name` and `k8s.node.name` as resource attributes; with `networkPolicy.enabled` and `guestEgress` off, the policy opens the collector's namespace and port (any address for a host that is not an in-cluster Service).
