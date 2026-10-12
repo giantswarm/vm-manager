@@ -76,9 +76,10 @@ func New(cfg Config, svc api.Services, mcpSrv *mcpserver.MCPServer, log *slog.Lo
 	api.NewREST(svc, log).Register(rest)
 	mux.Handle(api.Prefix+"/", s.guard(rest))
 
-	mux.Handle(cfg.MCPPath, s.guard(mcpserver.NewStreamableHTTPServer(mcpSrv,
-		mcpserver.WithEndpointPath(cfg.MCPPath),
-	)))
+	// mcp-go reads a POST body whole before validating it
+	// (CVE-2026-108859): the REST bound keeps that read small.
+	mcpHandler := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithEndpointPath(cfg.MCPPath))
+	mux.Handle(cfg.MCPPath, http.MaxBytesHandler(s.guard(mcpHandler), api.MaxBodyBytes))
 
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
