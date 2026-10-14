@@ -75,8 +75,8 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/inetaf/tcpproxy v0.0.0-20260515195445-c159a6051109 h1:H3ztMPCBcyG60Ks0plTncU3Vs6jIrxhn3nEThpMEpo4=
 github.com/inetaf/tcpproxy v0.0.0-20260515195445-c159a6051109/go.mod h1:Di7LXRyUcnvAcLicFhtM9/MlZl/TNgRSDHORM2c6CMI=
-github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae h1:nXGg65fXsylSUTNNWwvHuQsXev7mhIzQTnZREPTbWzs=
-github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae/go.mod h1:tGfUTcnFYGYvVNCaZZhwlJySU/fQQxh9TmpsFzWXnnY=
+github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a h1:07pMKu9gWaSFnDe817VcMl14qJfWCz1vm3uB+7YmyPE=
+github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a/go.mod h1:tGfUTcnFYGYvVNCaZZhwlJySU/fQQxh9TmpsFzWXnnY=
 github.com/josharian/native v1.1.0 h1:uuaP0hAbW7Y4l0ZRQ6C9zfb7Mg1mbFKry/xzDAfmtLA=
 github.com/josharian/native v1.1.0/go.mod h1:7X/raswPFr05uY3HiLlYeyQntB6OO7E/d2Cu7qoaN2w=
 github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=
