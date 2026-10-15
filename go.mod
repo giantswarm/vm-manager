@@ -8,7 +8,7 @@ require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/giantswarm/mcp-oauth v1.7.2
 	github.com/giantswarm/mcp-toolkit v0.2.16
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.11
