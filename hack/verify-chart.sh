@@ -89,13 +89,21 @@ got=$(args)
 if echo "$got" | grep -q -- '--enable-oauth\|--dex-\|--oauth-'; then fail "oauth disabled renders OAuth flags: '$got'"; fi
 
 # The MCPServer: the tool-group label the platform tiers by, the in-cluster
-# URL, the auth block with the audiences muster requests at login.
+# URL, the auth block with the audiences muster requests at login, the display
+# name the Dev Portal shows (none when muster.mcpServer.displayName is empty).
 mcp=$(render "${DEX[@]}" --set muster.mcpServer.enabled=true --set-json 'muster.mcpServer.auth.requiredAudiences=["kubernetes"]' --show-only templates/mcpserver.yaml)
 echo "$mcp" | grep -q '^ *agent-platform.giantswarm.io/tool-group: agent-platform$' || fail "the MCPServer lacks the agent-platform tool-group label"
 echo "$mcp" | grep -q '^ *muster.giantswarm.io/type: vm-manager$' || fail "the MCPServer lacks the muster type label"
 echo "$mcp" | grep -q 'url: http://vmm-vm-manager.default.svc.cluster.local:8080/mcp' || fail "the MCPServer URL is not the in-cluster Service"
 echo "$mcp" | grep -q 'forwardToken: true' || fail "the MCPServer does not forward the token"
 echo "$mcp" | grep -q -- '^ *- kubernetes$' || fail "the MCPServer does not list requiredAudiences"
+echo "$mcp" | grep -q '^    ui.giantswarm.io/display-name: "VM Manager"$' || fail "the MCPServer lacks the display name the Dev Portal shows"
+got=$(render --set muster.mcpServer.enabled=true --set muster.mcpServer.displayName=VMs --show-only templates/mcpserver.yaml)
+echo "$got" | grep -q '^    ui.giantswarm.io/display-name: "VMs"$' || fail "muster.mcpServer.displayName does not set the display name"
+got=$(render --set muster.mcpServer.enabled=true --set muster.mcpServer.displayName= --show-only templates/mcpserver.yaml)
+if echo "$got" | grep -q 'annotations:'; then
+  fail "an empty muster.mcpServer.displayName renders annotations"
+fi
 if render --set muster.mcpServer.enabled=true --show-only templates/mcpserver.yaml | grep -q 'auth:'; then
   fail "the MCPServer carries an auth block without oauth.enabled"
 fi

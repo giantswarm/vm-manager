@@ -333,7 +333,9 @@ What the chart renders, and why:
 - The **muster `MCPServer`** (`muster.mcpServer.enabled`): `streamable-http` to the
   Service, `auth.type: oauth` with `forwardToken: true`, labelled
   `agent-platform.giantswarm.io/tool-group: agent-platform` — the platform's own management
-  surface, next to agent-manager and model-manager.
+  surface, next to agent-manager and model-manager — and annotated
+  `ui.giantswarm.io/display-name: VM Manager` (`muster.mcpServer.displayName`), the name the
+  Dev Portal shows.
 - The guests' traffic leaves through the pod's network (userspace NAT), so a network
   policy on the pod must admit their destinations: the chart's own policy
   (`networkPolicy.enabled`) admits every egress destination unless `guestEgress: false`.
