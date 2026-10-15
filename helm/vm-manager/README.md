@@ -66,6 +66,7 @@ chart installs it as `components.vm-manager`.
 | oauth.allowPublicClientRegistration | bool | `false` | Accept unauthenticated dynamic client registration (labs only). |
 | muster.mcpServer.enabled | bool | `false` | Register this server with muster by rendering an `mcpservers.muster.giantswarm.io` CR in the release namespace. Tools then appear as `x_<name>_<tool>`. The CR carries `agent-platform.giantswarm.io/tool-group: agent-platform`: the platform's own management surface, next to agent-manager and model-manager. |
 | muster.mcpServer.name | string | `"vm-manager"` | MCPServer CR name (drives the tool prefix). |
+| muster.mcpServer.displayName | string | `"VM Manager"` | Human-friendly name the Dev Portal shows for this server, rendered as the `ui.giantswarm.io/display-name` annotation. Empty renders none. |
 | muster.mcpServer.autoStart | bool | `true` | Start the server connection when muster initializes. |
 | muster.mcpServer.description | string | `"VM provisioning on the platform's KVM node (images, networks, VMs with measured boot and attestation); call get_host first, then list_images and list_networks, then create_vm"` | Human-readable description shown by muster. |
 | muster.mcpServer.labels | object | `{}` | Extra labels on the MCPServer CR (merged last: they may override the tool-group label). |
