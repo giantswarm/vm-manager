@@ -97,12 +97,12 @@ echo "$mcp" | grep -q '^ *muster.giantswarm.io/type: vm-manager$' || fail "the M
 echo "$mcp" | grep -q 'url: http://vmm-vm-manager.default.svc.cluster.local:8080/mcp' || fail "the MCPServer URL is not the in-cluster Service"
 echo "$mcp" | grep -q 'forwardToken: true' || fail "the MCPServer does not forward the token"
 echo "$mcp" | grep -q -- '^ *- kubernetes$' || fail "the MCPServer does not list requiredAudiences"
-echo "$mcp" | grep -q '^    ui.giantswarm.io/display-name: "VM Manager"$' || fail "the MCPServer lacks the display name the Dev Portal shows"
-got=$(render --set muster.mcpServer.enabled=true --set muster.mcpServer.displayName=VMs --show-only templates/mcpserver.yaml)
-echo "$got" | grep -q '^    ui.giantswarm.io/display-name: "VMs"$' || fail "muster.mcpServer.displayName does not set the display name"
+echo "$mcp" | grep -qxF '    ui.giantswarm.io/display-name: "VM Manager"' || fail "the MCPServer lacks the display name the Dev Portal shows"
+got=$(render --set muster.mcpServer.enabled=true --set-string 'muster.mcpServer.displayName=VMs: all of them' --show-only templates/mcpserver.yaml)
+echo "$got" | grep -qxF '    ui.giantswarm.io/display-name: "VMs: all of them"' || fail "muster.mcpServer.displayName does not set the display name"
 got=$(render --set muster.mcpServer.enabled=true --set muster.mcpServer.displayName= --show-only templates/mcpserver.yaml)
-if echo "$got" | grep -q 'annotations:'; then
-  fail "an empty muster.mcpServer.displayName renders annotations"
+if echo "$got" | grep -qF 'ui.giantswarm.io/display-name'; then
+  fail "an empty muster.mcpServer.displayName renders the display name"
 fi
 if render --set muster.mcpServer.enabled=true --show-only templates/mcpserver.yaml | grep -q 'auth:'; then
   fail "the MCPServer carries an auth block without oauth.enabled"
