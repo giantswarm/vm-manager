@@ -9,49 +9,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The MCP endpoint refuses a request body larger than 8 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12) (giantswarm/vm-manager#151).
+## [0.25.0-rc.1] - 2026-10-15
 
 ### Added
 
 - Chart: the muster `MCPServer` carries the `ui.giantswarm.io/display-name` annotation, the name the Dev Portal shows for the server (#164, for giantswarm/backstage#3012): new value `muster.mcpServer.displayName`, default `VM Manager`. Empty renders no annotation.
-- OTLP traces (giantswarm/giantswarm#36711). The server exports its spans when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, through `github.com/giantswarm/mcp-toolkit/tracing`: a server span per HTTP request (`POST /mcp`; the probes and `/metrics` are not traced), an `mcp.<method>` server span per JSON-RPC request under it carrying `mcp.method`, `mcp.tool.name` and `gen_ai.tool.name` on `mcp.tools/call`, and a `tool.<name>` span around each tool handler. An inbound `traceparent` (muster's) joins the caller's trace. The chart takes `observability.otel.{endpoint,protocol,headers,resourceAttributes,sampler,samplerArg}` and renders the `OTEL_*` env only with an endpoint: gRPC, `parentbased_traceidratio` at `0.1`, the pod's `k8s.pod.name`, `k8s.namespace.name` and `k8s.node.name` as resource attributes; with `networkPolicy.enabled` and `guestEgress` off, the policy opens the collector's namespace and port (any address for a host that is not an in-cluster Service).
-- The guest image artifact carries the golden PCR values of its release: before it pushes and signs the artifact, the release's `guest-image` job records PCRs 0, 2-4, 6, 7 and 13 with the firmware, virtio-net option ROM and vm-manager binary of the release's container image (`hack/guest-image-golden.sh`, `make guest-image-golden`) and boots a fresh VM that must verify against them without learn mode. A pod of the release verifies both attestation quotes of its first VM without a learn-mode boot, and a release that moves the firmware ships values for the new build. The boots run on Ubuntu 24.04's QEMU 8.2 and the PPA's swtpm in a recorder container, because the image's QEMU 10.2 stalled the vTPM (#84); the emulator is not measured.
-- `vm-manager image golden --from-vm` also records `golden_firmware`, the firmware build (`get_host`'s `firmware`) the values belong to. A `golden mismatch` of a firmware PCR names the build the values were recorded for next to the one the server boots, or says that it is the same build; `serve` warns at start for every image whose values belong to another build.
 
-- `get_host` and `GET /api/v1/host` report the build of the firmware VMs boot with, the one golden PCR values belong to: `firmware.sha256` of `ovmfCode` and, where dpkg installed it, `firmware.package` and `firmware.version` (`ovmf-generic 2025.11-3ubuntu7.2` in the container image). `serve` logs the same at start.
-- `vm-manager image golden <image> --clear` removes an image's golden PCR values, the first step of recording them again after a firmware change: learn mode accepts only a PCR without a value, so over stale values the learn boot failed with the same `golden mismatch`. The README's Attestation section has the whole recipe inside the pod.
-- Chart: a ServiceMonitor for `GET /metrics`, gated on `serviceMonitor.enabled` (needs `metrics.enabled` too) with a `serviceMonitor.labels` map. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`, and the chart rendered no ServiceMonitor at all, so `vm_manager_*` and `vm_guest_*` reached no tenant on every installation.
-- The guest image artifact `gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>` is signed at its digest with cosign keyless under the release job's CircleCI OIDC identity (the architect orb's `cosign-sign-verify`, a Sigstore bundle stored as an OCI referrer), the same shape and identity as the container image and the chart, so one keyless attestor admits all three release artifacts.
+## [0.24.11-rc.1] - 2026-10-12
 
 ### Fixed
 
-- CVE-2026-96812 (gVisor gofer, CVSS 8.8) no longer fails the dependency scan: `gvisor.dev/gvisor` moves to `v0.0.0-20261005183124-7d7fec1ac6f4`, a `go`-branch commit that carries the fix (`573a9e73cf84`), and `github.com/containers/gvisor-tap-vsock` to `v0.8.9-0.20261002135003-338d9a0f17e4` from its `main`, because v0.8.9 does not build against any gvisor with the fix (the `udp.NewForwarder` handler returns `handled bool`). vm-manager links only gvisor's netstack (`pkg/tcpip`, `pkg/buffer`, `pkg/waiter`), never the gofer. `renovate-custom.json5` keeps Renovate from proposing v0.8.9 again.
+- The MCP endpoint refuses a request body larger than 8 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12) (giantswarm/vm-manager#151).
+
+## [0.24.8-rc.9] - 2026-10-09
+
+### Fixed
+
 - Renovate proposes no `gvisor.dev/gvisor` digest update any more (#136). Its digest follows the Go proxy's `@latest`, a commit on gvisor's `master`, which does not build as a Go module (`found packages stack and bridge`); vm-manager takes gvisor by hand from the `go` branch.
-- CI: the e2e image and the release's guest image are built from the same, current Arch repositories. `image.yml` restored a weekly mkosi cache whose incremental trees froze the package set of the week's first build, so the e2e runs of v0.23.8 and of its fix still booted systemd 261.3 while the release installed 262 (#108). The CircleCI `guest-image` job's cache never took effect, because `hack/guest-image-build.sh` handed it to the host user and mkosi rejected it for its owner. Both workflows now keep no mkosi cache, and the script starts every run without one (#110).
-- Guest image: `vm-kubernetes.service` pulls the Kubernetes sysext again on images built with Arch's systemd 262, which no longer installs `/usr/bin/systemd-sysupdate`. `/usr/lib/vm-manager/kubernetes` now runs `/usr/lib/systemd/systemd-sysupdate`, as it already runs `systemd-imds` and `systemd-pcrextend`; the path exists on 261 too. The unit had exited 127 before the merge and the PCR 13 measurement, so every VM of such an image failed its ready-stage attestation, and v0.23.8's `guest-image` job failed. `make -C images verify` now fails the build when a systemd tool the guest scripts run is missing from the image. The unit also logs to the serial console, so the reason for a failure shows in `get_vm_console` (#108).
-- QEMU runs with its main loop off io_uring: a seccomp filter on the QEMU process (a `SystemCallFilter=` property under the systemd launcher) makes `io_uring_setup` fail with EPERM, as `kernel.io_uring_disabled=2` would host-wide, and QEMU falls back to epoll. Since QEMU 10.2, io_uring fd monitoring in the glib main loop loses a firmware vTPM command in a few percent of boots (the three-minute stall that leaves PCR 11 unmeasured, #84); the container image's and Ubuntu 26.04's QEMU 10.2 are affected. No disk uses `aio=io_uring`, so nothing else needs it.
-- `serve` no longer panics at start with a nil pointer dereference when it reattaches a VM recorded as stopping, or one whose QEMU exits during the reattach: the resumed stop or the exit could settle the VM before the reattach logged its PID. The `vm reattached` line is now written from the reattached process before its supervisor takes over, and the reattach reads nothing of the record after that.
-- A rejected attestation quote is the VM's `lastError` (`initrd attestation rejected: <reason>`, READY=1 keeps it, a verified retry clears it), with the `vtpm not responding: the guest's TPM calls failed (console: …);` note in front when the run's console shows the guest's TPM calls failing: a firmware vTPM stall can let the guest reach ready while every later measurement is lost, so the quote fails on pcr 11 and `lastError` now names the cause.
-- Guest image: an installer booted through systemd-boot from the base image installs. The firmware takes that path when it does not take the direct `-kernel` boot (after a vTPM stall, for one); systemd-gpt-auto-generator then automounts the booted ESP at `/boot`, and `/usr/lib/vm-manager/sysinstall` found the UKI there but covered `/boot` with the tmpfs for `install.conf` before `systemd-sysinstall` read it (`Failed to open kernel image`, `installer did not finish within 5m0s`). The booted ESP is bind-mounted (private, so the tmpfs does not propagate onto it) under `/run/vm-sysinstall/` first and the UKI read from there; the new e2e test `TestInstallBootSystemdBoot` (fast subset) installs through that path.
-- `get_host` reports the firmware code image VMs boot with (`--ovmf-code`, else the first pair `serve` finds). It probed a list of its own that preferred the Secure Boot builds, so in the container image it named `OVMF_CODE_4M.secboot.fd` while VMs booted `OVMF_CODE_4M.fd`; a missing image is now named in `missing`.
-- QEMU starts only once the VM's swtpm has answered `CMD_GET_CAPABILITY` on its control socket, not as soon as the socket file exists; a swtpm that does not answer within 5s fails the start with `vtpm not responding`. A run whose console shows the guest's TPM calls failing (the EFI stub's `Failed to measure data for event`, the kernel's `tpm tpm0: Operation Timed out`) records `vtpm not responding: the guest's TPM calls failed (console: …)` in `lastError` in front of the install or boot timeout. swtpm logs every command at level 2, so a command it never answered is the last one in `tpm/swtpm.log`; the previous run's log is kept as `tpm/swtpm.prev.log`. The control socket no longer carries swtpm's `terminate` option (the readiness probe would end swtpm); `--terminate` ends swtpm once QEMU closes the data channel instead.
-- Guest image: `vm-kubernetes.service` succeeds on a VM created without a Kubernetes version. It failed on every such VM: `/usr/lib/vm-manager/kubernetes` looked for the varlink error name `KeyNotFound`, which `systemd-imds` prints as `Key not available.`, and it runs `grep`, which reached the image only as a transitive dependency the Arch repositories dropped. `grep` is now an explicit package, the script matches what `systemd-imds` prints, and `TestNetworkIMDS` boots its VM from an image offering no Kubernetes version and asserts the unit succeeds.
-- Chart: the `helm.sh/chart` label is a valid label value for any chart version. The 63-character cut of a long development version could end in `.`, `_` or `-`, and the API server refused the ServiceAccount, Service and Deployment; every non-alphanumeric character at the ends of the cut is now trimmed, and the render assertions check the label for such versions.
-- The released image reported `version=dev`: the version, commit and build time are now resolved from the Go build info (the tag at HEAD, `vcs.revision`, `vcs.time`) when the build passed no `-ldflags -X`; the start-up log names the commit next to the version.
+
+## [0.24.5] - 2026-10-06
 
 ### Changed
 
 - **Firmware change: golden PCR values must be recorded again.** The image's firmware moves from `ovmf-generic` `2025.11-3ubuntu7.2`, which the archive superseded (the image no longer built), to `2025.11-3ubuntu7.3`. PCR 0 measures it: golden values recorded under `7.2` fail every quote under `7.3` (`golden mismatch: pcr 0`), and a VM created with attestation required never receives its user-data. Record the values again for every image in use: README, section Attestation, "Recording golden values again".
+
+### Fixed
+
+- CVE-2026-96812 (gVisor gofer, CVSS 8.8) no longer fails the dependency scan: `gvisor.dev/gvisor` moves to `v0.0.0-20261005183124-7d7fec1ac6f4`, a `go`-branch commit that carries the fix (`573a9e73cf84`), and `github.com/containers/gvisor-tap-vsock` to `v0.8.9-0.20261002135003-338d9a0f17e4` from its `main`, because v0.8.9 does not build against any gvisor with the fix (the `udp.NewForwarder` handler returns `handled bool`). vm-manager links only gvisor's netstack (`pkg/tcpip`, `pkg/buffer`, `pkg/waiter`), never the gofer. `renovate-custom.json5` keeps Renovate from proposing v0.8.9 again.
+
+## [0.24.0] - 2026-09-25
+
+### Added
+
+- OTLP traces (giantswarm/giantswarm#36711). The server exports its spans when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, through `github.com/giantswarm/mcp-toolkit/tracing`: a server span per HTTP request (`POST /mcp`; the probes and `/metrics` are not traced), an `mcp.<method>` server span per JSON-RPC request under it carrying `mcp.method`, `mcp.tool.name` and `gen_ai.tool.name` on `mcp.tools/call`, and a `tool.<name>` span around each tool handler. An inbound `traceparent` (muster's) joins the caller's trace. The chart takes `observability.otel.{endpoint,protocol,headers,resourceAttributes,sampler,samplerArg}` and renders the `OTEL_*` env only with an endpoint: gRPC, `parentbased_traceidratio` at `0.1`, the pod's `k8s.pod.name`, `k8s.namespace.name` and `k8s.node.name` as resource attributes; with `networkPolicy.enabled` and `guestEgress` off, the policy opens the collector's namespace and port (any address for a host that is not an in-cluster Service).
+
+## [0.23.10] - 2026-09-25
+
+### Fixed
+
+- CI: the e2e image and the release's guest image are built from the same, current Arch repositories. `image.yml` restored a weekly mkosi cache whose incremental trees froze the package set of the week's first build, so the e2e runs of v0.23.8 and of its fix still booted systemd 261.3 while the release installed 262 (#108). The CircleCI `guest-image` job's cache never took effect, because `hack/guest-image-build.sh` handed it to the host user and mkosi rejected it for its owner. Both workflows now keep no mkosi cache, and the script starts every run without one (#110).
+
+## [0.23.9] - 2026-09-25
+
+### Fixed
+
+- Guest image: `vm-kubernetes.service` pulls the Kubernetes sysext again on images built with Arch's systemd 262, which no longer installs `/usr/bin/systemd-sysupdate`. `/usr/lib/vm-manager/kubernetes` now runs `/usr/lib/systemd/systemd-sysupdate`, as it already runs `systemd-imds` and `systemd-pcrextend`; the path exists on 261 too. The unit had exited 127 before the merge and the PCR 13 measurement, so every VM of such an image failed its ready-stage attestation, and v0.23.8's `guest-image` job failed. `make -C images verify` now fails the build when a systemd tool the guest scripts run is missing from the image. The unit also logs to the serial console, so the reason for a failure shows in `get_vm_console` (#108).
+
+## [0.23.6] - 2026-09-24
+
+### Changed
+
 - The release's `guest-image` job records the golden PCR values on the container image's own stack: `hack/guest-image-golden.sh` runs `serve` from the vm-manager image it records for, with that image's QEMU 10.2, swtpm and OVMF and QEMU kept off io_uring (#101). Ubuntu 24.04's QEMU 8.2 and the PPA's swtpm in a recorder container are gone, and so is the release's dependency on that PPA. The values do not change, since the emulator is not measured. `golden_firmware` now also names the firmware package and version (`ovmf-generic 2025.11-3ubuntu7.2`) (#103).
+
+## [0.23.5] - 2026-09-24
+
+### Added
+
+- The guest image artifact carries the golden PCR values of its release: before it pushes and signs the artifact, the release's `guest-image` job records PCRs 0, 2-4, 6, 7 and 13 with the firmware, virtio-net option ROM and vm-manager binary of the release's container image (`hack/guest-image-golden.sh`, `make guest-image-golden`) and boots a fresh VM that must verify against them without learn mode. A pod of the release verifies both attestation quotes of its first VM without a learn-mode boot, and a release that moves the firmware ships values for the new build. The boots run on Ubuntu 24.04's QEMU 8.2 and the PPA's swtpm in a recorder container, because the image's QEMU 10.2 stalled the vTPM (#84); the emulator is not measured.
+
+## [0.23.4] - 2026-09-24
+
+### Fixed
+
+- QEMU runs with its main loop off io_uring: a seccomp filter on the QEMU process (a `SystemCallFilter=` property under the systemd launcher) makes `io_uring_setup` fail with EPERM, as `kernel.io_uring_disabled=2` would host-wide, and QEMU falls back to epoll. Since QEMU 10.2, io_uring fd monitoring in the glib main loop loses a firmware vTPM command in a few percent of boots (the three-minute stall that leaves PCR 11 unmeasured, #84); the container image's and Ubuntu 26.04's QEMU 10.2 are affected. No disk uses `aio=io_uring`, so nothing else needs it.
+
+## [0.23.3] - 2026-09-24
+
+### Fixed
+
+- `serve` no longer panics at start with a nil pointer dereference when it reattaches a VM recorded as stopping, or one whose QEMU exits during the reattach: the resumed stop or the exit could settle the VM before the reattach logged its PID. The `vm reattached` line is now written from the reattached process before its supervisor takes over, and the reattach reads nothing of the record after that.
+
+## [0.23.0] - 2026-09-24
+
+### Added
+
+- `vm-manager image golden --from-vm` also records `golden_firmware`, the firmware build (`get_host`'s `firmware`) the values belong to. A `golden mismatch` of a firmware PCR names the build the values were recorded for next to the one the server boots, or says that it is the same build; `serve` warns at start for every image whose values belong to another build.
+
+## [0.22.13] - 2026-09-24
+
+### Fixed
+
+- A rejected attestation quote is the VM's `lastError` (`initrd attestation rejected: <reason>`, READY=1 keeps it, a verified retry clears it), with the `vtpm not responding: the guest's TPM calls failed (console: …);` note in front when the run's console shows the guest's TPM calls failing: a firmware vTPM stall can let the guest reach ready while every later measurement is lost, so the quote fails on pcr 11 and `lastError` now names the cause.
+
+## [0.22.12] - 2026-09-23
+
+### Added
+
+- `get_host` and `GET /api/v1/host` report the build of the firmware VMs boot with, the one golden PCR values belong to: `firmware.sha256` of `ovmfCode` and, where dpkg installed it, `firmware.package` and `firmware.version` (`ovmf-generic 2025.11-3ubuntu7.2` in the container image). `serve` logs the same at start.
+- `vm-manager image golden <image> --clear` removes an image's golden PCR values, the first step of recording them again after a firmware change: learn mode accepts only a PCR without a value, so over stale values the learn boot failed with the same `golden mismatch`. The README's Attestation section has the whole recipe inside the pod.
+
+### Changed
+
 - The container image pins its firmware: `ovmf-generic=2025.11-3ubuntu7.2`, the build every release since 0.21.0 shipped, instead of the unpinned `ovmf` metapackage, whose dependencies carry no version. PCR 0 measures the firmware, so an Ubuntu update silently invalidated every recorded golden value (0.20.2 to 0.21.0 moved `2025.11-3ubuntu7` to `7.2`). Renovate tracks the pin in the archive's `resolute-updates` pocket (`renovate-custom.json5`): a new build is its own pull request and release note, `update OVMF to <version>, re-record golden PCRs`. Once the archive supersedes the pinned build, the image build fails until that pull request merges.
+
+### Fixed
+
+- `get_host` reports the firmware code image VMs boot with (`--ovmf-code`, else the first pair `serve` finds). It probed a list of its own that preferred the Secure Boot builds, so in the container image it named `OVMF_CODE_4M.secboot.fd` while VMs booted `OVMF_CODE_4M.fd`; a missing image is now named in `missing`.
+
+## [0.22.10] - 2026-09-23
+
+### Fixed
+
+- Guest image: an installer booted through systemd-boot from the base image installs. The firmware takes that path when it does not take the direct `-kernel` boot (after a vTPM stall, for one); systemd-gpt-auto-generator then automounts the booted ESP at `/boot`, and `/usr/lib/vm-manager/sysinstall` found the UKI there but covered `/boot` with the tmpfs for `install.conf` before `systemd-sysinstall` read it (`Failed to open kernel image`, `installer did not finish within 5m0s`). The booted ESP is bind-mounted (private, so the tmpfs does not propagate onto it) under `/run/vm-sysinstall/` first and the UKI read from there; the new e2e test `TestInstallBootSystemdBoot` (fast subset) installs through that path.
+
+## [0.22.9] - 2026-09-23
+
+### Fixed
+
+- QEMU starts only once the VM's swtpm has answered `CMD_GET_CAPABILITY` on its control socket, not as soon as the socket file exists; a swtpm that does not answer within 5s fails the start with `vtpm not responding`. A run whose console shows the guest's TPM calls failing (the EFI stub's `Failed to measure data for event`, the kernel's `tpm tpm0: Operation Timed out`) records `vtpm not responding: the guest's TPM calls failed (console: …)` in `lastError` in front of the install or boot timeout. swtpm logs every command at level 2, so a command it never answered is the last one in `tpm/swtpm.log`; the previous run's log is kept as `tpm/swtpm.prev.log`. The control socket no longer carries swtpm's `terminate` option (the readiness probe would end swtpm); `--terminate` ends swtpm once QEMU closes the data channel instead.
+
+## [0.22.8] - 2026-09-23
+
+### Changed
+
 - `gvisor.dev/gvisor` moves from `v0.0.0-20240916094835-a174eb65023f` to `v0.0.0-20250709194456-2a7b29d5230c`, a commit of gvisor's `go` branch, the branch Go consumers build from (`master` is the Bazel layout the go tool cannot build). It is the newest `go`-branch commit `github.com/containers/gvisor-tap-vsock` v0.8.9 compiles against: the next one changes `udp.NewForwarder` to take a handler returning `handled bool`, which gvisor-tap-vsock adopts only after v0.8.9.
+
+## [0.22.3] - 2026-09-23
+
+### Fixed
+
+- Guest image: `vm-kubernetes.service` succeeds on a VM created without a Kubernetes version. It failed on every such VM: `/usr/lib/vm-manager/kubernetes` looked for the varlink error name `KeyNotFound`, which `systemd-imds` prints as `Key not available.`, and it runs `grep`, which reached the image only as a transitive dependency the Arch repositories dropped. `grep` is now an explicit package, the script matches what `systemd-imds` prints, and `TestNetworkIMDS` boots its VM from an image offering no Kubernetes version and asserts the unit succeeds.
+
+## [0.22.1] - 2026-09-23
+
+### Fixed
+
+- Chart: the `helm.sh/chart` label is a valid label value for any chart version. The 63-character cut of a long development version could end in `.`, `_` or `-`, and the API server refused the ServiceAccount, Service and Deployment; every non-alphanumeric character at the ends of the cut is now trimmed, and the render assertions check the label for such versions.
+
+## [0.22.0] - 2026-09-22
+
+### Added
+
+- Chart: a ServiceMonitor for `GET /metrics`, gated on `serviceMonitor.enabled` (needs `metrics.enabled` too) with a `serviceMonitor.labels` map. The Giant Swarm observability platform routes a scrape to a Mimir tenant by `observability.giantswarm.io/tenant`, and the chart rendered no ServiceMonitor at all, so `vm_manager_*` and `vm_guest_*` reached no tenant on every installation.
+
+## [0.21.0] - 2026-09-19
+
+### Added
+
+- The guest image artifact `gsoci.azurecr.io/giantswarm/vm-manager-guest-image:<version>` is signed at its digest with cosign keyless under the release job's CircleCI OIDC identity (the architect orb's `cosign-sign-verify`, a Sigstore bundle stored as an OCI referrer), the same shape and identity as the container image and the chart, so one keyless attestor admits all three release artifacts.
+
+## [0.20.3] - 2026-09-16
 
 ### Added
 
 - `get_info` MCP tool reporting the server's version, commit, build time and tool names, as the other Agent Platform managers do.
 
+### Fixed
 
+- The released image reported `version=dev`: the version, commit and build time are now resolved from the Go build info (the tag at HEAD, `vcs.revision`, `vcs.time`) when the build passed no `-ldflags -X`; the start-up log names the commit next to the version.
 
-[Unreleased]: https://github.com/giantswarm/vm-manager/tree/main
+[Unreleased]: https://github.com/giantswarm/vm-manager/compare/v0.25.0-rc.1...HEAD
+[0.25.0-rc.1]: https://github.com/giantswarm/vm-manager/compare/v0.24.11-rc.1...v0.25.0-rc.1
+[0.24.11-rc.1]: https://github.com/giantswarm/vm-manager/compare/v0.24.8-rc.9...v0.24.11-rc.1
+[0.24.8-rc.9]: https://github.com/giantswarm/vm-manager/compare/v0.24.5...v0.24.8-rc.9
+[0.24.5]: https://github.com/giantswarm/vm-manager/compare/v0.24.0...v0.24.5
+[0.24.0]: https://github.com/giantswarm/vm-manager/compare/v0.23.10...v0.24.0
+[0.23.10]: https://github.com/giantswarm/vm-manager/compare/v0.23.9...v0.23.10
+[0.23.9]: https://github.com/giantswarm/vm-manager/compare/v0.23.6...v0.23.9
+[0.23.6]: https://github.com/giantswarm/vm-manager/compare/v0.23.5...v0.23.6
+[0.23.5]: https://github.com/giantswarm/vm-manager/compare/v0.23.4...v0.23.5
+[0.23.4]: https://github.com/giantswarm/vm-manager/compare/v0.23.3...v0.23.4
+[0.23.3]: https://github.com/giantswarm/vm-manager/compare/v0.23.0...v0.23.3
+[0.23.0]: https://github.com/giantswarm/vm-manager/compare/v0.22.13...v0.23.0
+[0.22.13]: https://github.com/giantswarm/vm-manager/compare/v0.22.12...v0.22.13
+[0.22.12]: https://github.com/giantswarm/vm-manager/compare/v0.22.10...v0.22.12
+[0.22.10]: https://github.com/giantswarm/vm-manager/compare/v0.22.9...v0.22.10
+[0.22.9]: https://github.com/giantswarm/vm-manager/compare/v0.22.8...v0.22.9
+[0.22.8]: https://github.com/giantswarm/vm-manager/compare/v0.22.3...v0.22.8
+[0.22.3]: https://github.com/giantswarm/vm-manager/compare/v0.22.1...v0.22.3
+[0.22.1]: https://github.com/giantswarm/vm-manager/compare/v0.22.0...v0.22.1
+[0.22.0]: https://github.com/giantswarm/vm-manager/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/giantswarm/vm-manager/compare/v0.20.3...v0.21.0
+[0.20.3]: https://github.com/giantswarm/vm-manager/releases/tag/v0.20.3
