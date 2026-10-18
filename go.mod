@@ -7,7 +7,7 @@ toolchain go1.27.2
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/giantswarm/mcp-oauth v1.7.3
-	github.com/giantswarm/mcp-toolkit v0.4.0
+	github.com/giantswarm/mcp-toolkit v0.4.1
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
