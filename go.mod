@@ -7,7 +7,7 @@ toolchain go1.27.2
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/giantswarm/mcp-oauth v1.7.2
-	github.com/giantswarm/mcp-toolkit v0.2.16
+	github.com/giantswarm/mcp-toolkit v0.4.0
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
@@ -30,7 +30,7 @@ require (
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
 	gvisor.dev/gvisor v0.0.0-20261005183124-7d7fec1ac6f4
-	oras.land/oras-go/v2 v2.6.3
+	oras.land/oras-go/v2 v2.6.4
 )
 
 require (
