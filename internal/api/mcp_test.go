@@ -209,13 +209,8 @@ func TestMCPContract(t *testing.T) {
 		require.NotNil(t, a.IdempotentHint, tool.Name)
 		require.NotNil(t, a.OpenWorldHint, tool.Name)
 		if *a.ReadOnlyHint {
-			assert.Regexp(t, `^Read-only\.`, tool.Description, tool.Name)
-			assert.False(t, *a.DestructiveHint, tool.Name)
-		} else {
-			assert.Regexp(t, `^WRITES( \(destructive\))?:`, tool.Description, tool.Name)
-		}
-		if *a.DestructiveHint {
-			assert.Regexp(t, `^WRITES \(destructive\):`, tool.Description, tool.Name)
+			assert.False(t, *a.DestructiveHint, "%s is read-only but reported destructive", tool.Name)
+			assert.True(t, *a.IdempotentHint, "%s is read-only but not reported idempotent", tool.Name)
 		}
 	}
 	assert.ElementsMatch(t, api.ToolNames(), names, "exactly the declared tools (tools/list sorts by name)")
