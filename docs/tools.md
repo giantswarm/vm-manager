@@ -60,7 +60,7 @@ Rootless (gvisor-tap-vsock). Needed before create_vm unless the default network 
 ## `create_vm`
 
 ```text
-Create a VM from a catalog image: install it on a fresh disk, boot it, attest it and serve its user_data.
+Create a VM from a catalog image: install it on a fresh disk and boot it; user_data is served once attestation passed.
 
 It allocates a disk on the storage provider, a vTPM, a network lease and a vsock id. Call get_host, list_images and create_network (or list_networks) first. wait_for ready (the default) blocks until the guest is up, up to the install and boot timeouts; none returns at once and get_vm follows the progress. A failure returns the VM id in the error: get_vm_console shows why, delete_vm cleans up.
 ```
@@ -371,7 +371,7 @@ The initrd quote gates user-data; the ready quote includes PCR 13. Reset on ever
 ## `get_vm_console`
 
 ```text
-Return the last lines of a VM's serial console, the first place to look when a VM failed or hangs installing or booting.
+Return a VM's serial console tail (boot log), the first place to look when a VM failed or hangs installing or booting.
 ```
 
 ```json
@@ -451,7 +451,7 @@ The server creates a network named default at startup.
 ## `list_vms`
 
 ```text
-List every VM, oldest first: id, name, state, IP, image, sizing, attestation and timestamps.
+List every virtual machine (VM), oldest first: id, name, state, IP, image, sizing, attestation and timestamps.
 ```
 
 ```json
@@ -511,9 +511,9 @@ Returns the record in state booting; poll get_vm for ready. Fails with conflict 
 ## `stop_vm`
 
 ```text
-Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after the stop timeout. Its disk is kept.
+Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after --stop-timeout. Its disk is kept.
 
-Returns the record in state stopping; get_vm shows stopped once the process exited. start_vm boots it again.
+Blocks until the process exited and returns the record in state stopped; start_vm boots it again.
 ```
 
 ```json

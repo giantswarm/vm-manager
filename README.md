@@ -36,9 +36,10 @@ The same operations are exposed twice from one process:
   `get_vm_console`, `get_vm_metrics`, `get_vm_attestation`, `create_network`,
   `delete_network`, `create_vm`, `start_vm`, `stop_vm`, `reboot_vm`, `delete_vm`,
   `exec_vm`, `forward_port` (through muster: `x_vm-manager_<tool>`). Every description
-  says whether it writes and what to call first; the read-only, destructive, idempotent
-  and open-world annotations are set, and the server's instructions tell a model the
-  call order (`get_host` first, then images and a network, then `create_vm`).
+  says what to call first; the read-only, destructive, idempotent and open-world
+  annotations, set on every tool, say whether it writes; and the server's instructions
+  tell a model the call order (`get_host` first, then images and a network, then
+  `create_vm`).
 
 Both surfaces call the same service and return the same JSON. On the platform vm-manager
 is a **pod**, like its siblings: the [Helm chart](helm/vm-manager) runs it privileged on

@@ -172,7 +172,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		"list_networks has the names.",
 		hintRead, nameArg), t.getNetwork)
 	s.AddTool(newTool(ToolListVMs,
-		"List every VM, oldest first: id, name, state, IP, image, sizing, attestation and timestamps.", "",
+		"List every virtual machine (VM), oldest first: id, name, state, IP, image, sizing, attestation and timestamps.", "",
 		hintRead), t.listVMs)
 	s.AddTool(newTool(ToolGetVM,
 		"Fetch one VM: state, IP and MAC, attestation summary, the guest's last STATUS= text, and lastError on failure.",
@@ -180,7 +180,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 			"Poll it after create_vm with wait_for none, or after start_vm and reboot_vm.",
 		hintRead, idArg), t.vmOp(func(_ context.Context, id string) (*vm.VM, error) { return svc.VM.Get(id) }))
 	s.AddTool(newTool(ToolGetVMConsole,
-		"Return the last lines of a VM's serial console, the first place to look when a VM failed or hangs installing or booting.", "",
+		"Return a VM's serial console tail (boot log), the first place to look when a VM failed or hangs installing or booting.", "",
 		hintRead, idArg,
 		mcp.WithNumber(argLines, mcp.Description(fmt.Sprintf("Number of trailing lines, default %d, at most %d", DefaultConsoleLines, vm.MaxConsoleLines))),
 	), t.getVMConsole)
@@ -208,7 +208,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		"delete_vm those first; list_networks shows the leases.",
 		hintDestructive, nameArg), t.deleteNetwork)
 	s.AddTool(newTool(ToolCreateVM,
-		"Create a VM from a catalog image: install it on a fresh disk, boot it, attest it and serve its user_data.",
+		"Create a VM from a catalog image: install it on a fresh disk and boot it; user_data is served once attestation passed.",
 		"It allocates a disk on the storage provider, a vTPM, a network lease and a vsock id. "+
 			"Call get_host, list_images and create_network (or list_networks) first. "+
 			"wait_for ready (the default) blocks until the guest is up, up to the install and boot timeouts; none returns at once and get_vm follows the progress. "+
@@ -233,8 +233,8 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		"Returns the record in state booting; poll get_vm for ready. Fails with conflict when the VM is running or never finished installing.",
 		hintIdempotent, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Start(ctx, id) }))
 	s.AddTool(newTool(ToolStopVM,
-		"Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after the stop timeout. Its disk is kept.",
-		"Returns the record in state stopping; get_vm shows stopped once the process exited. start_vm boots it again.",
+		"Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after --stop-timeout. Its disk is kept.",
+		"Blocks until the process exited and returns the record in state stopped; start_vm boots it again.",
 		hintIdempotent, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Stop(ctx, id) }))
 	s.AddTool(newTool(ToolRebootVM,
 		"Reboot a VM: stop_vm followed by start_vm.",
