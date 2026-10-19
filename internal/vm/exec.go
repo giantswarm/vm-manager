@@ -27,7 +27,8 @@ const (
 	hostKeyFile    = "ssh_host_key"
 	forwardHost    = "127.0.0.1:0"
 	defaultConsole = 100
-	maxConsole     = 10000
+	// MaxConsoleLines caps how many console lines Console returns.
+	MaxConsoleLines = 10000
 )
 
 // Exec runs cmd on the guest as root over ssh through the virtual network,
@@ -196,8 +197,8 @@ func (s *Service) Console(id string, lines int) (string, error) {
 	if lines <= 0 {
 		lines = defaultConsole
 	}
-	if lines > maxConsole {
-		lines = maxConsole
+	if lines > MaxConsoleLines {
+		lines = MaxConsoleLines
 	}
 	out, err := tailLines(v.Paths.Console, lines)
 	if errors.Is(err, os.ErrNotExist) {

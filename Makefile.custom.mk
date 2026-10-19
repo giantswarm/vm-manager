@@ -12,6 +12,10 @@ override EXTLDFLAGS :=
 test-race: ## Run tests with the race detector regardless of the toolchain probe in Makefile.gen.go.mk.
 	go test -race ./...
 
+.PHONY: tools-doc
+tools-doc: ## Regenerate docs/tools.md from the registered tools (the test TestToolsDocIsCurrent keeps it current).
+	TOOLS_DOC_UPDATE=1 go test -count=1 -run TestToolsDocIsCurrent ./internal/api
+
 .PHONY: test-integration
 test-integration: ## Run the integration-tagged tests: real QEMU, OVMF, swtpm and the host's systemd storage provider; each skips where its dependency is absent.
 	go test -race -count=1 -tags integration -run Integration ./internal/...

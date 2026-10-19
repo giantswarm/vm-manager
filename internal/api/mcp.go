@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/giantswarm/mcp-toolkit/tooldesc"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -97,17 +98,18 @@ type hints struct{ readOnly, destructive, idempotent, openWorld bool }
 
 var (
 	hintRead        = hints{readOnly: true, idempotent: true}
-	hintCreate      = hints{}
+	hintWrite       = hints{}
 	hintIdempotent  = hints{idempotent: true}
 	hintDestructive = hints{destructive: true, idempotent: true}
 	hintExec        = hints{destructive: true, openWorld: true}
 )
 
 // newTool declares a tool with its description, all four annotations and
-// its arguments.
-func newTool(name, desc string, h hints, args ...mcp.ToolOption) mcp.Tool {
+// its arguments. The summary is the line muster's tool discovery shows; see
+// mcp-toolkit's docs/conventions.md.
+func newTool(name, summary, details string, h hints, args ...mcp.ToolOption) mcp.Tool {
 	opts := append([]mcp.ToolOption{
-		mcp.WithDescription(desc),
+		tooldesc.Describe(summary, details),
 		mcp.WithReadOnlyHintAnnotation(h.readOnly),
 		mcp.WithDestructiveHintAnnotation(h.destructive),
 		mcp.WithIdempotentHintAnnotation(h.idempotent),
@@ -144,63 +146,81 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 	t := &tools{svc: svc, build: build}
 
 	s.AddTool(newTool(ToolGetInfo,
-		"Read-only. Report this server's build (version — the release, or dev for a local build —, commit and build time) and the names of its tools.",
+		"Report this server's build (version, commit, build time) and the names of its tools.", "",
 		hintRead), t.getInfo)
 	s.AddTool(newTool(ToolGetHost,
-		"Read-only. Report the KVM host's capabilities: hostname, kernel, CPUs and memory; whether /dev/kvm and /dev/vhost-vsock are accessible; the qemu-system-x86_64, swtpm and systemd versions; the OVMF firmware image VMs boot with and its build (SHA-256, dpkg package and version), the build golden PCR values must have been recorded with; the systemd storage providers present; and ready plus the list of missing prerequisites. Call it before creating VMs.",
+		"Report whether this KVM host can run VMs (ready, missing prerequisites) and its capabilities. Call it before create_vm.",
+		"Also the hostname, kernel, CPUs and memory; access to /dev/kvm and /dev/vhost-vsock; the qemu, swtpm and systemd versions; "+
+			"the storage providers; and the OVMF firmware VMs boot with, whose build golden PCR values must have been recorded with.",
 		hintRead), t.getHost)
 	s.AddTool(newTool(ToolListImages,
-		"Read-only. List the bootable images in the catalog (id, version, UKI and disk paths, the Kubernetes versions available as a sysext, the PCR policy). Empty means no image was built or --image-dir points elsewhere; create_vm needs at least one.",
+		"List the bootable VM images in the catalog and the Kubernetes versions each offers. create_vm needs at least one.",
+		"Empty means no image was built or --image-dir points elsewhere.",
 		hintRead), t.listImages)
 	s.AddTool(newTool(ToolGetImage,
-		"Read-only. Describe one image. Call list_images first for the references.",
+		"Describe one VM image: its artifacts, the Kubernetes versions it offers as a sysext and its PCR policy.",
+		"list_images has the references.",
 		hintRead,
 		mcp.WithString(argRef, mcp.Required(), mcp.Description(`Image reference: "<id>_<version>" or the bare id for its newest version`)),
 	), t.getImage)
 	s.AddTool(newTool(ToolListNetworks,
-		"Read-only. List the virtual networks with their gateway and the leases (VM id, MAC, IP) of attached VMs. The server creates a network named default at startup.",
+		"List the virtual networks with their gateway and the leases (VM id, MAC, IP) of attached VMs.",
+		fmt.Sprintf("The server creates a network named %s at startup.", DefaultNetwork),
 		hintRead), t.listNetworks)
 	s.AddTool(newTool(ToolGetNetwork,
-		"Read-only. Describe one network: spec, gateway and leases. Call list_networks first for the names.",
+		"Describe one virtual network: spec, gateway and leases.",
+		"list_networks has the names.",
 		hintRead, nameArg), t.getNetwork)
 	s.AddTool(newTool(ToolListVMs,
-		"Read-only. List every VM record: id, name, state, IP, image, sizing, attestation and timestamps, oldest first.",
+		"List every VM, oldest first: id, name, state, IP, image, sizing, attestation and timestamps.", "",
 		hintRead), t.listVMs)
 	s.AddTool(newTool(ToolGetVM,
-		"Read-only. Fetch one VM record: state (creating, installing, booting, attesting, ready, running, stopping, stopped, failed, deleting), IP and MAC, attestation summary, the guest's last STATUS= text, lastError when something went wrong. Poll it after create_vm with wait_for none, or after start_vm and reboot_vm.",
+		"Fetch one VM: state, IP and MAC, attestation summary, the guest's last STATUS= text, and lastError on failure.",
+		"States: creating, installing, booting, attesting, ready, running, stopping, stopped, failed, deleting. "+
+			"Poll it after create_vm with wait_for none, or after start_vm and reboot_vm.",
 		hintRead, idArg), t.vmOp(func(_ context.Context, id string) (*vm.VM, error) { return svc.VM.Get(id) }))
 	s.AddTool(newTool(ToolGetVMConsole,
-		"Read-only. Return the last lines of the VM's serial console; the first place to look when a VM is failed or stuck in installing or booting.",
+		"Return the last lines of a VM's serial console, the first place to look when a VM failed or hangs installing or booting.", "",
 		hintRead, idArg,
-		mcp.WithNumber(argLines, mcp.Description("Number of trailing lines, default 100, at most 10000")),
+		mcp.WithNumber(argLines, mcp.Description(fmt.Sprintf("Number of trailing lines, default %d, at most %d", DefaultConsoleLines, vm.MaxConsoleLines))),
 	), t.getVMConsole)
 	s.AddTool(newTool(ToolGetVMMetrics,
-		"Read-only. Per-VM metrics. host: state, attestation, the QEMU process's cpu_seconds and memory_rss_bytes (absent while no process runs), disk_bytes, install_seconds, boot_to_ready_seconds and the byte counters of the VM's network. guest: a summary of the guest's last systemd-report upload (age, family and series counts, the first entries as sample), null until the guest sent one. Every series is on the Prometheus /metrics endpoint; the full upload is REST-only at raw_report_url. Call get_vm for state and IP.",
+		"Report one VM's metrics: its QEMU process, disk, install and boot times, network traffic, and the guest's last report.",
+		"host has the process's cpu_seconds and memory_rss_bytes (absent while no process runs), disk_bytes, install_seconds, "+
+			"boot_to_ready_seconds and the network's byte counters. guest summarizes the guest's last systemd-report upload, null until one arrived. "+
+			"Every series is also on the Prometheus /metrics endpoint; the full upload is REST-only at raw_report_url.",
 		hintRead, idArg), t.getVMMetrics)
 	s.AddTool(newTool(ToolGetVMAttestation,
-		"Read-only. Return the current boot's attestation: whether it is required, whether user-data was released, when the guest first asked for a nonce, and the verified/failed verdict of the initrd quote (gates user-data) and the ready quote (PCR 13 included). Reset on every installed boot.",
+		"Return the attestation of a VM's current boot: whether required, whether user-data was released, and the quote verdicts.",
+		"The initrd quote gates user-data; the ready quote includes PCR 13. Reset on every installed boot.",
 		hintRead, idArg), t.getVMAttestation)
 
 	s.AddTool(newTool(ToolCreateNetwork,
-		"WRITES: Create a virtual network for VMs (rootless, gvisor-tap-vsock) with DHCP, DNS and the instance metadata service reachable at 169.254.169.254 from every guest. Call it before create_vm unless the default network is enough. Returns the network with its gateway.",
-		hintCreate,
-		mcp.WithString(argName, mcp.Required(), mcp.Description("Network name, a DNS label of at most 63 characters")),
+		"Create a virtual network for VMs with DHCP, DNS and the instance metadata service at 169.254.169.254.",
+		fmt.Sprintf("Rootless (gvisor-tap-vsock). Needed before create_vm unless the %s network is enough.", DefaultNetwork),
+		hintWrite,
+		mcp.WithString(argName, mcp.Required(), mcp.Description(fmt.Sprintf("Network name, a DNS label of at most %d characters", vm.MaxNameLen))),
 		mcp.WithString(argCIDR, mcp.Required(), mcp.Description("IPv4 subnet, /16 to /29, outside 169.254.0.0/16, e.g. 192.168.128.0/24; the gateway is its first address")),
 		mcp.WithString(argDNSSearchDomain, mcp.Description("DNS search domain handed to guests over DHCP")),
 	), t.createNetwork)
 	s.AddTool(newTool(ToolDeleteNetwork,
-		"WRITES (destructive): Tear a network down. Fails with conflict while any VM, running or stopped, is attached: delete_vm those first (list_networks shows the leases).",
+		"Delete a virtual network. Fails with conflict while any VM, running or stopped, is attached to it.",
+		"delete_vm those first; list_networks shows the leases.",
 		hintDestructive, nameArg), t.deleteNetwork)
 	s.AddTool(newTool(ToolCreateVM,
-		"WRITES: Create a VM: allocate a disk on the storage provider, a vTPM, a lease on the network and a vsock id; boot the installer, which copies the image onto the disk; reboot into it, attest, and serve user_data once attestation passed. Call get_host, list_images and create_network (or list_networks) first. With wait_for ready (the default) the call blocks until the guest is up, up to the install and boot timeouts; with none it returns at once and get_vm follows the progress. A failure returns the VM id in the error: get_vm_console shows why, delete_vm cleans up.",
-		hintCreate,
-		mcp.WithString(argName, mcp.Required(), mcp.Description("VM name, a DNS label of at most 63 characters; also the default hostname")),
+		"Create a VM from a catalog image: install it on a fresh disk, boot it, attest it and serve its user_data.",
+		"It allocates a disk on the storage provider, a vTPM, a network lease and a vsock id. "+
+			"Call get_host, list_images and create_network (or list_networks) first. "+
+			"wait_for ready (the default) blocks until the guest is up, up to the install and boot timeouts; none returns at once and get_vm follows the progress. "+
+			"A failure returns the VM id in the error: get_vm_console shows why, delete_vm cleans up.",
+		hintWrite,
+		mcp.WithString(argName, mcp.Required(), mcp.Description(fmt.Sprintf("VM name, a DNS label of at most %d characters; also the default hostname", vm.MaxNameLen))),
 		mcp.WithString(argImage, mcp.Description(`Image reference ("<id>_<version>" or bare id); default: the catalog's newest image`)),
 		mcp.WithString(argKubernetesVersion, mcp.Description("Kubernetes sysext version served as /kubernetes-version; default: the newest the image offers. See get_image")),
-		mcp.WithNumber(argCPUs, mcp.Description("Virtual CPUs, default 2")),
-		mcp.WithNumber(argMemoryMiB, mcp.Description("Memory in MiB, default 2048, at least 256")),
-		mcp.WithNumber(argDiskGiB, mcp.Description("Disk size in GiB, default 20")),
-		mcp.WithString(argNetwork, mcp.Description(`Network to attach to, default "default"`)),
+		mcp.WithNumber(argCPUs, mcp.Description(fmt.Sprintf("Virtual CPUs, default %d", DefaultCPUs))),
+		mcp.WithNumber(argMemoryMiB, mcp.Description(fmt.Sprintf("Memory in MiB, default %d, at least %d", DefaultMemoryMiB, vm.MinMemoryMiB))),
+		mcp.WithNumber(argDiskGiB, mcp.Description(fmt.Sprintf("Disk size in GiB, default %d", DefaultDiskGiB))),
+		mcp.WithString(argNetwork, mcp.Description(fmt.Sprintf("Network to attach to, default %q", DefaultNetwork))),
 		mcp.WithString(argUserData, mcp.Description("CAPI bootstrap data as Ignition JSON, served at /user-data by the IMDS only after attestation; omit to boot the bare OS")),
 		mcp.WithArray(argSSHAuthorizedKeys, mcp.Description("Public keys appended to root's authorized keys, after vm-manager's own per-VM key"), mcp.WithStringItems()),
 		mcp.WithString(argHostname, mcp.Description("Guest hostname, default: the name")),
@@ -209,25 +229,32 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		mcp.WithString(argWaitFor, mcp.Description("Milestone to block on: none, installed, attested or ready (default)"), mcp.Enum(string(vm.WaitNone), string(vm.WaitInstalled), string(vm.WaitAttested), string(vm.WaitReady))),
 	), t.createVM)
 	s.AddTool(newTool(ToolStartVM,
-		"WRITES: Boot a stopped or failed VM from its installed disk; attestation runs again and user-data is gated again. Returns the record in state booting; poll get_vm for ready. Fails with conflict when the VM is running or never finished installing.",
+		"Boot a stopped or failed VM from its installed disk; attestation runs again and gates user-data again.",
+		"Returns the record in state booting; poll get_vm for ready. Fails with conflict when the VM is running or never finished installing.",
 		hintIdempotent, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Start(ctx, id) }))
 	s.AddTool(newTool(ToolStopVM,
-		"WRITES: Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after the stop timeout. Returns the record in state stopping; get_vm shows stopped once the process exited. The disk is kept; start_vm boots it again.",
+		"Shut a running VM down: ACPI power-down, then SIGTERM and SIGKILL after the stop timeout. Its disk is kept.",
+		"Returns the record in state stopping; get_vm shows stopped once the process exited. start_vm boots it again.",
 		hintIdempotent, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Stop(ctx, id) }))
 	s.AddTool(newTool(ToolRebootVM,
-		"WRITES: stop_vm followed by start_vm. Returns the record in state booting; poll get_vm.",
-		hintIdempotent, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Reboot(ctx, id) }))
+		"Reboot a VM: stop_vm followed by start_vm.",
+		"Returns the record in state booting; poll get_vm.",
+		hintWrite, idArg), t.vmOp(func(ctx context.Context, id string) (*vm.VM, error) { return svc.VM.Reboot(ctx, id) }))
 	s.AddTool(newTool(ToolDeleteVM,
-		"WRITES (destructive): Stop the VM if it runs, then remove its disk, vTPM state, lease, port forwards and record. Not undoable. Call it for failed VMs too; afterwards delete_network can succeed.",
+		"Delete a VM, stopping it if it runs: its disk, vTPM state, lease, port forwards and record. Not undoable.",
+		"Call it for failed VMs too; afterwards delete_network can succeed.",
 		hintDestructive, idArg), t.deleteVM)
 	s.AddTool(newTool(ToolExecVM,
-		"WRITES (destructive): Run a command as root inside the guest over ssh through the virtual network, authenticated with vm-manager's per-VM key; the guest's host key is pinned on first use. Needs a VM that is ready or running with sshd up. A non-zero exit is a result (exitCode), not an error. Anything the command does happens for real.",
+		"Run a command as root inside a VM over ssh through the virtual network. Anything the command does happens for real.",
+		"Authenticated with vm-manager's per-VM key; the guest's host key is pinned on first use. "+
+			"Needs a VM that is ready or running with sshd up. A non-zero exit is a result (exitCode), not an error.",
 		hintExec, idArg,
 		mcp.WithArray(argCommand, mcp.Required(), mcp.Description(`Program and arguments, e.g. ["systemctl", "is-system-running"]`), mcp.WithStringItems()),
 	), t.execVM)
 	s.AddTool(newTool(ToolForwardPort,
-		"WRITES: Expose one guest TCP port on a loopback address of the host (e.g. 6443 for the API server, 22 for ssh) and return that address. The forward lives until the VM is deleted; the VM needs an IP, which it has once created.",
-		hintIdempotent, idArg,
+		"Expose one guest TCP port (e.g. 6443 for the API server, 22 for ssh) on a loopback address of the host.",
+		"Returns that address. Each call opens a new forward, which lives until the VM is deleted; the VM needs an IP, which it has once created.",
+		hintWrite, idArg,
 		mcp.WithNumber(argPort, mcp.Required(), mcp.Description("Guest TCP port, 1-65535")),
 	), t.forwardPort)
 

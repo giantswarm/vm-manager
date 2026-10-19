@@ -89,6 +89,9 @@ code, and MCP tool errors carry the same code: `not_found`, `invalid_request`, `
 running), `vm_failed` (the VM failed before the milestone; `lastError` and the console say
 why), `internal_error`.
 
+[docs/tools.md](docs/tools.md) lists every MCP tool's description and input schema as a model
+reads them (`make tools-doc` regenerates it).
+
 ## VM lifecycle
 
 A VM needs a network: `create_network`, or the network named `default` that `serve`

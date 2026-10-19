@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP tool descriptions lead with a summary line of at most 120 runes, built with mcp-toolkit's `tooldesc.Describe`, and the details follow below it ([giantswarm#38592](https://github.com/giantswarm/giantswarm/issues/38592)). The `Read-only.` / `WRITES:` / `WRITES (destructive):` prefixes are gone; the annotations, set on every tool, carry that. `reboot_vm` and `forward_port` are no longer reported idempotent: a second call reboots again or opens another forward. `docs/tools.md` lists every tool as a model reads it (`make tools-doc`, kept current by `TestToolsDocIsCurrent`), and `TestToolDescriptionBudgets` holds the budgets.
+
 ### Fixed
 
 - The MCP endpoint refuses a request body larger than 8 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12) (giantswarm/vm-manager#151).

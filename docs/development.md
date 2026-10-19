@@ -189,14 +189,18 @@ teardown errors to debug.
 
 1. Add the `Tool<Name>` constant and list it in `ToolNames()` (registration
    order: reads first, then writes).
-2. `s.AddTool(newTool(Tool<Name>, "Read-only. ..." or "WRITES: ..." or
-   "WRITES (destructive): ...", hintRead|hintCreate|hintIdempotent|hintDestructive|hintExec,
-   args...), t.<handler>)`; the handler returns `jsonResult(v)` or
-   `errResult(err), nil`. The description says what to call first and what the
-   result means; the hints set all four MCP annotations.
+2. `s.AddTool(newTool(Tool<Name>, summary, details,
+   hintRead|hintWrite|hintIdempotent|hintDestructive|hintExec, args...), t.<handler>)`;
+   the handler returns `jsonResult(v)` or `errResult(err), nil`. The summary
+   (at most 120 runes, built with mcp-toolkit's `tooldesc.Describe`) says what
+   the tool does; the details say what to call first and what a model would
+   otherwise get wrong. The hints set all four MCP annotations, so the text
+   does not repeat read or write. The guideline is mcp-toolkit's
+   `docs/conventions.md`; `TestToolDescriptionBudgets` enforces its budgets.
 3. Mirror it in `REST.Register` with a Go 1.22 mux pattern and document it in
    `api/openapi.yaml`; request bodies use the tool's snake_case argument names.
-4. Extend the contract test's expected tool list (`mcp_test.go`), the README's
+4. Run `make tools-doc` to regenerate `docs/tools.md`. Extend the contract
+   test's expected tool list (`mcp_test.go`), the README's
    "API at a glance" table and, when it is a VM operation, the `instructions`
    paragraph in `mcp.go`.
 
