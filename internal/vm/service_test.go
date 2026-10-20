@@ -491,11 +491,12 @@ func TestWaitForTimeoutAndFailure(t *testing.T) {
 	go func() {
 		s := h.spec("broken")
 		s.WaitFor = vm.WaitReady
-		got, _ = h.svc.Create(h.ctx, s)
-		done <- nil
+		var err error
+		got, err = h.svc.Create(h.ctx, s)
+		done <- err
 	}()
 	h.waitInstances(2).Exit(7)
-	<-done
+	require.ErrorIs(t, <-done, vm.ErrFailed)
 	require.NotNil(t, got)
 	assert.Equal(t, vm.StateFailed, got.State)
 	assert.Contains(t, got.LastError, "installer exited")
