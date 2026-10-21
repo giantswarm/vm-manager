@@ -49,7 +49,7 @@ commands:
         description: cosign release to install.
         type: string
         # repo: sigstore/cosign
-        default: "v3.1.3"
+        default: "v3.1.4"
     steps:
       - run:
           name: Install cosign << parameters.version >>
