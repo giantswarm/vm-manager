@@ -30,7 +30,7 @@ require (
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
 	gvisor.dev/gvisor v0.0.0-20261005183124-7d7fec1ac6f4
-	oras.land/oras-go/v2 v2.6.4
+	oras.land/oras-go/v2 v2.7.0
 )
 
 require (
