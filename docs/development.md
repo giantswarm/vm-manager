@@ -19,6 +19,16 @@ set come from `make -C images` (see [images/README.md](../images/README.md)). Th
 build stages `bin/vm-agent` itself (`images/Makefile` runs `make -C .. agent`), so a
 changed agent changes the initrd and with it PCR 11.
 
+Each checkout builds into its own `images/build/`, with its own development keys: a build
+that generates new keys changes the PCR 11 values another build expects, so concurrent
+builds (several worktrees) never share a directory. A checkout that only runs the
+end-to-end tests points `VM_MANAGER_E2E_IMAGE_DIR` at another checkout's build instead of
+building. A new checkout starts from another one's package cache with
+`unshare -Ur cp -a <other checkout>/images/mkosi.cache images/`; a plain `cp` fails on
+the mode-4110 files mkosi leaves, which the user namespace's root can read. A plain
+`rm -rf` of a checkout that built an image fails on files mkosi left in `images/build/`;
+`sudo rm -rf` removes them.
+
 ## End-to-end tests
 
 `make e2e` runs seven tests sequentially on the host's KVM against `images/build`
@@ -283,6 +293,11 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   root autologin on the console.
 - **A vm-manager restart** marks every VM that was running as `stopped` with a note in
   `lastError`; `start_vm` boots them again.
+- **A guest's shutdown.** Over `exec_vm`, `systemctl log-level debug` and
+  `systemctl log-target console`, then `stop_vm` and `get_vm_console` with `lines=10000`:
+  the console keeps the whole stop sequence. For what is still mounted after the unmount
+  loop, a temporary hook in `/usr/lib/systemd/system-shutdown/` (in the image's
+  `mkosi.extra`) can print `/proc/self/mountinfo` and the processes that survived.
 
 ## OAuth against a lab Dex
 
