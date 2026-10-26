@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `create_vm` and `POST /api/v1/vms` without `network` attach to the network `--default-network` (chart value `vm.defaultNetwork`) names instead of always to `default`, and the MCP instructions and tool descriptions name that network (#180).
 - The MCP endpoint refuses a request body larger than 8 MiB, the REST API's bound, before mcp-go reads it whole (CVE-2026-108859, no fixed mcp-go release yet; the scan ignores it until 2026-11-12) (giantswarm/vm-manager#151).
 
 ### Added
