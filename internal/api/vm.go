@@ -17,8 +17,8 @@ const (
 	DefaultCPUs      = 2
 	DefaultMemoryMiB = 2048
 	DefaultDiskGiB   = 20
-	// DefaultNetwork is the network VMs attach to when none is named; serve
-	// creates it at startup.
+	// DefaultNetwork is the network VMs attach to when neither the request
+	// nor Services.DefaultNetwork names one.
 	DefaultNetwork = "default"
 	// DefaultConsoleLines is how many lines get_vm_console returns.
 	DefaultConsoleLines = 100
@@ -61,8 +61,9 @@ type CreateVMRequest struct {
 	WaitFor            string            `json:"wait_for,omitempty"`
 }
 
-// spec applies the defaults; validation is the service's.
-func (r CreateVMRequest) spec() vm.Spec {
+// spec applies the defaults, attaching to defaultNetwork when the request
+// names no network; validation is the service's.
+func (r CreateVMRequest) spec(defaultNetwork string) vm.Spec {
 	s := vm.Spec{
 		Name:               r.Name,
 		Image:              r.Image,
@@ -93,7 +94,7 @@ func (r CreateVMRequest) spec() vm.Spec {
 		s.DiskGiB = DefaultDiskGiB
 	}
 	if s.Network == "" {
-		s.Network = DefaultNetwork
+		s.Network = defaultNetwork
 	}
 	if s.WaitFor == "" {
 		s.WaitFor = vm.WaitReady
@@ -147,7 +148,7 @@ type DeletedResponse struct {
 // error (the awaited milestone failed or timed out) the VM exists and the
 // error says how to follow it.
 func (s Services) createVM(ctx context.Context, req CreateVMRequest) (*vm.VM, error) {
-	v, err := s.VM.Create(ctx, req.spec())
+	v, err := s.VM.Create(ctx, req.spec(s.defaultNetwork()))
 	if err != nil && v != nil {
 		detail := ""
 		if v.LastError != "" {

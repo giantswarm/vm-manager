@@ -39,19 +39,20 @@ func TestStatusFor(t *testing.T) {
 }
 
 func TestCreateVMRequestDefaults(t *testing.T) {
-	s := CreateVMRequest{Name: "n"}.spec()
+	s := CreateVMRequest{Name: "n"}.spec("lab")
 	assert.Equal(t, DefaultCPUs, s.CPUs)
 	assert.Equal(t, DefaultMemoryMiB, s.MemoryMiB)
 	assert.Equal(t, DefaultDiskGiB, s.DiskGiB)
-	assert.Equal(t, DefaultNetwork, s.Network)
+	assert.Equal(t, "lab", s.Network)
 	assert.True(t, s.RequireAttestation)
 	assert.Equal(t, vm.WaitReady, s.WaitFor)
 	assert.Nil(t, s.UserData)
 
 	off := false
-	s = CreateVMRequest{Name: "n", RequireAttestation: &off, WaitFor: "none", UserData: "{}", CPUs: 4}.spec()
+	s = CreateVMRequest{Name: "n", RequireAttestation: &off, WaitFor: "none", UserData: "{}", CPUs: 4, Network: "other"}.spec("lab")
 	assert.False(t, s.RequireAttestation)
 	assert.Equal(t, vm.WaitNone, s.WaitFor)
 	assert.Equal(t, []byte("{}"), s.UserData)
 	assert.Equal(t, 4, s.CPUs)
+	assert.Equal(t, "other", s.Network)
 }

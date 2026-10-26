@@ -236,7 +236,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 	}
 	reg.SetSource(c.vm)
 
-	svc := api.Services{Host: hostSvc, VM: c.vm, Images: c.images, Metrics: reg}
+	svc := api.Services{Host: hostSvc, VM: c.vm, Images: c.images, Metrics: reg, DefaultNetwork: o.defaultNetwork}
 	cfg := server.Config{Addr: o.listen, MCPPath: o.mcpPath}
 	if o.metricsEnabled {
 		cfg.Metrics = reg.Handler()

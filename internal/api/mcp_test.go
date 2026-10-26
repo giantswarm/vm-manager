@@ -346,3 +346,37 @@ func TestMCPContract(t *testing.T) {
 	_, err = s.c.CallTool(ctx, call)
 	require.Error(t, err, "unknown tools are a protocol error, not a result")
 }
+
+func TestCreateVMAttachesToConfiguredDefaultNetwork(t *testing.T) {
+	services := newServices(t)
+	services.DefaultNetwork = testNetwork
+	srv, err := server.New(server.Config{Addr: "127.0.0.1:0", MCPPath: "/mcp"}, services, api.NewMCPServer(services, testBuild), nil)
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	session, initRes := newMCPSession(t, ts.URL)
+
+	assert.Contains(t, initRes.Instructions, `use the network named "lan"`)
+	listed, err := session.c.ListTools(t.Context(), mcp.ListToolsRequest{})
+	require.NoError(t, err)
+	descriptions := map[string]string{}
+	for _, tool := range listed.Tools {
+		descriptions[tool.Name] = tool.Description
+		if tool.Name == api.ToolCreateVM {
+			networkArg, ok := tool.InputSchema.Properties["network"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, `Network to attach to, default "lan"`, networkArg["description"])
+		}
+	}
+	assert.Contains(t, descriptions[api.ToolListNetworks], "a network named lan at startup")
+	assert.Contains(t, descriptions[api.ToolCreateNetwork], "unless the lan network is enough")
+	for name, description := range descriptions {
+		assert.NotContains(t, description, "default network", name)
+	}
+
+	session.call(api.ToolCreateNetwork, map[string]any{"name": testNetwork, "cidr": testCIDR}, nil)
+	var created vm.VM
+	session.call(api.ToolCreateVM, map[string]any{"name": "node-1", "wait_for": "none"}, &created)
+	assert.Equal(t, testNetwork, created.Network)
+	assert.Equal(t, "10.10.0.2", created.IP)
+}

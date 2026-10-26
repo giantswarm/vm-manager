@@ -87,11 +87,23 @@ type Services struct {
 	// Metrics summarizes a VM for get_vm_metrics; it must be the registry
 	// the VM service reports to.
 	Metrics *metrics.Registry
+	// DefaultNetwork is the network create_vm attaches to when the request
+	// names none, and the one the tool descriptions point at; empty means
+	// the DefaultNetwork constant.
+	DefaultNetwork string
 }
 
-const instructions = `Provision cloud-provider-like virtual machines on this KVM host: an instance metadata service (IMDS), a vTPM with measured boot, an immutable mkosi-built OS and Kubernetes as a sysext layer, so the VMs can be handed to the CAPI based cluster-manager. Call get_host first: it reports whether the host can run VMs (ready) and, if not, which prerequisites are missing — nothing else can succeed until they are met.
+func (s Services) defaultNetwork() string {
+	if s.DefaultNetwork == "" {
+		return DefaultNetwork
+	}
+	return s.DefaultNetwork
+}
 
-Lifecycle: list_images shows the bootable images and get_image the Kubernetes versions one offers. A VM needs a network: call create_network, or use the network named "default" that the server creates at startup (see list_networks), then create_vm. create_vm installs the image onto a fresh disk (state installing), reboots into it (booting), attests from the initrd when require_attestation is set (attesting) and is ready once the guest's service manager sent READY=1; running means the process is up but READY never arrived within the boot timeout. wait_for chooses how long create_vm blocks: none returns at once and you poll get_vm; installed, attested or ready block until that milestone (a timeout error still leaves the VM running). user_data is CAPI's bootstrap Secret as Ignition JSON; the IMDS releases it to the guest only after a verified attestation quote from the initrd (right after the installed boot starts when require_attestation is false), so a VM created without user_data boots the bare OS. get_vm reports state, IP, attestation and the last error; get_vm_console shows the serial console when something goes wrong; exec_vm runs a command as root over ssh through the virtual network; forward_port exposes a guest port such as 6443 on a loopback address of the host. stop_vm, start_vm and reboot_vm move a VM between stopped and running; delete_vm removes the VM with its disk, and delete_network succeeds only once no VM is attached.`
+// instructionsFormat takes the default network's name.
+const instructionsFormat = `Provision cloud-provider-like virtual machines on this KVM host: an instance metadata service (IMDS), a vTPM with measured boot, an immutable mkosi-built OS and Kubernetes as a sysext layer, so the VMs can be handed to the CAPI based cluster-manager. Call get_host first: it reports whether the host can run VMs (ready) and, if not, which prerequisites are missing — nothing else can succeed until they are met.
+
+Lifecycle: list_images shows the bootable images and get_image the Kubernetes versions one offers. A VM needs a network: call create_network, or use the network named %q that the server creates at startup (see list_networks), then create_vm. create_vm installs the image onto a fresh disk (state installing), reboots into it (booting), attests from the initrd when require_attestation is set (attesting) and is ready once the guest's service manager sent READY=1; running means the process is up but READY never arrived within the boot timeout. wait_for chooses how long create_vm blocks: none returns at once and you poll get_vm; installed, attested or ready block until that milestone (a timeout error still leaves the VM running). user_data is CAPI's bootstrap Secret as Ignition JSON; the IMDS releases it to the guest only after a verified attestation quote from the initrd (right after the installed boot starts when require_attestation is false), so a VM created without user_data boots the bare OS. get_vm reports state, IP, attestation and the last error; get_vm_console shows the serial console when something goes wrong; exec_vm runs a command as root over ssh through the virtual network; forward_port exposes a guest port such as 6443 on a loopback address of the host. stop_vm, start_vm and reboot_vm move a VM between stopped and running; delete_vm removes the VM with its disk, and delete_network succeeds only once no VM is attached.`
 
 // hints are the four MCP tool annotations.
 type hints struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -140,10 +152,11 @@ type Info struct {
 func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 	opts := append(tracingOptions(),
 		mcpserver.WithToolCapabilities(false),
-		mcpserver.WithInstructions(instructions),
+		mcpserver.WithInstructions(fmt.Sprintf(instructionsFormat, svc.defaultNetwork())),
 	)
 	s := mcpserver.NewMCPServer("vm-manager", build.Version, opts...)
 	t := &tools{svc: svc, build: build}
+	defaultNetwork := svc.defaultNetwork()
 
 	s.AddTool(newTool(ToolGetInfo,
 		"Report this server's build (version, commit, build time) and the names of its tools.", "",
@@ -165,7 +178,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 	), t.getImage)
 	s.AddTool(newTool(ToolListNetworks,
 		"List the virtual networks with their gateway and the leases (VM id, MAC, IP) of attached VMs.",
-		fmt.Sprintf("The server creates a network named %s at startup.", DefaultNetwork),
+		fmt.Sprintf("The server creates a network named %s at startup.", defaultNetwork),
 		hintRead), t.listNetworks)
 	s.AddTool(newTool(ToolGetNetwork,
 		"Describe one virtual network: spec, gateway and leases.",
@@ -197,7 +210,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 
 	s.AddTool(newTool(ToolCreateNetwork,
 		"Create a virtual network for VMs with DHCP, DNS and the instance metadata service at 169.254.169.254.",
-		fmt.Sprintf("Rootless (gvisor-tap-vsock). Needed before create_vm unless the %s network is enough.", DefaultNetwork),
+		fmt.Sprintf("Rootless (gvisor-tap-vsock). Needed before create_vm unless the %s network is enough.", defaultNetwork),
 		hintWrite,
 		mcp.WithString(argName, mcp.Required(), mcp.Description(fmt.Sprintf("Network name, a DNS label of at most %d characters", vm.MaxNameLen))),
 		mcp.WithString(argCIDR, mcp.Required(), mcp.Description("IPv4 subnet, /16 to /29, outside 169.254.0.0/16, e.g. 192.168.128.0/24; the gateway is its first address")),
@@ -220,7 +233,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		mcp.WithNumber(argCPUs, mcp.Description(fmt.Sprintf("Virtual CPUs, default %d", DefaultCPUs))),
 		mcp.WithNumber(argMemoryMiB, mcp.Description(fmt.Sprintf("Memory in MiB, default %d, at least %d", DefaultMemoryMiB, vm.MinMemoryMiB))),
 		mcp.WithNumber(argDiskGiB, mcp.Description(fmt.Sprintf("Disk size in GiB, default %d", DefaultDiskGiB))),
-		mcp.WithString(argNetwork, mcp.Description(fmt.Sprintf("Network to attach to, default %q", DefaultNetwork))),
+		mcp.WithString(argNetwork, mcp.Description(fmt.Sprintf("Network to attach to, default %q", defaultNetwork))),
 		mcp.WithString(argUserData, mcp.Description("CAPI bootstrap data as Ignition JSON, served at /user-data by the IMDS only after attestation; omit to boot the bare OS")),
 		mcp.WithArray(argSSHAuthorizedKeys, mcp.Description("Public keys appended to root's authorized keys, after vm-manager's own per-VM key"), mcp.WithStringItems()),
 		mcp.WithString(argHostname, mcp.Description("Guest hostname, default: the name")),
