@@ -39,6 +39,9 @@
         "clusterID": {
             "type": "string"
         },
+        "externalDNSIP": {
+            "type": "string"
+        },
         "extraArgs": {
             "type": "array",
             "description": "Extra container arguments."
@@ -73,7 +76,13 @@
         "global": {
             "type": "object",
             "description": "Platform-wide values an umbrella chart (agent-platform) shares with every component; Helm forwards them to this chart. `oauth.*` reads the identity contract as its defaults: `global.identity.issuerUrl`, `global.identity.clientId`, `global.identity.existingSecret`, `global.identity.ca.secretName` / `.key`, and `global.domain` for the OAuth base URL. Empty here; a standalone install sets `oauth.*` directly.",
-            "additionalProperties": true
+            "additionalProperties": true,
+            "properties": {
+                "podSecurityStandards": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
         },
         "guestImage": {
             "type": "object",
@@ -128,6 +137,10 @@
                 }
             }
         },
+        "helm": {
+            "type": "object",
+            "additionalProperties": true
+        },
         "image": {
             "type": "object",
             "additionalProperties": false,
@@ -163,6 +176,9 @@
                     "description": "Enable debug logging."
                 }
             }
+        },
+        "managementCluster": {
+            "type": "string"
         },
         "mcp": {
             "type": "object",
