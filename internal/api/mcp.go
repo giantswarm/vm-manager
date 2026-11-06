@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/giantswarm/mcp-toolkit/brand"
 	"github.com/giantswarm/mcp-toolkit/tooldesc"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -153,6 +154,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 	opts := append(tracingOptions(),
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithInstructions(fmt.Sprintf(instructionsFormat, svc.defaultNetwork())),
+		brand.WithGiantSwarmIcon(),
 	)
 	s := mcpserver.NewMCPServer("vm-manager", build.Version, opts...)
 	t := &tools{svc: svc, build: build}

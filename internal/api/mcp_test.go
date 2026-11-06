@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/giantswarm/mcp-toolkit/brand"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -194,6 +195,7 @@ func TestMCPContract(t *testing.T) {
 
 	assert.Equal(t, "vm-manager", initRes.ServerInfo.Name)
 	assert.Equal(t, "test", initRes.ServerInfo.Version)
+	assert.Equal(t, []mcp.Icon{brand.GiantSwarmIcon()}, initRes.ServerInfo.Icons)
 	assert.Contains(t, initRes.Instructions, "get_host first")
 	assert.Contains(t, initRes.Instructions, "Ignition JSON")
 	assert.Contains(t, initRes.Instructions, "create_network")
