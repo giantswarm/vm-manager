@@ -6,7 +6,7 @@ toolchain go1.27.3
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
-	github.com/giantswarm/mcp-oauth v1.10.2
+	github.com/giantswarm/mcp-oauth v1.12.0
 	github.com/giantswarm/mcp-toolkit v0.5.1
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/go-containerregistry v0.22.1
@@ -35,6 +35,7 @@ require (
 
 require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
+	code.dny.dev/ssrf v0.3.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
