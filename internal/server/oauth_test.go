@@ -226,14 +226,12 @@ func TestForwardedIDTokenBecomesTheCaller(t *testing.T) {
 	assert.Equal(t, identity.SourceSSO, seen.id.Source)
 
 	// A token minted for some other client (another aggregator, another app)
-	// is not a forwarded token: mcp-oauth does not check it against the JWKS
-	// but asks the IdP's userinfo endpoint, which Dex answers for any token
-	// it signed. The caller is known, but through the plain OAuth path.
+	// is neither a forwarded token nor one this server issued, so it is
+	// refused without asking the IdP's userinfo endpoint.
 	seen.ok = false
 	rec = call(idp.idToken(t, []string{"someone-else"}, time.Now().Add(30*time.Minute)))
-	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	require.True(t, seen.ok)
-	assert.Equal(t, identity.SourceOAuth, seen.id.Source, "not a trusted audience, so not SSO")
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	require.False(t, seen.ok, "an untrusted audience does not reach the handler")
 	// Expired tokens are rejected.
 	assert.Equal(t, http.StatusUnauthorized, call(idp.idToken(t, []string{"agent-platform"}, time.Now().Add(-time.Hour))).Code)
 	// Garbage is rejected.
