@@ -1,5 +1,7 @@
 cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdBtwLoEkH9Zs=
 cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
+code.dny.dev/ssrf v0.3.0 h1:QDbeKauc3vR5/w9TwlhVYAQwK15cECL7sHkCUUT55ms=
+code.dny.dev/ssrf v0.3.0/go.mod h1:5thKUcQNqSxzz5TVBRkvHZOGmfRM3vI+WU2GGx9xUbw=
 github.com/GoogleCloudPlatform/confidential-space/server v0.0.0-20260915221818-a6c0685fb9fc h1:LPSfe+IaXHrYCNzEVZ4O48UdwNxtiNIEwKgIyU4Aawg=
 github.com/GoogleCloudPlatform/confidential-space/server v0.0.0-20260915221818-a6c0685fb9fc/go.mod h1:M77DH8QPPCBBzfdwZPIWpAZdDHJZu0icyq6HTZAEojI=
 github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
@@ -28,8 +30,8 @@ github.com/foxcpp/go-mockdns v1.3.0 h1:p4PKLZnM1Ii78JzsxJxcYQ5sQT3lIdiPM/vT1SaL9
 github.com/foxcpp/go-mockdns v1.3.0/go.mod h1:IhLeSFGed3mJIAXPH2aiRQB+kqz7oqu8ld2qVbOu7Wk=
 github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
-github.com/giantswarm/mcp-oauth v1.10.2 h1:cuszZbdHyrB2Ve1Z8o+IIqgOzeo2fEMixW9AGWxD3bo=
-github.com/giantswarm/mcp-oauth v1.10.2/go.mod h1:Hs/VtIVha63ls9zYrAuLUJTu0SeiXWqPCFOo49vrHSk=
+github.com/giantswarm/mcp-oauth v1.13.0 h1:lF7gvg5roHK9FPNYNkmB92wb0vu8gREBDPKYaec9BOQ=
+github.com/giantswarm/mcp-oauth v1.13.0/go.mod h1:02SNM8qMMRxunt7EmSA/jxRJ8742EFJ7/ygpEbxELJI=
 github.com/giantswarm/mcp-toolkit v0.5.1 h1:RyUAIu3m/ilEhq8o33zpp2fPO6AWM1unP/Jr4O2o5gk=
 github.com/giantswarm/mcp-toolkit v0.5.1/go.mod h1:m8dbpEeOg25kldNTnBh/al5ux4y5PYvbg2KhfHiUinc=
 github.com/go-jose/go-jose/v4 v4.1.9 h1:pKfeQkig1NmgK4hJrZYXLEYURXfoJB61Larw0uIW4gY=
