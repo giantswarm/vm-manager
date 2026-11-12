@@ -58,19 +58,16 @@ func postMCP(t *testing.T, url, sessionID, traceparent, body string) *http.Respo
 	return resp
 }
 
-// waitForSpan waits until the exporter holds a span with the given name:
-// otelhttp ends the request span after the handler returns, which can be
-// after the client has read the response.
-func waitForSpan(t *testing.T, exporter *tracetest.InMemoryExporter, name string) {
+// awaitServed waits until the server's handler has returned for the
+// request just made: otelhttp ends the request span when it returns, which
+// can be after the client has read the response.
+func awaitServed(t *testing.T, served <-chan struct{}) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		for _, s := range exporter.GetSpans() {
-			if s.Name == name {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "span %s is recorded", name)
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler did not return")
+	}
 }
 
 func TestToolCallIsTracedAndJoinsTheCallersTrace(t *testing.T) {
@@ -83,25 +80,30 @@ func TestToolCallIsTracedAndJoinsTheCallersTrace(t *testing.T) {
 	})
 	srv, err := New(Config{Addr: "127.0.0.1:0"}, svc, mcpSrv, nil)
 	require.NoError(t, err)
-	ts := httptest.NewServer(srv.Handler())
+	served := make(chan struct{}, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.Handler().ServeHTTP(w, r)
+		served <- struct{}{}
+	}))
 	defer ts.Close()
 
 	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
 		resp, err := http.Get(ts.URL + path)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
+		awaitServed(t, served)
 	}
 	require.Empty(t, exporter.GetSpans(), "the probes and the exposition are not traced")
 
 	init := postMCP(t, ts.URL, "", "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`)
 	sessionID := init.Header.Get(mcpserver.HeaderKeySessionID)
-	waitForSpan(t, exporter, "POST /mcp")
+	awaitServed(t, served)
 	exporter.Reset()
 
 	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 	postMCP(t, ts.URL, sessionID, "00-"+traceID+"-00f067aa0ba902b7-01",
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{}}}`)
-	waitForSpan(t, exporter, "POST /mcp")
+	awaitServed(t, served)
 
 	byName := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range exporter.GetSpans().Snapshots() {
