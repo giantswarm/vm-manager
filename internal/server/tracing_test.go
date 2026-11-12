@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -57,6 +58,21 @@ func postMCP(t *testing.T, url, sessionID, traceparent, body string) *http.Respo
 	return resp
 }
 
+// waitForSpan waits until the exporter holds a span with the given name:
+// otelhttp ends the request span after the handler returns, which can be
+// after the client has read the response.
+func waitForSpan(t *testing.T, exporter *tracetest.InMemoryExporter, name string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, s := range exporter.GetSpans() {
+			if s.Name == name {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "span %s is recorded", name)
+}
+
 func TestToolCallIsTracedAndJoinsTheCallersTrace(t *testing.T) {
 	exporter := recordSpans(t)
 
@@ -79,11 +95,13 @@ func TestToolCallIsTracedAndJoinsTheCallersTrace(t *testing.T) {
 
 	init := postMCP(t, ts.URL, "", "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`)
 	sessionID := init.Header.Get(mcpserver.HeaderKeySessionID)
+	waitForSpan(t, exporter, "POST /mcp")
 	exporter.Reset()
 
 	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 	postMCP(t, ts.URL, sessionID, "00-"+traceID+"-00f067aa0ba902b7-01",
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{}}}`)
+	waitForSpan(t, exporter, "POST /mcp")
 
 	byName := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range exporter.GetSpans().Snapshots() {
