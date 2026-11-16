@@ -303,7 +303,7 @@
                         },
                         "caSecret": {
                             "type": "object",
-                            "description": "Secret with the CA of a Dex that serves a private certificate; `global.identity.ca.secretName` / `global.identity.ca.key`.",
+                            "description": "Secret with the CA of a Dex that serves a private certificate; mounted and passed as `--dex-ca-file`. Empty name falls back to `global.identity.ca.secretName` / `global.identity.ca.key`.",
                             "additionalProperties": false,
                             "properties": {
                                 "key": {
@@ -421,7 +421,7 @@
                 },
                 "existingClaim": {
                     "type": "string",
-                    "description": "Keep the state directory (VM records, disks, vTPM state, consoles, and the guest image under images/) on a PersistentVolumeClaim: an existing claim's name, or `create: true` to render one from the settings below. With neither the state is an emptyDir: the VMs die with the pod — they end the guest image again and forgets the golden PCR values recorded into its policy.json. A claim keeps VM records and disks for the next `start_vm`, the image and its golden values for the next start."
+                    "description": "Keep the state directory (VM records, disks, vTPM state, consoles, and the guest image under images/) on a PersistentVolumeClaim: an existing claim's name, or `create: true` to render one from the settings below. With neither the state is an emptyDir: the VMs die with the pod — they end with the process anyway (--launcher process) — and every pod start fetches the guest image again and forgets the golden PCR values recorded into its policy.json. A claim keeps VM records and disks for the next `start_vm`, the image and its golden values for the next start."
                 },
                 "size": {
                     "type": "string"
