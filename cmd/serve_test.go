@@ -220,3 +220,22 @@ func TestWarnStaleGolden(t *testing.T) {
 	warnStaleGolden(catalog, nil, log)
 	assert.Empty(t, logs.String(), "no firmware to compare with")
 }
+
+func TestWarnDeprecatedOAuthOptions(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+
+	warnDeprecatedOAuthOptions(&serveOptions{dexAllowPrivateIP: true}, log)
+	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), logs.String())
+	assert.Contains(t, logs.String(), "--allow-private-oauth-urls")
+	assert.Contains(t, logs.String(), "NO_PROXY")
+
+	logs.Reset()
+	warnDeprecatedOAuthOptions(&serveOptions{}, log)
+	assert.Empty(t, logs.String())
+}
+
+func TestAllowPrivateOAuthURLsFlagStillParses(t *testing.T) {
+	cmd := newServeCmd()
+	require.NoError(t, cmd.Flags().Parse([]string{"--allow-private-oauth-urls=true"}))
+}
