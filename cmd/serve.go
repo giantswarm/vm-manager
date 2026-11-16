@@ -290,15 +290,15 @@ func bootFirmware(ctx context.Context, h *host.Service, path string, log *slog.L
 	return &attest.Firmware{SHA256: fw.SHA256, Package: fw.Package, Version: fw.Version}
 }
 
-// warnStaleGolden names every image whose golden PCR values were recorded
-// under another firmware build than fw, the one VMs boot with: every attested
-// VM of such an image fails PCR 0 until the values are recorded again.
 func warnDeprecatedOAuthOptions(o *serveOptions, log *slog.Logger) {
 	if o.dexAllowPrivateIP {
 		log.Warn("--allow-private-oauth-urls (VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect and will be removed: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
 	}
 }
 
+// warnStaleGolden names every image whose golden PCR values were recorded
+// under another firmware build than fw, the one VMs boot with: every attested
+// VM of such an image fails PCR 0 until the values are recorded again.
 func warnStaleGolden(catalog *images.Catalog, fw *attest.Firmware, log *slog.Logger) {
 	if fw == nil {
 		return
