@@ -221,21 +221,33 @@ func TestWarnStaleGolden(t *testing.T) {
 	assert.Empty(t, logs.String(), "no firmware to compare with")
 }
 
-func TestWarnDeprecatedOAuthOptions(t *testing.T) {
-	var logs bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logs, nil))
-
-	warnDeprecatedOAuthOptions(&serveOptions{dexAllowPrivateIP: true}, log)
-	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), logs.String())
-	assert.Contains(t, logs.String(), "--allow-private-oauth-urls")
-	assert.Contains(t, logs.String(), "NO_PROXY")
-
-	logs.Reset()
-	warnDeprecatedOAuthOptions(&serveOptions{}, log)
-	assert.Empty(t, logs.String())
-}
-
-func TestAllowPrivateOAuthURLsFlagStillParses(t *testing.T) {
-	cmd := newServeCmd()
-	require.NoError(t, cmd.Flags().Parse([]string{"--allow-private-oauth-urls=true"}))
+func TestAllowPrivateOAuthURLs(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment string
+		arguments   []string
+		wantError   bool
+	}{
+		{name: "default"},
+		{name: "obsolete flag", arguments: []string{"--allow-private-oauth-urls=true"}, wantError: true},
+		{name: "obsolete environment", environment: "true", wantError: true},
+		{name: "false environment", environment: "false"},
+		{name: "flag overrides environment", environment: "true", arguments: []string{"--allow-private-oauth-urls=false"}},
+		{name: "true flag overrides false environment", environment: "false", arguments: []string{"--allow-private-oauth-urls=true"}, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS", test.environment)
+			command := newServeCmd()
+			require.NoError(t, command.ParseFlags(test.arguments))
+			flag := command.Flags().Lookup("allow-private-oauth-urls")
+			require.True(t, flag.Hidden)
+			require.NotNil(t, command.PreRunE)
+			if !test.wantError {
+				require.NoError(t, command.PreRunE(command, nil))
+				return
+			}
+			require.ErrorContains(t, command.PreRunE(command, nil), "--allow-private-oauth-urls (VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) is no longer supported: remove it; the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
+		})
+	}
 }
