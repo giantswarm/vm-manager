@@ -329,7 +329,7 @@ What the chart renders, and why:
   way model-manager's chart reads them; `--sso-allow-private-ips` for an in-cluster Dex
   is `oauth.sso.allowPrivateIPs`. The Dex client reaches a private address and follows
   `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` without a setting; `oauth.dex.allowPrivateURLs`
-  is refused when true; remove it (see [migration](oauth-migration.md)). The trusted audiences are `oauth.trustedAudiences` (default
+  is deprecated and has no effect. The trusted audiences are `oauth.trustedAudiences` (default
   the platform client) plus `muster.mcpServer.auth.requiredAudiences`.
 - The **muster `MCPServer`** (`muster.mcpServer.enabled`): `streamable-http` to the
   Service, `auth.type: oauth` with `forwardToken: true`, labelled
