@@ -360,7 +360,7 @@
                     "properties": {
                         "allowPrivateIPs": {
                             "type": "boolean",
-                            "description": "Let the IdP's JWKS endpoint resolve to a private address when validating forwarded tokens (an in-cluster Dex)."
+                            "description": "Deprecated, no effect: the issuer host's JWKS endpoint may resolve to a private address without it."
                         }
                     }
                 },

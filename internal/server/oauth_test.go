@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	oauth "github.com/giantswarm/mcp-oauth"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -45,6 +46,7 @@ const testKID = "test-key"
 
 func newFakeIdP(t *testing.T) *fakeIdP {
 	t.Helper()
+	allowLoopbackJWKS(t)
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
@@ -145,14 +147,13 @@ func (f *fakeIdP) idToken(t *testing.T, aud []string, exp time.Time) string {
 
 func (f *fakeIdP) config() OAuthConfig {
 	return OAuthConfig{
-		BaseURL:            "http://localhost:8080",
-		Provider:           ProviderDex,
-		DexIssuerURL:       f.issuer,
-		DexClientID:        "agent-platform",
-		DexClientSecret:    "lab-only",
-		DexCAFile:          f.caFile,
-		TrustedAudiences:   []string{"agent-platform"},
-		SSOAllowPrivateIPs: true,
+		BaseURL:          "http://localhost:8080",
+		Provider:         ProviderDex,
+		DexIssuerURL:     f.issuer,
+		DexClientID:      "agent-platform",
+		DexClientSecret:  "lab-only",
+		DexCAFile:        f.caFile,
+		TrustedAudiences: []string{"agent-platform"},
 	}
 }
 
@@ -275,4 +276,14 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/api/v1/host", token))
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/.well-known/oauth-authorization-server", ""), "metadata stays public")
 	assert.Equal(t, http.StatusOK, status(http.MethodGet, "/.well-known/oauth-protected-resource/mcp", ""), "resource metadata names the MCP path")
+}
+
+// allowLoopbackJWKS lets the fake IdP's JWKS resolve to loopback, which a host
+// list never allows.
+func allowLoopbackJWKS(t *testing.T) {
+	t.Helper()
+	adjustServerConfig = func(cfg *oauth.ServerConfig) {
+		cfg.AllowPrivateIPJWKS = true //nolint:staticcheck // SA1019: httptest serves on loopback
+	}
+	t.Cleanup(func() { adjustServerConfig = nil })
 }
