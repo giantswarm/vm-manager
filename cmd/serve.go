@@ -94,6 +94,7 @@ type serveOptions struct {
 	googleClientSecret            string
 	oauthTrustedAudiences         string
 	ssoAllowPrivateIPs            bool
+	ssoAllowPrivateIPJWKSHosts    string
 	allowPublicClientRegistration bool
 }
 
@@ -139,7 +140,8 @@ environment variable named next to it; flags win over the environment.`,
 	f.StringVar(&o.googleClientID, "google-client-id", envOr("GOOGLE_CLIENT_ID", ""), "Google OAuth client ID (GOOGLE_CLIENT_ID)")
 	f.StringVar(&o.googleClientSecret, "google-client-secret", envOr("GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret (GOOGLE_CLIENT_SECRET)")
 	f.StringVar(&o.oauthTrustedAudiences, "oauth-trusted-audiences", envOr("OAUTH_TRUSTED_AUDIENCES", ""), "Comma-separated OAuth client IDs whose IdP id_tokens are accepted as bearer tokens — the platform client muster forwards tokens for and the portal logs in with (OAUTH_TRUSTED_AUDIENCES)")
-	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Deprecated, no effect: the issuer host's JWKS endpoint may resolve to a private address without it (SSO_ALLOW_PRIVATE_IPS)")
+	f.BoolVar(&o.ssoAllowPrivateIPs, "sso-allow-private-ips", envBool("SSO_ALLOW_PRIVATE_IPS", false), "Deprecated, no effect: the issuer host's JWKS endpoint may resolve to a private address without it; list any other JWKS host in --sso-allow-private-ip-jwks-hosts (SSO_ALLOW_PRIVATE_IPS)")
+	f.StringVar(&o.ssoAllowPrivateIPJWKSHosts, "sso-allow-private-ip-jwks-hosts", envOr("SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS", ""), "Comma-separated hosts, other than the issuer's own, whose JWKS may resolve to an RFC 1918 or RFC 4193 address: a jwks_uri the IdP's discovery document puts on another host. Loopback and link-local stay refused (SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS)")
 	f.BoolVar(&o.allowPublicClientRegistration, "allow-public-client-registration", envBool("VM_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION", false), "Accept unauthenticated dynamic client registration; labs only (VM_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION)")
 	return cmd
 }
@@ -253,6 +255,7 @@ func runServe(ctx context.Context, o *serveOptions) error {
 			GoogleClientID:                o.googleClientID,
 			GoogleClientSecret:            o.googleClientSecret,
 			TrustedAudiences:              splitList(o.oauthTrustedAudiences),
+			AllowPrivateIPJWKSHosts:       splitList(o.ssoAllowPrivateIPJWKSHosts),
 			AllowPublicClientRegistration: o.allowPublicClientRegistration,
 		}
 	}
@@ -294,7 +297,7 @@ func warnDeprecatedOAuthOptions(o *serveOptions, log *slog.Logger) {
 		log.Warn("--allow-private-oauth-urls (VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS) has no effect and will be removed: the Dex client reaches private addresses and follows HTTP_PROXY, HTTPS_PROXY and NO_PROXY without it")
 	}
 	if o.ssoAllowPrivateIPs {
-		log.Warn("--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect and will be removed: the issuer host's JWKS endpoint may resolve to a private address without it")
+		log.Warn("--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect and will be removed: the issuer host's JWKS endpoint may resolve to a private address without it; list any other JWKS host in --sso-allow-private-ip-jwks-hosts")
 	}
 }
 

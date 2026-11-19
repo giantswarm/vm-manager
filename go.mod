@@ -8,6 +8,7 @@ require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/giantswarm/mcp-oauth v1.15.0
 	github.com/giantswarm/mcp-toolkit v0.5.3
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.11
@@ -27,6 +28,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
 	gvisor.dev/gvisor v0.0.0-20261005183124-7d7fec1ac6f4
 	oras.land/oras-go/v2 v2.7.0
@@ -40,7 +42,6 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.9 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/btree v1.1.2 // indirect
@@ -86,7 +87,6 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
-	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/text v0.44.0 // indirect

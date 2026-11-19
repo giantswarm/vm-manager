@@ -231,10 +231,10 @@ func TestWarnDeprecatedOAuthOptions(t *testing.T) {
 	assert.Contains(t, logs.String(), "NO_PROXY")
 
 	logs.Reset()
-	logs.Reset()
 	warnDeprecatedOAuthOptions(&serveOptions{ssoAllowPrivateIPs: true}, log)
 	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), logs.String())
 	assert.Contains(t, logs.String(), "--sso-allow-private-ips (SSO_ALLOW_PRIVATE_IPS) has no effect")
+	assert.Contains(t, logs.String(), "--sso-allow-private-ip-jwks-hosts")
 
 	logs.Reset()
 	warnDeprecatedOAuthOptions(&serveOptions{}, log)

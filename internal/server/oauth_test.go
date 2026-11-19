@@ -220,13 +220,19 @@ func TestServerGuardsRESTAndMCPButNotProbes(t *testing.T) {
 
 func TestOAuthServerConfig(t *testing.T) {
 	rootCAs := x509.NewCertPool()
-	cfg := OAuthConfig{BaseURL: "https://vmm.example.com", TrustedAudiences: []string{"agent-platform"}, AllowPublicClientRegistration: true}
+	cfg := OAuthConfig{
+		BaseURL:                       "https://vmm.example.com",
+		TrustedAudiences:              []string{"agent-platform"},
+		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
+		AllowPublicClientRegistration: true,
+	}
 	assert.Equal(t, &oauth.ServerConfig{
 		Issuer:                        "https://vmm.example.com",
 		AllowRefreshTokenRotation:     true,
 		AllowPublicClientRegistration: true,
 		MaxClientsPerIP:               10,
 		TrustedAudiences:              []string{"agent-platform"},
+		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
 		JWKSRootCAs:                   rootCAs,
 	}, oauthServerConfig(cfg, rootCAs))
 }

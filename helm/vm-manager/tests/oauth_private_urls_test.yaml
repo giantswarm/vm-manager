@@ -32,3 +32,18 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --sso-allow-private-ips=true
+  - it: lists the JWKS hosts other than the issuer's that may resolve privately
+    set:
+      oauth.sso.allowPrivateIPJWKSHosts:
+        - keys.internal.example
+        - jwks.internal.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --sso-allow-private-ip-jwks-hosts=keys.internal.example,jwks.internal.example
+  - it: renders no JWKS host list by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          any: true
+          content: --sso-allow-private-ip-jwks-hosts

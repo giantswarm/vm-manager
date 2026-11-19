@@ -326,7 +326,9 @@ What the chart renders, and why:
   install smoke).
 - **OAuth** (`oauth.enabled`) against the platform identity: the issuer, client, client
   secret and CA fall back to `global.identity.*` and the base URL to `global.domain`, the
-  way model-manager's chart reads them; `oauth.sso.allowPrivateIPs` is deprecated and has no effect. The Dex client reaches a private address and follows
+  way model-manager's chart reads them; `oauth.sso.allowPrivateIPs` is deprecated and has no effect; a JWKS host other
+  than the issuer's that resolves to a private address goes in
+  `oauth.sso.allowPrivateIPJWKSHosts`. The Dex client reaches a private address and follows
   `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` without a setting; `oauth.dex.allowPrivateURLs`
   is deprecated and has no effect. The trusted audiences are `oauth.trustedAudiences` (default
   the platform client) plus `muster.mcpServer.auth.requiredAudiences`.

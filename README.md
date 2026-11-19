@@ -358,7 +358,8 @@ private address and an egress proxy through `HTTP_PROXY`, `HTTPS_PROXY` and `NO_
 no flag) and `google`. Nobody logs in to vm-manager
 itself: muster forwards the session's IdP id_token byte-identical and the portal sends the
 signed-in user's, both validated against the IdP's JWKS because their audience is in
-`--oauth-trusted-audiences`, also when the issuer host's JWKS endpoint is private;
+`--oauth-trusted-audiences`, also when the issuer host's JWKS endpoint is private (a
+`jwks_uri` on another host that resolves privately goes in `--sso-allow-private-ip-jwks-hosts`);
 a token for none of the trusted audiences is refused with `401`. Tokens from this server's
 own OAuth flow work too, `--allow-public-client-registration` opens dynamic registration
 for labs. The caller (`internal/identity`: subject, email, groups, source `sso|oauth`) is on
@@ -398,7 +399,7 @@ Every flag has an environment fallback named in `vm-manager serve --help`; flags
 | `--attestation` | `VM_MANAGER_ATTESTATION` | `verify` | `verify` or `noop` |
 | `--attestation-learn-golden` | `VM_MANAGER_ATTESTATION_LEARN_GOLDEN` | `false` | bring-up only, see [Attestation](#attestation) |
 | `--metrics-enabled`, `--metrics-guest-series-limit` | `VM_MANAGER_METRICS_ENABLED`, `VM_MANAGER_METRICS_GUEST_SERIES_LIMIT` | `true`, `1000` | see [Metrics](#metrics) |
-| `--enable-oauth`, `--oauth-base-url`, `--oauth-provider`, `--oauth-trusted-audiences`, `--allow-public-client-registration` | `VM_MANAGER_OAUTH_ENABLED`, `VM_MANAGER_OAUTH_BASE_URL`, `VM_MANAGER_OAUTH_PROVIDER`, `OAUTH_TRUSTED_AUDIENCES`, `VM_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION` | off, —, `dex`, —, `false` | see [Identity](#identity) |
+| `--enable-oauth`, `--oauth-base-url`, `--oauth-provider`, `--oauth-trusted-audiences`, `--sso-allow-private-ip-jwks-hosts`, `--allow-public-client-registration` | `VM_MANAGER_OAUTH_ENABLED`, `VM_MANAGER_OAUTH_BASE_URL`, `VM_MANAGER_OAUTH_PROVIDER`, `OAUTH_TRUSTED_AUDIENCES`, `SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS`, `VM_MANAGER_OAUTH_ALLOW_PUBLIC_REGISTRATION` | off, —, `dex`, —, —, `false` | see [Identity](#identity) |
 | `--dex-issuer-url`, `--dex-client-id`, `--dex-client-secret`, `--dex-ca-file` | `DEX_ISSUER_URL`, `DEX_CLIENT_ID`, `DEX_CLIENT_SECRET`, `DEX_CA_FILE` | — | the Dex provider; `--allow-private-oauth-urls` (`VM_MANAGER_OAUTH_ALLOW_PRIVATE_URLS`) is deprecated and has no effect |
 | `--google-client-id`, `--google-client-secret` | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | — | the Google provider |
 | `--launcher` | `VM_MANAGER_LAUNCHER` | `auto` | `systemd` (transient services under the user or system manager), `process` (plain children), or `auto` |
