@@ -227,12 +227,13 @@ func TestOAuthServerConfig(t *testing.T) {
 		AllowPublicClientRegistration: true,
 	}
 	assert.Equal(t, &oauth.ServerConfig{
-		Issuer:                        "https://vmm.example.com",
-		AllowRefreshTokenRotation:     true,
-		AllowPublicClientRegistration: true,
-		MaxClientsPerIP:               10,
-		TrustedAudiences:              []string{"agent-platform"},
-		AllowPrivateIPJWKSHosts:       []string{"keys.internal.example"},
-		JWKSRootCAs:                   rootCAs,
+		EnableClientIDMetadataDocuments: true,
+		Issuer:                          "https://vmm.example.com",
+		AllowRefreshTokenRotation:       true,
+		AllowPublicClientRegistration:   true,
+		MaxClientsPerIP:                 10,
+		TrustedAudiences:                []string{"agent-platform"},
+		AllowPrivateIPJWKSHosts:         []string{"keys.internal.example"},
+		JWKSRootCAs:                     rootCAs,
 	}, oauthServerConfig(cfg, rootCAs))
 }

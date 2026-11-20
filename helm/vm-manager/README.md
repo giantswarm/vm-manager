@@ -1,5 +1,8 @@
 # vm-manager
 
+CIMD is enabled by default. DCR is deprecated by MCP 2026-07-28 and remains a
+compatibility fallback; see the [OAuth registration guide](../../docs/oauth-client-registration.md).
+
 VM provisioning service for the Agent Platform — KVM virtual machines with an instance metadata service, a vTPM with measured boot, an immutable image and attestation, exposed as REST and MCP
 
 vm-manager as a platform pod: the Deployment runs privileged on a KVM node with

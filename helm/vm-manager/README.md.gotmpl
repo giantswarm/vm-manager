@@ -1,5 +1,8 @@
 {{ template "chart.header" . }}
 
+CIMD is enabled by default. DCR is deprecated by MCP 2026-07-28 and remains a
+compatibility fallback; see the [OAuth registration guide](../../docs/oauth-client-registration.md).
+
 {{ template "chart.description" . }}
 
 vm-manager as a platform pod: the Deployment runs privileged on a KVM node with
