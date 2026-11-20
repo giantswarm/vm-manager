@@ -138,13 +138,13 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 func oauthServerConfig(cfg OAuthConfig, rootCAs *x509.CertPool) *oauth.ServerConfig {
 	return &oauth.ServerConfig{
 		EnableClientIDMetadataDocuments: true,
-		Issuer:                        cfg.BaseURL,
-		AllowRefreshTokenRotation:     true,
-		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
-		MaxClientsPerIP:               10,
-		TrustedAudiences:              cfg.TrustedAudiences,
-		AllowPrivateIPJWKSHosts:       cfg.AllowPrivateIPJWKSHosts,
-		JWKSRootCAs:                   rootCAs,
+		Issuer:                          cfg.BaseURL,
+		AllowRefreshTokenRotation:       true,
+		AllowPublicClientRegistration:   cfg.AllowPublicClientRegistration,
+		MaxClientsPerIP:                 10,
+		TrustedAudiences:                cfg.TrustedAudiences,
+		AllowPrivateIPJWKSHosts:         cfg.AllowPrivateIPJWKSHosts,
+		JWKSRootCAs:                     rootCAs,
 	}
 }
 
