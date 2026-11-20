@@ -1,5 +1,10 @@
 # vm-manager
 
+OAuth client registration: CIMD is enabled by default. DCR is deprecated by MCP
+2026-07-28 and remains a compatibility fallback. See
+[registration, consent, egress and TLS configuration](docs/oauth-client-registration.md).
+
+
 [![test](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/test.yml)
 [![image](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/image.yml)
 [![e2e](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml/badge.svg)](https://github.com/giantswarm/vm-manager/actions/workflows/e2e.yml)
