@@ -20,3 +20,30 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --allow-private-oauth-urls=true
+  - it: still renders and passes the deprecated JWKS flag when sso.allowPrivateIPs is true
+    set:
+      oauth.sso.allowPrivateIPs: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --sso-allow-private-ips=true
+  - it: omits the deprecated JWKS flag by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --sso-allow-private-ips=true
+  - it: lists the JWKS hosts other than the issuer's that may resolve privately
+    set:
+      oauth.sso.allowPrivateIPJWKSHosts:
+        - keys.internal.example
+        - jwks.internal.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --sso-allow-private-ip-jwks-hosts=keys.internal.example,jwks.internal.example
+  - it: renders no JWKS host list by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          any: true
+          content: --sso-allow-private-ip-jwks-hosts

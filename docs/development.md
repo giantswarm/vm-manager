@@ -61,7 +61,7 @@ kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
 
 - `cmd/` — cobra CLI: `serve` (every flag has an environment fallback named in
   its help text, `VM_MANAGER_*` plus the sibling-compatible `DEX_*`, `GOOGLE_*`,
-  `OAUTH_TRUSTED_AUDIENCES`, `SSO_ALLOW_PRIVATE_IPS`), `image golden` (records
+  `OAUTH_TRUSTED_AUDIENCES`, `SSO_ALLOW_PRIVATE_IPS`, `SSO_ALLOW_PRIVATE_IP_JWKS_HOSTS`), `image golden` (records
   golden PCRs from a VM's verified quote and the server's firmware build into the
   image's `policy.json`),
   `version`; `cmd/vm-agent` is the guest binary (`attest --stage=initrd|ready`,
@@ -305,7 +305,7 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
 ./vm-manager serve -v --listen 127.0.0.1:18080 --enable-oauth \
   --oauth-base-url http://localhost:18080 \
   --dex-issuer-url https://dex.lab.example/dex --dex-client-id agent-platform --dex-client-secret ... \
-  --oauth-trusted-audiences agent-platform --sso-allow-private-ips
+  --oauth-trusted-audiences agent-platform
 ```
 
 `/healthz`, `/readyz`, `/metrics` and the OAuth metadata stay public; `/api/v1` and `/mcp`

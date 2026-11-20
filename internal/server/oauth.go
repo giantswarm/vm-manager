@@ -59,9 +59,11 @@ type OAuthConfig struct {
 	// MCP clients and the muster CLI log in with. Empty: only tokens this
 	// server issued itself.
 	TrustedAudiences []string
-	// SSOAllowPrivateIPs lets the JWKS endpoint used for forwarded tokens
-	// resolve to a private address (an in-cluster Dex).
-	SSOAllowPrivateIPs bool
+	// AllowPrivateIPJWKSHosts lists the hosts, other than the issuer's own,
+	// whose JWKS may resolve to RFC 1918 and RFC 4193 addresses: a jwks_uri
+	// the IdP's discovery document puts on another host. The issuer host needs
+	// no entry. Loopback, link-local and metadata addresses stay refused.
+	AllowPrivateIPJWKSHosts []string
 	// AllowPublicClientRegistration lets MCP clients register over DCR
 	// without a token (labs only).
 	AllowPublicClientRegistration bool
@@ -123,16 +125,7 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 		return nil, err
 	}
 	store := memory.New()
-	serverCfg := &oauth.ServerConfig{
-		Issuer:                        cfg.BaseURL,
-		AllowRefreshTokenRotation:     true,
-		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
-		MaxClientsPerIP:               10,
-		TrustedAudiences:              cfg.TrustedAudiences,
-		AllowPrivateIPJWKS:            cfg.SSOAllowPrivateIPs,
-		JWKSRootCAs:                   rootCAs,
-	}
-	srv, err := oauth.NewServer(provider, store, store, store, serverCfg, log,
+	srv, err := oauth.NewServer(provider, store, store, store, oauthServerConfig(cfg, rootCAs), log,
 		oauth.WithAuditor(security.NewAuditor(log, true)))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: server: %w", err)
@@ -140,6 +133,18 @@ func newOAuth(cfg OAuthConfig, mcpPath string, log *slog.Logger) (*oauthRuntime,
 	log.Info("OAuth resource server enabled", "provider", cfg.provider(), "issuer", cfg.BaseURL,
 		"trustedAudiences", cfg.TrustedAudiences)
 	return &oauthRuntime{server: srv, handler: handler.New(srv, log), cfg: cfg, mcpPath: mcpPath, log: log}, nil
+}
+
+func oauthServerConfig(cfg OAuthConfig, rootCAs *x509.CertPool) *oauth.ServerConfig {
+	return &oauth.ServerConfig{
+		Issuer:                        cfg.BaseURL,
+		AllowRefreshTokenRotation:     true,
+		AllowPublicClientRegistration: cfg.AllowPublicClientRegistration,
+		MaxClientsPerIP:               10,
+		TrustedAudiences:              cfg.TrustedAudiences,
+		AllowPrivateIPJWKSHosts:       cfg.AllowPrivateIPJWKSHosts,
+		JWKSRootCAs:                   rootCAs,
+	}
 }
 
 func newProvider(cfg OAuthConfig, rootCAs *x509.CertPool, log *slog.Logger) (providers.Provider, error) {
