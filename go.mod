@@ -7,7 +7,7 @@ toolchain go1.27.4
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/giantswarm/mcp-oauth v1.16.0
-	github.com/giantswarm/mcp-toolkit v0.5.5
+	github.com/giantswarm/mcp-toolkit v0.7.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-tpm v0.9.8
@@ -46,7 +46,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
