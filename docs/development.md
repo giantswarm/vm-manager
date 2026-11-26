@@ -46,10 +46,16 @@ below are the last full run on the development host.
 | `TestInstallBootSystemdBoot` | as `TestInstallBoot`, the installer booted through systemd-boot from a copy of the base DDI instead of `-kernel` (the firmware's fallback) | sysinstall finds the UKI on the ESP automounted at `/boot` and installs; the rest as `TestInstallBoot` | as `TestInstallBoot` |
 | `TestNetworkIMDS` | `vm-manager serve` as a child process through `/mcp`, the image directory without its sysupdate tree | `create_network`, `create_vm` with `wait_for: ready` and no Kubernetes version; hostname, ssh key and instance id from the IMDS; `is-system-running` clean, `vm-kubernetes.service` succeeded on the missing `/kubernetes-version`; `systemd-report` upload arrived; `forward_port` serves sshd; `delete_vm`, `delete_network`, SIGTERM leave no qemu or swtpm | `api_install_seconds`, `api_boot_to_ready_seconds` in the same range |
 | `TestIgnition` | MCP | user-data as Ignition JSON: the first installed boot applies its files and unit from the initrd stages, a reboot leaves Ignition idle | first installed boot |
-| `TestPersistentEtc` | MCP | a file and an enabled unit in `/etc` survive `reboot_vm`; host key and machine ID unchanged; var unmounted cleanly (no `recovering journal`) | `reboot_to_ready_seconds=11` |
-| `TestKubernetesSysext` | MCP | `vm-kubernetes.service` pulls the sysext, merges it, containerd and kubelet up, PCR 13 equals `policy.json` | `kubernetes_pull_seconds=2`, `kubernetes_unit_seconds=2.7` |
+| `TestPersistentEtc` | MCP | a file and an enabled unit in `/etc` survive `reboot_vm`; host key and machine ID unchanged; var unmounted cleanly (no `recovering journal`); a reboot from inside the guest comes back ready as a new QEMU process | `reboot_to_ready_seconds=11` |
+| `TestKubernetesSysext` | MCP | `vm-kubernetes.service` pulls the sysext, merges it, containerd and kubelet up, PCR 13 equals `policy.json`, the root's and the sysext's verity devices verified by the kernel | `kubernetes_pull_seconds=2`, `kubernetes_unit_seconds=2.7` |
+| `TestIPE` | QEMU directly, as `TestInstallBoot`, with the image certificate in the VM's db | the IPE policy active and enforcing, the certificate on `.platform`, the root opened with its signature; a copy of an image binary does not run from `/var/tmp`, `/etc`, `/run`, `/tmp` or `/root`, nor does a script on var (bash reading it does); no `CAP_MAC_ADMIN` anywhere, usermode helpers included, so root can neither switch enforcement off (a core_pattern helper tries) nor load a policy; after a reboot that root prepared (the policy deleted from `/etc/ipe`, a manager drop-in restoring the capability) both are back to the image's, and var was unmounted cleanly through the exitrd | 42 s for install and two boots |
 | `TestAttestation` | three servers in turn: learn mode, verify with the recorded golden values, verify on `OVMF_CODE.secboot.4m.fd` | verified initrd and ready quotes, user-data applied, `golden_firmware` recorded; `golden mismatch` on PCR 0 and 7 with the other firmware, naming the recorded build, user-data gated, Ignition in its fetch loop | 111 s for the three |
 | `TestKubernetesCluster` | MCP plus the host's `kubectl` through `forward_port` 6443 | control plane from CAPI-shaped Ignition (`kubeadm init` ordered `After=vm-kubernetes.service`), flannel, a worker joined with a bootstrap token, two Ready nodes with `giantswarm-vm://` providerIDs, cross-node DNS, clean units and unmanaged CNI links | `cp_ready_seconds=85`, `worker_join_seconds=46`, 2.5 to 3 min in total |
+
+`TestKubernetesCluster` skips an image with an IPE policy (one that ships `<id>_<version>.crt`):
+the policy runs no container, so neither the control plane's static pods nor flannel start
+([images/README.md](../images/README.md#ipe)). It returns with container images as signed
+dm-verity layers.
 
 `TestKubernetesCluster` needs `kubectl` on the host and internet access from the VMs
 (registry.k8s.io, ghcr.io, github.com for the flannel manifest) and raises
@@ -290,7 +296,13 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   failing tests keep theirs.
 - **A boot outside vm-manager.** `make -C images smoke-boot` (systemd-vmspawn, no IMDS:
   the IMDS, attestation and Kubernetes units skip themselves) and `PROFILE=debug` for
-  root autologin on the console.
+  root autologin on the console. Any firmware that boots the image needs its certificate in
+  db, or PID 1 stops with `Failed to load IPE policy`: `vm-manager image enroll <vars>
+  --cert images/build/<id>_<v>.crt` writes it into an OVMF variable store, which smoke-boot
+  hands systemd-vmspawn as `--efi-nvram-template`.
+- **Something does not run.** IPE denials are audit records in the guest's journal
+  (`journalctl -b | grep IPE_ACCESS`: operation, path, device and the rule that denied it);
+  only code from the image's verity root and its sysexts runs (images/README.md, IPE).
 - **A vm-manager restart** marks every VM that was running as `stopped` with a note in
   `lastError`; `start_vm` boots them again.
 - **A guest's shutdown.** Over `exec_vm`, `systemctl log-level debug` and
@@ -372,7 +384,7 @@ option as `reconnect=<s>` instead of `reconnect-ms=`. `test` downloads the artif
 socket paths) and `VM_MANAGER_E2E_KEEP=1`.
 
 Fast subset (PRs, 40-minute job timeout): `TestInstallBoot`, `TestInstallBootSystemdBoot`, `TestNetworkIMDS`,
-`TestPersistentEtc`, `TestKubernetesSysext`. Full suite (nightly, 60 minutes): those plus
+`TestPersistentEtc`, `TestKubernetesSysext`, `TestIPE`. Full suite (nightly, 60 minutes): those plus
 `TestIgnition`, `TestKubernetesVersions` (one VM per published sysext version),
 `TestAttestation` (the tamper case uses Ubuntu's `OVMF_CODE_4M.secboot.fd`) and
 `TestKubernetesCluster` (needs the runner's `kubectl` and internet access from the VMs). The job

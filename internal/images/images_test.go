@@ -39,6 +39,7 @@ func imageDir(t *testing.T) string {
 	writeFile(t, filepath.Join(dir, SysupdateDirName, KubernetesComponent, sumsFile),
 		"aaaa  kubernetes_1.31.2.raw\nbbbb  kubernetes_1.32.0.raw\ncccc  SHA256SUMS.gpg\nmalformed\n")
 	writeFile(t, filepath.Join(dir, "giantswarm-vm-base_0.9.0"+policySuffix), `{"image_version":"0.9.0","pcr11":{}}`)
+	writeFile(t, filepath.Join(dir, "giantswarm-vm-base_0.10.0"+certSuffix), "certificate")
 	writeFile(t, filepath.Join(dir, policyFile), `{"image_id":"giantswarm-vm-base","image_version":"0.10.0","pcr11":{"enter-initrd":"ab"}}`)
 	return dir
 }
@@ -70,6 +71,8 @@ func TestCatalogScan(t *testing.T) {
 	assert.JSONEq(t, `{"image_version":"0.9.0","pcr11":{}}`, string(list[1].Policy), "per-image policy file wins")
 	assert.Nil(t, list[2].Policy, "policy.json names another version")
 	assert.Nil(t, list[3].Policy)
+	assert.Equal(t, filepath.Join(dir, "giantswarm-vm-base_0.10.0.crt"), img.Certificate)
+	assert.Empty(t, list[1].Certificate, "an image without a .crt")
 }
 
 func TestCatalogGetAndDefault(t *testing.T) {

@@ -2,7 +2,14 @@ package qemu
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +23,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 )
 
 // qmpPathOf extracts the QMP socket path from a QEMU argument list, undoing
@@ -236,4 +244,96 @@ func TestInstanceStop(t *testing.T) {
 			t.Fatal("no event")
 		}
 	})
+}
+
+// writeTestCert writes a self-signed certificate as PEM and returns its path
+// and the parsed certificate.
+func writeTestCert(t *testing.T, dir, cn string) (string, *x509.Certificate) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: cn}, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<31, 0)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	c, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	path := filepath.Join(dir, cn+".crt")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	return path, c
+}
+
+// TestRuntimeUEFIDB: every start writes Spec.UEFIDB as db and drops the
+// Secure Boot variables a guest in setup mode may have written, so a VM
+// never boots with a trust anchor it chose itself.
+func TestRuntimeUEFIDB(t *testing.T) {
+	readDB := func(t *testing.T, path string) (uefivars.Variable, *uefivars.Store) {
+		t.Helper()
+		data, err := os.ReadFile(path) // #nosec G304 -- the test's temp file
+		require.NoError(t, err)
+		s, err := uefivars.Parse(data)
+		require.NoError(t, err)
+		db, ok := s.Get("db", uefivars.ImageSecurityDatabase)
+		require.True(t, ok, "db in the variable store")
+		return db, s
+	}
+	h := newHarness(t, Options{})
+	require.NoError(t, os.WriteFile(h.template, uefivars.Blank(), 0o600))
+	certPath, cert := writeTestCert(t, t.TempDir(), "image")
+	h.spec.UEFIDB = certPath
+
+	inst, _ := h.start(t)
+	db, _ := readDB(t, h.spec.OVMFVars)
+	assert.Equal(t, uefivars.SignatureList(cert), db.Data, "db from the image certificate")
+	require.NoError(t, inst.Kill())
+	exited(t, inst)
+
+	// What the guest left: its own certificate in db and a PK.
+	_, guest := writeTestCert(t, t.TempDir(), "guest")
+	_, s := readDB(t, h.spec.OVMFVars)
+	require.NoError(t, s.Set("db", uefivars.ImageSecurityDatabase, uefivars.AttrDB, uefivars.SignatureList(cert, guest)))
+	require.NoError(t, s.Set("PK", uefivars.GlobalVariable, uefivars.AttrDB, uefivars.SignatureList(guest)))
+	require.NoError(t, os.WriteFile(h.spec.OVMFVars, s.Bytes(), 0o600))
+	inst, err := h.rt.Start(context.Background(), h.spec)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Kill() })
+	db, s = readDB(t, h.spec.OVMFVars)
+	assert.Equal(t, uefivars.SignatureList(cert), db.Data, "the guest's db is replaced")
+	_, ok := s.Get("PK", uefivars.GlobalVariable)
+	assert.False(t, ok, "the guest's PK is removed")
+
+	t.Run("an unreadable certificate starts nothing", func(t *testing.T) {
+		h := newHarness(t, Options{})
+		require.NoError(t, os.WriteFile(h.template, uefivars.Blank(), 0o600))
+		h.spec.UEFIDB = filepath.Join(t.TempDir(), "missing.crt")
+		_, err := h.rt.Start(context.Background(), h.spec)
+		assert.ErrorContains(t, err, "UEFI db certificate")
+		assert.Empty(t, h.exec.Started())
+	})
+	t.Run("a store that is no variable store starts nothing", func(t *testing.T) {
+		h := newHarness(t, Options{})
+		h.spec.UEFIDB = certPath
+		_, err := h.rt.Start(context.Background(), h.spec)
+		assert.ErrorContains(t, err, "OVMF vars")
+		assert.Empty(t, h.exec.Started())
+	})
+}
+
+// TestInstanceShutdownReason: the reason of QEMU's last SHUTDOWN event is
+// there once the process exited, whether or not anyone read the events.
+func TestInstanceShutdownReason(t *testing.T) {
+	h := newHarness(t, Options{})
+	inst, p := h.start(t)
+	h.qmp.emit(Event{Name: EventShutdown, Data: json.RawMessage(`{"guest":true,"reason":"guest-reset"}`)})
+	require.Eventually(t, func() bool { return inst.QMP().ShutdownReason() == ShutdownGuestReset }, 5*time.Second, 10*time.Millisecond)
+	h.qmp.closeConns()
+	p.Exit(0)
+	exited(t, inst)
+	assert.Equal(t, ShutdownGuestReset, inst.ShutdownReason())
+
+	h = newHarness(t, Options{})
+	inst, p = h.start(t)
+	h.qmp.closeConns()
+	p.Exit(0)
+	exited(t, inst)
+	assert.Empty(t, inst.ShutdownReason(), "no SHUTDOWN event")
 }

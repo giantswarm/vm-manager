@@ -5,6 +5,8 @@ mkosi 27 project that builds the guest image described in
 systemd 261, an erofs root protected by signed dm-verity, a UKI with signed
 expected PCR 11 values, systemd-boot on the ESP, plus the Kubernetes node stack
 as a separately versioned, signed systemd-sysext (see [Kubernetes sysext](#kubernetes-sysext)).
+The kernel runs code only from those signed dm-verity volumes: an IPE policy, locked for
+the whole boot (see [IPE](#ipe)).
 Everything runs unprivileged (mkosi's own sandbox and user namespaces), no sudo anywhere.
 
 ```
@@ -25,8 +27,9 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.repart/` | partition definitions of the *base image*: ESP 256M, erofs root (zstd), verity hash, verity signature |
 | `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, `persistent-etc.service` with its script `usr/lib/vm-manager/persistent-etc` (see [Persistent state](#persistent-state)), the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
-| `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp` |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `verify` (base), `verify-kubernetes` (every published version), `smoke-boot` |
+| `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp`. It is the IPE policy's version too |
+| `ipe/giantswarm-vm.policy` | the IPE policy, signed by `make ipe` into `build/ipe/tree/etc/ipe/giantswarm-vm.p7b` for the base tree (see [IPE](#ipe)) |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy, with the verity key), `verify` (base), `verify-kubernetes` (every published version), `smoke-boot` |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -46,6 +49,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.efi` | the UKI (`.linux`, `.initrd`, `.cmdline`, `.osrel`, `.uname`, `.sbat`, `.pcrpkey`, `.pcrsig`) |
 | `build/giantswarm-vm-base_<v>.initrd` | the initrd inside the UKI (default mkosi initrd + network profile + kernel modules initrd) |
 | `build/giantswarm-vm-base_<v>.roothash` | verity root hash; also on the UKI command line as `roothash=` |
+| `build/giantswarm-vm-base_<v>.crt` | the verity certificate (`keys/verity.crt`): signs the root hash, the sysexts and the IPE policy; vm-manager enrolls it into every VM's UEFI db (see [IPE](#ipe)) |
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
@@ -145,7 +149,11 @@ cache, `make images verify` (everything, warm) ~30 s.
   `vm-kubernetes.service`, `vm-report-upload.timer`, and disables
   `systemd-sysupdate*.timer`, `systemd-homed`,
   `machines.target`. `systemd-pcrphase*` are the systemd defaults.
-- Kernel command line: `console=ttyS0,115200 systemd.imds.import=yes systemd.firstboot=off`
+- `/etc/ipe/giantswarm-vm.p7b`, the signed IPE policy PID 1 loads, and
+  `system.conf.d/50-vm-manager-ipe.conf`, the bounding set without `CAP_MAC_ADMIN` that
+  locks it (see [IPE](#ipe)).
+- Kernel command line: `console=ttyS0,115200 systemd.imds.import=yes systemd.firstboot=off
+  lsm=landlock,lockdown,yama,integrity,ipe,bpf systemd.verity_root_options=root-hash-signature=auto`
   plus `roothash=<hash>` added by mkosi.
 - `systemd-modules-load.service.d/` and `systemd-sysctl.service.d/vm-manager.conf`:
   `After=systemd-sysext.service`, so `modules-load.d/` and `sysctl.d/` entries of a
@@ -276,7 +284,9 @@ Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only; th
 release pipeline adds the golden values of the release's container image before it
 publishes the artifact (`hack/guest-image-golden.sh`). The
 firmware PCRs a golden value can pin across VMs are 0 (firmware code), 2 and 3 (option
-ROMs), 4 (boot loader and UKI), 6 (os-separator only) and 7 (Secure Boot policy). PCR 1
+ROMs), 4 (boot loader and UKI), 6 (os-separator only) and 7 (Secure Boot policy, which
+includes db and with it the image certificate vm-manager enrolls, see [IPE](#ipe): the
+values belong to an image's signing key as much as to the firmware). PCR 1
 and 5 are quoted and recorded but not compared: EDK2 measures the SMBIOS tables into
 PCR 1, and the type 11 strings vm-manager passes are per-VM credentials (hostname,
 machine ID, SSH key, notify socket), as is the `Boot####` entry with the ESP's partition
@@ -314,6 +324,11 @@ fills for `systemd.volatile=`.
   holds on the first boot only (`/etc/machine-id` is `uninitialized` in the image), so
   `systemd-firstboot.service` runs once.
 - An empty upper hides nothing: the merged `/etc` starts out as the image's `/etc`.
+- Three paths are always the image's: before it mounts the overlay the script drops what
+  the upper layer holds for `ipe/`, `systemd/system.conf` and `systemd/system.conf.d`, so
+  a boot cannot hide the IPE policy or restore `CAP_MAC_ADMIN` for the next (see
+  [IPE](#ipe)). The installer boot, which runs without the overlay, sees the image's
+  `/etc` anyway.
 - `/home`, `/srv` and `/usr/local` stay read-only (nothing in the image uses them);
   another writable directory is one `bind` line in the script. `/root` and `/opt` are
   bind mounts rather than symlinks into `/var` because systemd-tmpfiles 261 refuses
@@ -343,7 +358,8 @@ fills for `systemd.volatile=`.
   dirty journal, and the next boot's fsck logs `var: recovering journal`. The fix is
   systemd's exitrd (bootup(7)): `tmpfiles.d/vm-manager-exitrd.conf` populates
   `/run/initramfs` on every boot with an `/etc/initrd-release` marker, a `lib64` symlink
-  and a `shutdown` script that re-executes `/usr/lib/systemd/systemd-shutdown`;
+  and `shutdown`, a symlink to the image's `/usr/lib/systemd/systemd-shutdown` (a script on
+  `/run` would not run under the IPE policy);
   `run-initramfs-root.mount` and `run-initramfs-usr.mount` (enabled by the preset) bind
   the root file system below its overlays (a private, non-recursive bind of `/`) and its
   `usr/` as the exitrd's `/usr`, so that the exitrd runs the image's own binaries, not the
@@ -556,13 +572,87 @@ VM's Kubernetes version and falls back to `golden.sha256.13` for a VM without on
 (`/usr/lib/verity.d/verity.crt`) plus `SHA256SUMS.gpg` for the download; PCR 13 binds
 the attested boot to the exact artifact.
 
+## IPE
+
+The kernel's [Integrity Policy Enforcement](https://docs.kernel.org/admin-guide/LSM/ipe.html)
+LSM makes the read-only root an executable boundary as well: a VM runs, maps executable and
+loads into the kernel only what comes from a dm-verity device whose root hash signature the
+kernel verified itself. That is the base image's root and the Kubernetes sysext (IPE judges
+an overlay file by its real inode, so the sysext's binaries in the `/usr` overlay qualify).
+Nothing on the var partition, in the upper layer of the `/etc` overlay, on `/run`, `/tmp` or
+`/root`, and no anonymous executable memory runs; no kernel module, firmware, kexec image,
+IMA policy or X.509 certificate comes from there either. Root is no exception, and cannot
+switch it off.
+
+The policy, [`ipe/giantswarm-vm.policy`](ipe/giantswarm-vm.policy):
+
+    policy_name=giantswarm-vm policy_version=<image version>
+    DEFAULT action=DENY
+    op=EXECUTE dmverity_signature=TRUE action=ALLOW
+    op=FIRMWARE … op=KMODULE … op=KEXEC_IMAGE … op=KEXEC_INITRAMFS … op=POLICY … op=X509_CERT  (the same)
+
+The global default is DENY, so an operation a newer kernel adds stays denied until the
+policy allows it. No rule trusts the initramfs (`boot_verified`): the initrd runs before the
+policy, as part of the measured UKI, and executes only what it carries.
+
+How it holds together:
+
+| Piece | Where | Does |
+|---|---|---|
+| Trust in the image's key | vm-manager | `create_vm` keeps a copy of the image's certificate (`<id>_<v>.crt`, which is `keys/verity.crt`) in the VM's directory, and every start of the VM's QEMU writes it into the db of the VM's UEFI variable store and removes PK, KEK, dbx, dbt and dbr (`internal/uefivars`, `qemu.Spec.UEFIDB`; Secure Boot stays off). The guest kernel loads db onto its `.platform` keyring, which Arch's kernel trusts for dm-verity root hash signatures and for IPE policies (`CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_PLATFORM_KEYRING`, `CONFIG_IPE_POLICY_SIG_PLATFORM_KEYRING`). A VM keeps the certificate of the image it was created from |
+| The trust anchor out of the guest's reach | vm-manager | The firmware stays in setup mode, which authenticates no write to db, so the store is rewritten before every QEMU start, and the installed boot runs with `-no-reboot`: the guest's reboot ends QEMU (`SHUTDOWN` reason `guest-reset`) and vm-manager starts the next boot as a new process, instead of a reset that would boot from the store as the guest left it. Whatever a boot writes into db, PK, KEK or dbx is gone at the next one |
+| IPE started | UKI command line | `lsm=` is the kernel's `CONFIG_LSM` (`landlock,lockdown,yama,integrity,bpf`) plus `ipe`: Arch builds IPE in but does not start it |
+| The root verified by the kernel | UKI command line, initrd | `systemd.verity_root_options=root-hash-signature=auto`: systemd-veritysetup opens the root with the signature from the verity signature partition, which udev's `dissect_image` builtin puts on the root partition. Stock udev dissects only the disk systemd-boot reported; `85-vm-manager-dissect-image.rules` in the initrd dissects every other GPT disk too, the installer disk of a `-kernel` boot included. `dmsetup table root` shows `root_hash_sig_key_desc` |
+| The sysext verified by the kernel | systemd-sysext | Hands the signature to the kernel first and falls back to `/usr/lib/verity.d` in userspace only when the kernel refuses; with the certificate on `.platform` it does not refuse |
+| The policy | `/etc/ipe/giantswarm-vm.p7b` | Signed inline (PKCS#7) with the verity key by `scripts/sign-ipe-policy`. PID 1 loads and activates every `/etc/ipe/*.p7b` right after the switch to the real root, before it starts anything there |
+| Locked | `/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf`, UKI command line | `CapabilityBoundingSet=~CAP_MAC_ADMIN`, applied by PID 1 after it loaded the policy, and `sysctl.kernel.usermodehelper.{bset,inheritable}` without it for the processes the kernel starts itself (core_pattern pipes, modprobe, the hotplug and request-key helpers), set before init and never raised again: no process holds `CAP_MAC_ADMIN` for the rest of the boot, and every write below `/sys/kernel/security/ipe/` needs it. Nobody can set `enforce` to 0, load a policy or activate one |
+| Locked across boots | `persistent-etc` (initrd) | Drops whatever the `/etc` overlay's upper layer holds for `ipe/`, `systemd/system.conf` and `systemd/system.conf.d` (a file, a whiteout, a symlink in place of `/etc/systemd`) before it mounts the overlay, so a boot cannot hide the policy or hand the capability back for the next |
+| Fail closed | PID 1 | A policy the kernel refuses (no certificate in db: a variable store created without it, another firmware) stops PID 1 with `Failed to load IPE policy`, `Freezing execution`; the root, opened without a kernel-verified signature (the kernel logs `Root hash verification failed (-ENOKEY)`), would run nothing under the policy anyway |
+
+On a running VM: `cat /sys/kernel/security/ipe/policies/giantswarm-vm/{active,version}`,
+`cat /sys/kernel/security/ipe/enforce`, `keyctl show %:.platform`,
+`dmsetup table --target verity`, `cat /proc/sys/kernel/usermodehelper/bset`; denials are audit
+records in the journal (`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rule="DEFAULT action=DENY"`).
+`e2e/ipe_test.go` proves all of it, including a core_pattern helper refused when it tries to
+switch enforcement off and a reboot after root hid the policy and planted a drop-in that
+restores the capability; `e2e/persistent_etc_test.go` a reboot from inside the guest coming
+back as a new QEMU process.
+
+What the policy means for workloads and what it does not cover:
+
+- **Containers do not run.** A container's executables are image layers containerd unpacks
+  on the var partition, which the policy does not trust: no pod starts, kubeadm's static
+  pods and flannel included, and neither does a CAPI bootstrap's `/etc/kubeadm.sh`.
+  containerd and kubelet themselves run (they come from the sysext). Kubernetes nodes need
+  container images delivered as signed dm-verity layers before they can run pods again;
+  `e2e/kubernetes_cluster_test.go` skips an image with IPE until then.
+- **Interpreters.** IPE checks what the kernel executes and maps. `bash /var/tmp/x.sh` runs
+  the image's bash, which then reads the script as data; only an interpreter that asks with
+  `execveat(AT_EXECVE_CHECK)` lets IPE judge the script, and bash does not. Executing the
+  script itself (`/var/tmp/x.sh`) is denied.
+- **JIT and other anonymous executable memory** is denied: a runtime that generates code
+  (a JIT, older libffi closures) fails under the policy.
+- **The kernel command line of a later boot.** With Secure Boot off, systemd-stub takes a
+  command line a boot loader entry on the ESP passes over the UKI's own; root can write the
+  ESP. Such a boot runs the same UKI (PCR 4 and 11 do not change) without `lsm=…ipe`; the
+  command line lands in PCR 12, which attestation does not verify. Secure Boot (the stub
+  then ignores such a command line) or a verified PCR 12 closes it: items 26 and 24 of
+  [docs/plan.md](../docs/plan.md).
+- **Root's other tools.** `ptrace` and `/proc/<pid>/mem` can still change a running,
+  allowed process.
+
+Local work: `make -C images smoke-boot` enrolls the certificate into the NVRAM template it
+hands systemd-vmspawn (`vm-manager image enroll <vars> --cert <crt>`, what vm-manager does before every QEMU start)
+and asserts the policy active and enforcing; the e2e harness enrolls it the same way. Without
+the certificate the image does not boot (see Fail closed above).
+
 ## Keys
 
 `make keys` (`scripts/gen-keys`) writes into the git-ignored `images/keys/`:
 
 | File | Used for |
 |---|---|
-| `verity.key`, `verity.crt` | `VerityKey=`/`VerityCertificate=`: signature partition of the verity root hash |
+| `verity.key`, `verity.crt` | `VerityKey=`/`VerityCertificate=`: signature partition of the verity root hash, of the sysexts' too; signs the IPE policy (`scripts/sign-ipe-policy`). The certificate is published as `build/<id>_<v>.crt` for vm-manager's db enrollment |
 | `pcr.key`, `pcr.crt` | `SignExpectedPcrKey=`/`SignExpectedPcrCertificate=`: `.pcrsig`/`.pcrpkey` in the UKI |
 | `gnupg/`, `import-pubring.pgp` | PGP key that signs `SHA256SUMS`; the public keyring is installed as `/etc/systemd/import-pubring.pgp` (systemd-pull executes `gpg` against it, which is why `gnupg` is in the image) |
 
@@ -594,8 +684,14 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    `systemd-pcrphase-initrd.service` and before `ignition-fetch.service` (the drop-in),
    the ready-stage unit enabled in the root and the same binary size in the root erofs
    (`dump.erofs`).
-7. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
-8. Writes `build/policy.json`.
+7. IPE: `lsm=` on the UKI cmdline starts `ipe`, `root-hash-signature=auto` is there,
+   `/etc/ipe/giantswarm-vm.p7b` in the root verifies against `keys/verity.crt` (which
+   `build/<id>_<v>.crt` is) and names policy `giantswarm-vm` at the image version with
+   `DEFAULT action=DENY`, the manager drop-in drops `CAP_MAC_ADMIN`, the exitrd's
+   `/shutdown` is a symlink, the initrd carries the dissect rule and the pinning in
+   `persistent-etc`.
+8. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
+9. Writes `build/policy.json`.
 
 `make verify-kubernetes` (`scripts/verify-kubernetes`, offline, unprivileged):
 
@@ -633,14 +729,22 @@ the `modules-load`/`sysctl` ordering. That is what a smoke boot with the sysext 
 `/var/lib/extensions/` must watch for (see Deviations).
 
 `make smoke-boot` (`scripts/smoke-boot`): `systemd-vmspawn --image=build/smoke.raw
---firmware=uefi --tpm=yes --console=read-only --network-user-mode` (QEMU, OVMF, swtpm)
-on a throw-away sparse copy of the image grown to 8G, with three boot credentials: a
-fixed `system.machine_id` and a `systemd.extra-unit.*`/`systemd.unit-dropin.*` pair that
-powers the VM off after `systemctl is-system-running --wait`. `timeout 180`, console in
-`build/smoke.log`, asserts `Reached target Multi-User System` (or a `login:` prompt with
+--firmware=uefi --secure-boot=no --efi-nvram-template=build/smoke-vars.fd --tpm=yes
+--console=read-only --network-user-mode` (QEMU, OVMF, swtpm) on a throw-away sparse copy
+of the image grown to 8G. The NVRAM template is the host's OVMF variable template with
+`build/<id>_<v>.crt` in db (`go run .. image enroll`), as vm-manager writes it for every
+VM. Three boot credentials: a fixed `system.machine_id` and a
+`systemd.extra-unit.*`/`systemd.unit-dropin.*` pair that, after `systemctl
+is-system-running --wait`, prints the IPE policy's state to the console and powers the VM
+off. `timeout 180`, console in `build/smoke.log`, asserts the policy active and
+enforcing and `Reached target Multi-User System` (or a `login:` prompt with
 `PROFILE=debug`).
 
 ## How vm-manager boots this image
+
+Both phases boot OVMF with the VM's own variable store, a copy of the host's template
+with `build/giantswarm-vm-base_<v>.crt` in db, written once when the VM is created (see
+[IPE](#ipe)).
 
 Installer boot (phase A): QEMU with `-kernel build/giantswarm-vm-base_<v>.efi` (direct
 UKI boot under OVMF), the `.raw` attached read-only, the blank target disk, swtpm,
@@ -659,7 +763,7 @@ Installed boot (phase B): OVMF -> systemd-boot -> `EFI/Linux/giantswarm-vm-base_
 In the initrd, `systemd-imds-early-network.service` configures networkd for
 169.254.169.254, `systemd-imds-import.service` turns `/hostname` and `/public-keys/0`
 into `firstboot.hostname` and `ssh.authorized_keys.root` credentials; the verity root is
-set up from `roothash=`, `persistent-etc.service` mounts var from the disk and the
+set up from `roothash=` with its signature, `persistent-etc.service` mounts var from the disk and the
 persistent `/etc` overlay, `/root` and `/opt` on it (see [Persistent state](#persistent-state)).
 On the first installed boot vm-manager adds `ignition.firstboot` to the command line and
 the `ignition-*` units fetch `/user-data` from the IMDS and apply it to `/sysroot` before
@@ -681,6 +785,12 @@ on AF_VSOCK port 22.
 - `systemd.firstboot=off` on the command line: disables only the interactive prompts
   of systemd-firstboot (the unit still runs and applies credentials), needed for a
   headless VM.
+- `85-vm-manager-dissect-image.rules` (initrd) runs udev's `dissect_image` builtin on
+  every GPT disk, not only the one systemd-boot reported: vm-manager's installer boot
+  starts the UKI with `-kernel`, so no disk is the reported boot disk, and systemd 262's
+  veritysetup refuses `root-hash-signature=auto` when the root partition carries no
+  `ID_DISSECT_PART_ROOTHASH_SIG` (`cannot determine root hash signature`), which left the
+  installer boot without a root. See [IPE](#ipe).
 - `UnifiedKernelImages=unsigned`: in mkosi 27 `yes` means `signed`, which searches for
   a distro-prebuilt UKI and fails on Arch ("no kernel was found").
 - `SplitArtifacts=pcrs` produces no file for a locally built UKI in mkosi 27; the

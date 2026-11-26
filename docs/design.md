@@ -31,6 +31,7 @@ systemd-pcrextend (PCR 13), and observed through the guest's systemd-report uplo
 | Provisioning | Installer boot runs systemd-sysinstall onto a storage-provider volume, then reboots into systemd-firstboot | Same flow later works for bare metal; credentials bound to the VM's own vTPM |
 | Network | Rootless userspace SDN via gvisor-tap-vsock embedded in vm-manager | No root, runs on laptops and GitHub Actions; IMDS served inside the stack |
 | Attestation | swtpm vTPM + measured boot; vm-manager verifies a TPM quote and gates user-data | The "shielded VM" story: only integrity-proven VMs get bootstrap secrets |
+| Code integrity | IPE: the kernel executes and loads code only from dm-verity volumes whose signature it verified (the root, the sysexts); vm-manager writes the image's certificate into each VM's UEFI db before every QEMU start (platform keyring), and a guest's reboot is a new QEMU; PID 1 and the kernel's usermode helpers lose `CAP_MAC_ADMIN` after the signed policy is loaded | Immutable for real: root on the node can write to `/var` and `/etc` but runs nothing the image did not ship, and cannot switch the policy off. No container runs until images arrive as signed dm-verity layers ([images/README.md](../images/README.md#ipe)) |
 | Kubernetes | systemd-sysext layer pulled at boot as a systemd-sysupdate component | One base image, N Kubernetes versions, measured into PCR 13 |
 | User-data executor | Ignition in the mkosi initrd; cluster-manager sets KubeadmConfig `format: ignition` | The standard first-boot provisioner for immutable images (Flatcar, FCOS); the guest agent only attests |
 | CI | GitHub Actions with KVM for image build + boot e2e; unit/lint everywhere | Hosted runners expose /dev/kvm; no self-hosted infra to start |
@@ -117,6 +118,10 @@ sysext; [images/README.md](../images/README.md) is the reference):
   - `persistent-etc.service` in the initrd: var partition, `/etc` overlay with its upper
     directory on var, `/root` and `/opt` bind mounts, before `initrd-root-fs.target`; an
     exitrd so that `systemd-shutdown` can release the overlays and unmount var cleanly.
+  - IPE: `lsm=…,ipe` and `systemd.verity_root_options=root-hash-signature=auto` on the UKI
+    command line, the signed policy `/etc/ipe/giantswarm-vm.p7b` (run only from
+    kernel-verified dm-verity), a manager drop-in that drops `CAP_MAC_ADMIN` once PID 1
+    loaded it, and `persistent-etc` keeping both out of the `/etc` overlay's reach.
   - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
     Ignition with its `ignition-*` units ported from upstream's `dracut/30ignition`
     (`ignition-fetch`, `-disks`, `-mount`, `-files` required by `ignition-complete.target`,
@@ -147,7 +152,8 @@ vm-manager only serves signed artifacts and never holds private keys.
 Phase A, installer boot (no persistent disk yet):
 
 1. `create_vm` acquires a target volume, creates the swtpm state dir and OVMF vars copy,
-   allocates a MAC + DHCP lease, stores user-data.
+   keeps a copy of the image's certificate, which every QEMU start writes into db
+   (`internal/uefivars`), allocates a MAC + DHCP lease, stores user-data.
 2. QEMU starts with `-kernel base_<v>.efi` (direct UKI boot under OVMF), the base DDI
    attached read-only (`serial=installer`), the blank target (`serial=target`), swtpm via
    `tpm-crb`, `-smbios type=1,manufacturer=GiantSwarm,product=vm-manager,serial=<vm-id>`,
@@ -164,7 +170,9 @@ Phase A, installer boot (no persistent disk yet):
 Phase B, installed boot (every boot from now on):
 
 4. OVMF -> systemd-boot -> UKI (measured into PCR 11 with `.pcrsig`), credentials from the
-   ESP. In the initrd: verity root, repart creates the B slots and grows var, systemd-imdsd
+   ESP. In the initrd: verity root (its signature verified by the kernel against the
+   certificate the firmware's db put on the platform keyring), repart creates the B slots
+   and grows var, systemd-imdsd
    early network brings up DHCP from the virtual network, imds import (hostname, ssh key
    -> `/run/credstore`), `persistent-etc.service` mounts var, the `/etc` overlay, `/root`
    and `/opt` under `/sysroot`.
@@ -187,7 +195,12 @@ Phase B, installed boot (every boot from now on):
    stages, which write CAPI's files and systemd units (kubeadm config, the kubeadm unit)
    into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
    the stages run with an empty config.
-7. Real system: systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
+7. Real system: PID 1 first loads and activates the signed IPE policy from `/etc/ipe`
+   and then drops `CAP_MAC_ADMIN` from every process's bounding set (the usermode
+   helpers lost it on the kernel command line); from here on only code from
+   kernel-verified dm-verity volumes runs (images/README.md, IPE). A reboot of the guest
+   ends QEMU (`-no-reboot`), and vm-manager starts the next boot as a new process. Then
+   systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
    then `vm-kubernetes.service` (base image, `After=network-online.target
    systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service`, wanted
    by `multi-user.target`) reads `/kubernetes-version` from the IMDS and runs
@@ -425,7 +438,7 @@ require_attestation, wait_for none|installed|attested|ready), `start_vm`, `stop_
 | T0 unit | every package with fakes (fake runtime, fake storage, httptest IMDS, CAPI Ignition fixtures, go-tpm simulator) | < 30 s | every PR | `test.yml`, `ubuntu-latest`; `make test vet-e2e` also compiles the `e2e` tag, `make lint lint-e2e` lints it |
 | T1 contract | in-process MCP client over httptest against the fake runtime; REST parity via `statusFor` | < 10 s | every PR | `test.yml`, `ubuntu-latest` |
 | T2 image | mkosi build + `image-verify`: `systemd-dissect`, `ukify inspect`, `systemd-measure calculate` | minutes | every PR touching images/, vm-agent or the workflow; push to main; nightly through e2e | `image.yml`, `archlinux:latest` container (`--privileged`) on `ubuntu-26.04`, no mkosi cache (the current Arch repositories, as the release's `guest-image` job); artifact `guest-image` |
-| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM (`e2e/`, seven tests): install + reboot + READY, IMDS + firstboot, Ignition files + units applied, persistent `/etc`, sysext merged and measured, attestation learn / golden / tamper, 1 CP + 1 worker from CAPI-shaped Ignition | < 90 s per test except the cluster (2.5 to 3 min) and attestation (111 s for three servers); about 6 min for the suite, 45 m `go test` ceiling | every PR and push to main: fast subset (install/boot, IMDS, persistent `/etc`, sysext); nightly and manual: the full suite | `e2e.yml`, hosted `ubuntu-26.04` with nested KVM and `vhost_vsock`, qemu/swtpm/ovmf from apt, the `guest-image` artifact built in the run or reused from main; developers run `make e2e` on their KVM host |
+| T3 boot e2e | Go tests tagged `e2e` with the real runtime on KVM (`e2e/`): install + reboot + READY, IMDS + firstboot, Ignition files + units applied, persistent `/etc`, sysext merged and measured, IPE enforced and locked, attestation learn / golden / tamper, 1 CP + 1 worker from CAPI-shaped Ignition (skipped for an image with IPE) | < 90 s per test except the cluster (2.5 to 3 min) and attestation (111 s for three servers); about 6 min for the suite, 45 m `go test` ceiling | every PR and push to main: fast subset (install/boot, IMDS, persistent `/etc`, sysext, IPE); nightly and manual: the full suite | `e2e.yml`, hosted `ubuntu-26.04` with nested KVM and `vhost_vsock`, qemu/swtpm/ovmf from apt, the `guest-image` artifact built in the run or reused from main; developers run `make e2e` on their KVM host |
 
 Boot-time budgets were set at installer phase to reboot < 60 s and installed boot to READY
 < 10 s; measured on the development host: install 12 s, installed boot to `READY=1` 11 to

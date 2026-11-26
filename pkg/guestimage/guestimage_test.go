@@ -30,6 +30,7 @@ func buildDir(t *testing.T, version string) string {
 		stem + ".efi":                                "uki " + version,
 		stem + ".raw":                                "disk " + version,
 		stem + ".roothash":                           strings.Repeat("a", 64),
+		stem + ".crt":                                "certificate",
 		stem + ".repart.d/10-esp.conf":               "[Partition]\nType=esp\n",
 		PolicyFile:                                   `{"image_id":"giantswarm-vm-base","image_version":"` + version + `","pcr11":{}}`,
 		"sysupdate/base/SHA256SUMS":                  "sums",
@@ -61,6 +62,7 @@ func TestContents(t *testing.T) {
 		"giantswarm-vm-base_0.1.0.efi",
 		"giantswarm-vm-base_0.1.0.raw",
 		"giantswarm-vm-base_0.1.0.roothash",
+		"giantswarm-vm-base_0.1.0.crt",
 		"giantswarm-vm-base_0.1.0.repart.d/10-esp.conf",
 		"policy.json",
 		"sysupdate/base/SHA256SUMS",
@@ -115,9 +117,9 @@ func TestPushPull(t *testing.T) {
 	res, err := Pull(ctx, ref, dst, opts)
 	require.NoError(t, err)
 	assert.True(t, res.Fetched)
-	assert.Equal(t, 9, res.Files)
+	assert.Equal(t, 10, res.Files)
 	assert.Equal(t, desc.Digest, res.Descriptor.Digest)
-	for _, name := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "giantswarm-vm-base_0.1.0.repart.d/10-esp.conf", "sysupdate/kubernetes/kubernetes_1.36.4.raw"} {
+	for _, name := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "giantswarm-vm-base_0.1.0.crt", "giantswarm-vm-base_0.1.0.repart.d/10-esp.conf", "sysupdate/kubernetes/kubernetes_1.36.4.raw"} {
 		assert.Equal(t, readFile(t, filepath.Join(src, name)), readFile(t, filepath.Join(dst, name)), name)
 	}
 	for _, leftover := range []string{"giantswarm-vm-base_0.1.0.initrd", "kubernetes_1.36.4.raw", "base", "pkgs"} {
@@ -128,7 +130,7 @@ func TestPushPull(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ref, marker.Reference)
 	assert.Equal(t, desc.Digest.String(), marker.Digest)
-	assert.Equal(t, 9, marker.Files)
+	assert.Equal(t, 10, marker.Files)
 
 	// The same digest again: a no-op that keeps a policy.json amended by
 	// `image golden`.

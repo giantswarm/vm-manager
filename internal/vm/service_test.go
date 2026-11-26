@@ -3,11 +3,18 @@ package vm_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -134,18 +141,29 @@ func (m *metricsRecorder) snapshot() (installs, boots []time.Duration, forgotten
 // newHarness wires a vm.Service to fakes with one network "lan".
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness with a hook that may change the image (and
+// the files in the image directory) before the service starts.
+func newHarnessWith(t *testing.T, prepare func(imageDir string, img *images.Image)) *harness {
+	t.Helper()
 	h := &harness{t: t, ctx: context.Background(), stateDir: t.TempDir(), imageDir: t.TempDir(), metrics: &metricsRecorder{}}
 	d := vmtest.NewDeps(t.TempDir(), time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC))
 	h.ev, h.clock, h.rt, h.tpm, h.store, h.nets, h.notify = d.Events, d.Clock, d.Runtime, d.TPM, d.Storage, d.Networks, d.Notifier
 	for _, f := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "OVMF_CODE.fd", "OVMF_VARS.fd"} {
 		require.NoError(t, os.WriteFile(filepath.Join(h.imageDir, f), []byte(f), 0o600))
 	}
-	h.imgs = vmtest.NewImages(h.imageDir, images.Image{
+	img := images.Image{
 		ID: "giantswarm-vm-base", Version: "0.1.0",
 		UKI:                filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.efi"),
 		Disk:               filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.raw"),
 		KubernetesVersions: []string{"1.32.0", "1.31.2"},
-	})
+	}
+	if prepare != nil {
+		prepare(h.imageDir, &img)
+	}
+	h.imgs = vmtest.NewImages(h.imageDir, img)
 	h.start()
 	_, err := h.svc.CreateNetwork(h.ctx, network.Spec{Name: testNetwork, CIDR: "127.0.0.0/24"})
 	require.NoError(t, err)
@@ -370,7 +388,7 @@ func TestLifecycleInstallBootReady(t *testing.T) {
 	assert.Equal(t, qemu.PhaseBoot, b.Phase)
 	assert.Empty(t, b.UKI)
 	assert.Empty(t, b.Installer)
-	assert.False(t, b.NoReboot)
+	assert.True(t, b.NoReboot, "a guest's reboot ends QEMU, so the next boot starts from a store vm-manager wrote")
 	assert.Equal(t, "ignition.firstboot", b.KernelCmdlineExtra)
 	assert.Equal(t, a.Target, b.Target)
 	assert.Equal(t, a.OVMFVars, b.OVMFVars)
@@ -1222,4 +1240,72 @@ func TestCreateRetriesWhenTheVsockCIDIsTaken(t *testing.T) {
 	stored, err := h.svc.Get(v.ID)
 	require.NoError(t, err)
 	assert.Equal(t, got.CID, stored.CID)
+}
+
+// TestCreateKeepsTheImageCertificate: the VM keeps a copy of the image's
+// signing certificate, and every QEMU start of it, installer and installed
+// boot, asks the runtime to write it into the variable store as db
+// (qemu.Spec.UEFIDB), which the guest kernel trusts for the image's verity
+// signatures and IPE policy. A certificate that does not parse fails the
+// create and leaves nothing behind.
+func TestCreateKeepsTheImageCertificate(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "image"}, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<31, 0)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+
+	var certPath string
+	h := newHarnessWith(t, func(dir string, img *images.Image) {
+		img.Certificate = filepath.Join(dir, "giantswarm-vm-base_0.1.0.crt")
+		certPath = img.Certificate
+		require.NoError(t, os.WriteFile(img.Certificate, certPEM, 0o600))
+	})
+	v := h.create("node1")
+	require.NotEmpty(t, v.Paths.UEFIDB)
+	assert.Equal(t, v.Paths.Dir, filepath.Dir(v.Paths.UEFIDB), "a copy in the VM's directory")
+	kept, err := os.ReadFile(v.Paths.UEFIDB)
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, kept)
+	assert.Equal(t, v.Paths.UEFIDB, h.waitInstances(1).Spec().UEFIDB, "installer boot")
+	assert.Equal(t, v.Paths.UEFIDB, h.install(v.ID).Spec().UEFIDB, "installed boot")
+
+	// The catalog's file changing later does not change the VM's trust.
+	require.NoError(t, os.WriteFile(certPath, []byte("another image"), 0o600))
+	kept, err = os.ReadFile(v.Paths.UEFIDB)
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, kept)
+
+	_, err = h.svc.Create(h.ctx, h.spec("node2"))
+	require.ErrorContains(t, err, "certificate")
+	assert.Len(t, h.svc.List(), 1, "node2 left nothing behind")
+}
+
+// TestGuestRebootStartsANewBoot: QEMU of the installed boot ends on the
+// guest's reboot (-no-reboot, SHUTDOWN reason guest-reset); vm-manager
+// starts the next boot as a new QEMU process, whose start writes the
+// variable store again, and the VM goes through booting to ready. A
+// power-off stays a stop.
+func TestGuestRebootStartsANewBoot(t *testing.T) {
+	h := newHarness(t)
+	v := h.create("node1")
+	b := h.install(v.ID)
+	h.ready(v.ID, v.CID)
+
+	b.Reboot()
+	next := h.waitInstances(3)
+	assert.Equal(t, qemu.PhaseBoot, next.Spec().Phase)
+	assert.True(t, next.Spec().NoReboot)
+	assert.Empty(t, next.Spec().KernelCmdlineExtra, "ignition.firstboot only on the first boot")
+	got := h.waitState(v.ID, vm.StateBooting)
+	assert.Nil(t, got.ReadyAt)
+	assert.Empty(t, got.LastError)
+	got = h.ready(v.ID, v.CID)
+	assert.NotNil(t, got.ReadyAt)
+
+	next.Exit(0)
+	got = h.waitState(v.ID, vm.StateStopped)
+	assert.Equal(t, "guest shut down", got.LastError)
+	assert.Equal(t, 3, h.rt.Count(), "a power-off starts nothing")
 }

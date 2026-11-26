@@ -8,6 +8,7 @@
 #   make kubernetes-all                      every release of KUBERNETES_VERSIONS
 #   make ignition                            Ignition binary for the initrd (cached)
 #   make agent                               vm-agent binary for base and initrd (make -C .. agent)
+#   make ipe                                 sign the IPE policy for the base tree
 #   make PROFILE=debug base smoke-boot       root autologin, empty root password
 #   make clean                               drop build/ (keys/ are kept)
 
@@ -50,10 +51,21 @@ IGNITION_STAMP   := $(IGNITION_DIR)/stamp-$(IGNITION_VERSION)
 AGENT_DIR  := $(BUILD)/agent
 AGENT_TREE := $(AGENT_DIR)/tree
 AGENT_BIN  := $(AGENT_TREE)/usr/bin/vm-agent
+# The IPE policy (ipe/giantswarm-vm.policy), signed with the verity key into
+# $(IPE_TREE)/etc/ipe/giantswarm-vm.p7b, which ExtraTrees= of
+# mkosi.images/base/mkosi.conf copies into the root file system. See
+# scripts/sign-ipe-policy and README.md, IPE.
+IPE_POLICY := ipe/giantswarm-vm.policy
+IPE_TREE   := $(BUILD)/ipe/tree
+IPE_P7B    := $(IPE_TREE)/etc/ipe/giantswarm-vm.p7b
+# The certificate the image's verity root hash, its sysexts and its IPE policy
+# are signed with, published next to the UKI for vm-manager to enroll into
+# each VM's UEFI db (internal/uefivars).
+CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages verify verify-base verify-kubernetes smoke-boot clean summary
+.PHONY: all keys ignition agent ipe images base kubernetes kubernetes-all kubernetes-packages verify verify-base verify-kubernetes smoke-boot clean summary
 
 # `images` builds the default Kubernetes version; the other listed releases
 # follow, one `make kubernetes` each.
@@ -83,6 +95,11 @@ $(AGENT_BIN): FORCE
 
 FORCE:
 
+ipe: $(IPE_P7B)
+
+$(IPE_P7B): $(IPE_POLICY) mkosi.version $(KEYS)/import-pubring.pgp $(SCRIPTS)/sign-ipe-policy
+	$(SCRIPTS)/sign-ipe-policy $(IPE_POLICY) $(VERSION) $(KEYS) $(IPE_TREE)
+
 # The node packages of $(KUBERNETES_VERSION) from the Arch Linux Archive; the
 # stamp records a complete, verified set (the script re-verifies what is
 # present, so a missing stamp costs no download).
@@ -95,15 +112,17 @@ $(KUBERNETES_PKGS)/.verified: $(SCRIPTS)/fetch-kubernetes-packages
 # One mkosi run builds the base tree, the kubernetes sysext (--dependency=
 # appends to Dependencies=base of mkosi.conf) and the disk image, then lays out
 # both sysupdate directories (renamed artifacts, SHA256SUMS, SHA256SUMS.gpg).
-images: keys ignition agent kubernetes-packages
+images: keys ignition agent ipe kubernetes-packages
 	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --force --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
+	install -m0644 $(KEYS)/verity.crt $(CERT)
 
 # Base tree and disk image only.
-base: keys ignition agent
+base: keys ignition agent ipe
 	$(MKOSI) $(MKOSI_ARGS) --force build
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
+	install -m0644 $(KEYS)/verity.crt $(CERT)
 
 # Sysext only: the main image is skipped (--format=none, no initrd), an existing
 # base tree is reused. Without --force, which would also delete the disk image

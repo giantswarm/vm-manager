@@ -3,7 +3,8 @@
 # initrd hands over (persistent-etc.service, initrd only):
 #
 #   /var   the var partition (fsck, mount, grow), a tmpfs when there is none
-#   /etc   overlayfs: lower = the image's /etc, upper/work = /var/lib/etc-overlay
+#   /etc   overlayfs: lower = the image's /etc, upper/work = /var/lib/etc-overlay;
+#          ipe/ and systemd/system.conf{,.d} always show the image's content
 #   /root  bind mount of /var/roothome (tmpfiles.d provision.conf writes
 #          /root/.ssh/authorized_keys from the ssh.authorized_keys.root credential)
 #   /opt   bind mount of /var/opt (CNI DaemonSets install into /opt/cni/bin)
@@ -42,6 +43,25 @@ fi
 
 # An empty upper hides nothing: the lower is the image's /etc.
 mkdir -p "$state/upper" "$state/work"
+# The IPE policy and the manager configuration that locks it (the bounding set
+# without CAP_MAC_ADMIN, usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf)
+# are the image's on every boot: whatever an earlier boot left for them in the
+# upper layer (a file, a whiteout hiding the policy, an opaque directory, a
+# drop-in restoring the capability, a symlink in place of /etc/systemd) is
+# dropped before the overlay is mounted. Root can write to /etc, so without
+# this one boot could turn IPE off for the next. See images/README.md, IPE.
+upper=$state/upper
+for pinned in ipe systemd/system.conf systemd/system.conf.d; do
+        parent=${pinned%/*}
+        if [ "$parent" != "$pinned" ] && { [ -L "$upper/$parent" ] || { [ -e "$upper/$parent" ] && [ ! -d "$upper/$parent" ]; }; }; then
+                echo "persistent-etc: /etc/$parent is the image's directory, dropping the overlay's replacement" >&2
+                rm -f "$upper/$parent"
+        fi
+        if [ -e "$upper/$pinned" ] || [ -L "$upper/$pinned" ]; then
+                echo "persistent-etc: /etc/$pinned is the image's, dropping the overlay's copy" >&2
+                rm -rf "${upper:?}/$pinned"
+        fi
+done
 mountpoint -q "$sysroot/etc" ||
         mount -t overlay -o "lowerdir=$sysroot/etc,upperdir=$state/upper,workdir=$state/work" overlay "$sysroot/etc"
 

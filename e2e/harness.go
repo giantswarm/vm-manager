@@ -77,6 +77,10 @@ type Image struct {
 	// RootHash is the verity root hash (hex), empty when the .roothash file
 	// is absent. The root and verity partition UUIDs are its two halves.
 	RootHash string
+	// Certificate is the image's signing certificate (<id>_<version>.crt),
+	// empty when absent; Spec passes it as qemu.Spec.UEFIDB, as vm-manager
+	// does.
+	Certificate string
 }
 
 // Harness is the per-test VM stack: the state directory, the ssh key, the
@@ -230,6 +234,9 @@ func locateImage(t *testing.T) Image {
 	if b, err := os.ReadFile(filepath.Join(dir, imageID+"_"+version+".roothash")); err == nil { // #nosec G304 G703 -- build artifact under the configured image dir
 		img.RootHash = strings.TrimSpace(string(b))
 	}
+	if cert := filepath.Join(dir, imageID+"_"+version+".crt"); fileExists(cert) {
+		img.Certificate = cert
+	}
 	return img
 }
 
@@ -348,8 +355,12 @@ func (h *Harness) Spec(phase qemu.Phase, tp *tpm.Instance, name string) qemu.Spe
 		TPMSocket:          tp.SocketPath(),
 		OVMFCode:           h.OVMFCode,
 		OVMFVars:           h.OVMFVars,
-		SerialLog:          filepath.Join(h.Dir, name+".log"),
-		QMPSocket:          filepath.Join(h.Dir, name+".qmp"),
+		// What vm-manager passes: the runtime writes the image's
+		// certificate into db before every start, which the image's IPE
+		// policy needs (images/README.md, IPE).
+		UEFIDB:    h.Image.Certificate,
+		SerialLog: filepath.Join(h.Dir, name+".log"),
+		QMPSocket: filepath.Join(h.Dir, name+".qmp"),
 	}
 	if phase == qemu.PhaseInstall {
 		spec.UKI = h.Image.UKI
@@ -592,4 +603,10 @@ func Describe(parts []Partition) string {
 		fmt.Fprintf(&b, "  %2d %10d KiB  %s  %s  %s\n", p.Number(), p.SizeKiB(), p.Type, p.UUID, p.Name)
 	}
 	return b.String()
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path) // #nosec G703 -- build artifact under the configured image dir
+	return err == nil
 }

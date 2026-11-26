@@ -88,7 +88,7 @@ jobs:
             echo "mkosi $(mkosi --version | awk '{print $2}'), $(systemctl --version | head -1), $(go version | cut -d' ' -f3)"
             echo
             echo '```'
-            (cd images/build && ls -lh -- *.efi *.raw *.roothash policy.json && du -sh sysupdate/*)
+            (cd images/build && ls -lh -- *.efi *.raw *.roothash *.crt policy.json && du -sh sysupdate/*)
             echo '```'
             echo
             echo "### Expected PCR 11 (policy.json)"
@@ -101,7 +101,9 @@ jobs:
       - name: Upload the image artifact
         # The build tree (base/), Ignition sources and the .initrd (inside the
         # UKI) stay out; the rest is what vm-manager serve and the e2e tests
-        # read. Already compressed (erofs zstd), so no zip compression.
+        # read, the .crt included: without it in the VM's UEFI db the image's
+        # IPE policy does not load and the guest stops. Already compressed
+        # (erofs zstd), so no zip compression.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ARTIFACT }}
@@ -109,6 +111,7 @@ jobs:
             images/build/*.efi
             images/build/*.raw
             images/build/*.roothash
+            images/build/*.crt
             images/build/*.repart.d/
             images/build/policy.json
             images/build/sysupdate/

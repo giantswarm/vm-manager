@@ -19,7 +19,7 @@ trap 'chmod -R u+rwX "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 fail() { echo "verify: FAIL: $*" >&2; exit 1; }
 ok() { echo "verify: ok: $*"; }
 
-for f in "$img" "$uki" "$initrd" "$rootfs" "$build/$name.roothash" "$sysupdate/SHA256SUMS.gpg"; do
+for f in "$img" "$uki" "$initrd" "$rootfs" "$build/$name.roothash" "$build/$name.crt" "$sysupdate/SHA256SUMS.gpg"; do
         [[ -s "$f" ]] || fail "$f missing (run make base)"
 done
 
@@ -215,6 +215,35 @@ agent_size="$(stat -c %s "$tmp/initrd/usr/bin/vm-agent")"
 root_agent_size="$(dump.erofs --path=/usr/bin/vm-agent "$rootfs" 2>/dev/null | awk '/^Size:/ {print $2}')"
 [[ "$root_agent_size" == "$agent_size" ]] || fail "root /usr/bin/vm-agent size ${root_agent_size:-missing} differs from the initrd's $agent_size"
 ok "vm-agent $("$tmp/initrd/usr/bin/vm-agent" version 2>/dev/null | awk '{print $3}') (static, $agent_size bytes) in initrd and root; attest units wired (initrd: initrd.target, before ignition-fetch; root: enabled)"
+
+# 6d. IPE (README.md, IPE): the kernel starts the LSM and opens the root's
+# verity device with its signature (UKI cmdline); the root carries the policy,
+# signed by the verity key whose certificate is published next to the image
+# for vm-manager's db enrollment, and the manager drop-in that drops
+# CAP_MAC_ADMIN; the exitrd's /shutdown is the image's binary, not a script
+# on /run; the initrd dissects the installer disk for the signature and pins
+# the policy and the manager configuration against the /etc overlay.
+cmdline_lsm="$(/usr/bin/grep -o 'lsm=[^ ]*' "$tmp/ukify.txt" | head -n1)"
+[[ ",${cmdline_lsm#lsm=}," == *,ipe,* ]] || fail "UKI cmdline does not start IPE (${cmdline_lsm:-no lsm=})"
+/usr/bin/grep -q 'systemd.verity_root_options=root-hash-signature=auto' "$tmp/ukify.txt" || fail "UKI cmdline does not open the root with its verity signature"
+for umh in bset inheritable; do
+        /usr/bin/grep -qF "sysctl.kernel.usermodehelper.$umh=\"4294967295 509\"" "$tmp/ukify.txt" || fail "UKI cmdline does not drop CAP_MAC_ADMIN from the usermode helpers' $umh"
+done
+cmp -s "$build/$name.crt" "$keys/verity.crt" || fail "$build/$name.crt is not $keys/verity.crt"
+ipe_p7b="$tmp/root/etc/ipe/giantswarm-vm.p7b"
+[[ -s "$ipe_p7b" ]] || fail "/etc/ipe/giantswarm-vm.p7b missing from the root"
+openssl smime -verify -binary -inform der -in "$ipe_p7b" -CAfile "$keys/verity.crt" -purpose any -out "$tmp/ipe.policy" 2>/dev/null \
+        || fail "/etc/ipe/giantswarm-vm.p7b is not signed by $keys/verity.crt"
+[[ "$(head -n1 "$tmp/ipe.policy")" == "policy_name=giantswarm-vm policy_version=$version" ]] || fail "IPE policy header is '$(head -n1 "$tmp/ipe.policy")'"
+/usr/bin/grep -qx 'DEFAULT action=DENY' "$tmp/ipe.policy" || fail "IPE policy does not deny by default"
+extract /usr/lib/systemd/system.conf.d
+/usr/bin/grep -qx 'CapabilityBoundingSet=~CAP_MAC_ADMIN' "$tmp/root/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf" || fail "the manager does not drop CAP_MAC_ADMIN"
+extract /usr/lib/tmpfiles.d
+/usr/bin/grep -qx 'L /run/initramfs/shutdown - - - - usr/lib/systemd/systemd-shutdown' "$tmp/root/usr/lib/tmpfiles.d/vm-manager-exitrd.conf" || fail "the exitrd's /shutdown is not a symlink to the image's systemd-shutdown"
+/usr/bin/grep -qx usr/lib/udev/rules.d/85-vm-manager-dissect-image.rules "$tmp/initrd.lst" || fail "initrd lacks the dissect rule for the installer disk"
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/vm-manager/persistent-etc 2>/dev/null) || true
+/usr/bin/grep -q '^for pinned in ipe systemd/system.conf systemd/system.conf.d; do' "$tmp/initrd/usr/lib/vm-manager/persistent-etc" || fail "persistent-etc does not pin /etc/ipe and the manager configuration"
+ok "ipe: $cmdline_lsm, policy giantswarm-vm $version signed by the published $name.crt, CAP_MAC_ADMIN dropped (manager and usermode helpers), exitrd and initrd ready"
 
 # 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
 #    --keyring file it opens (leaving import-pubring.pgp~ behind), which would

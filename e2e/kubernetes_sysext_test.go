@@ -148,6 +148,12 @@ func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, version
 	assert.Equal(t, "kubernetes_"+version, merged, "exactly this extension merged on /usr")
 	assert.Equal(t, file, g.sh(ctx, "ls "+extensionsDir), "exactly one file in %s", extensionsDir)
 	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.kubernetes_"), "one extension-release")
+	// The extension's verity device, like the root's, was opened with its
+	// signature and the kernel verified it: what lets the image's IPE
+	// policy run the binaries it brings (images/README.md, IPE).
+	tables := g.sh(ctx, "dmsetup table --target verity")
+	t.Logf("verity devices:\n%s", tables)
+	assert.Equal(t, "2", g.sh(ctx, "dmsetup table --target verity | grep -c root_hash_sig_key_desc || true"), "the root and the extension verified by the kernel")
 }
 
 // assertKubernetesRunning checks that the node stack of the extension is

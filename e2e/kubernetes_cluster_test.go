@@ -143,12 +143,22 @@ var serverLine = regexp.MustCompile(`(?m)^(\s*server:\s*)https://\S+`)
 // with the admin kubeconfig and sees both nodes Ready with their providerIDs,
 // and the pod network carries traffic between the nodes. It prints
 // cp_ready_seconds and worker_join_seconds, each from its create_vm.
+//
+// An image with an IPE policy (it ships <id>_<version>.crt) runs code only
+// from its signed dm-verity root and sysexts: no container starts from an
+// image layer on the var partition, so kubeadm's static pods and flannel
+// never run, and neither does CAPI's /etc/kubeadm.sh. The test skips such an
+// image until container images arrive as signed dm-verity layers
+// (images/README.md, IPE).
 func TestKubernetesCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTestTimeout)
 	defer cancel()
 	requireHost(t)
 	kubectl := requireKubectl(t)
 	image := locateImage(t)
+	if image.Certificate != "" {
+		t.Skip("e2e: the image enforces IPE, which runs no container from an unsigned image layer; a cluster needs container images as signed dm-verity layers (images/README.md, IPE)")
+	}
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 

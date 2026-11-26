@@ -19,6 +19,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 	"github.com/giantswarm/vm-manager/internal/vm"
 	"github.com/giantswarm/vm-manager/pkg/guestimage"
 )
@@ -72,7 +73,7 @@ func newImageCmd() *cobra.Command {
 		Use:   "image",
 		Short: "Image catalog operations",
 	}
-	cmd.AddCommand(newImagePullCmd(), newImagePushCmd(), newImageGoldenCmd())
+	cmd.AddCommand(newImagePullCmd(), newImagePushCmd(), newImageGoldenCmd(), newImageEnrollCmd())
 	return cmd
 }
 
@@ -114,7 +115,7 @@ func newImagePushCmd() *cobra.Command {
 		Use:   "push <reference>",
 		Short: "Publish the image directory as a guest image artifact",
 		Long: `Publish the guest image in the image directory (` + "`make -C images`" + ` output: every
-<id>_<version>.efi with its .raw disk, .roothash and .repart.d/, policy.json and the
+<id>_<version>.efi with its .raw disk, .roothash, .crt and .repart.d/, policy.json and the
 sysupdate tree — nothing else of a build directory) as the OCI artifact
 <registry>/<repository>:<tag>. Registry credentials come from the Docker config
 ($DOCKER_CONFIG/config.json or ~/.docker/config.json). The release pipeline pushes
@@ -130,6 +131,45 @@ one per release; a lab pushes a local build to its own registry.`,
 		},
 	}
 	o.addFlags(cmd.Flags())
+	return cmd
+}
+
+func newImageEnrollCmd() *cobra.Command {
+	var cert string
+	cmd := &cobra.Command{
+		Use:   "enroll <ovmf-vars-file> --cert <file>",
+		Short: "Enroll an image's signing certificate into the UEFI db of an OVMF variable store",
+		Long: `Write the certificates of --cert (PEM or DER; an image's <id>_<version>.crt) as the
+db of the OVMF variable store <ovmf-vars-file>, replacing what db held, and remove PK,
+KEK, dbx, dbt and dbr. What vm-manager does to a VM's variable store before every
+start of its QEMU: the guest
+kernel takes db onto its platform keyring and checks the image's dm-verity root
+hash signatures and its IPE policy against it, and an image with an IPE policy
+does not boot without it. Secure Boot stays off. ` + "`make -C images smoke-boot`" + ` uses it
+for the NVRAM template it hands systemd-vmspawn.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			certs, err := uefivars.ReadCertificates(cert)
+			if err != nil {
+				return fmt.Errorf("--cert %s: %w", cert, err)
+			}
+			changes, err := uefivars.EnrollDB(args[0], certs...)
+			if err != nil {
+				return err
+			}
+			for _, c := range certs {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "enrolled %q into db of %s\n", c.Subject.String(), args[0])
+			}
+			if len(changes) == 0 {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "the store already held it, nothing changed")
+			} else {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "changed: %s\n", strings.Join(changes, ", "))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&cert, "cert", "", "Certificate file to enroll (PEM or DER)")
+	_ = cmd.MarkFlagRequired("cert")
 	return cmd
 }
 
