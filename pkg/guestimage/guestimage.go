@@ -6,7 +6,7 @@
 // files of the image directory, one layer per file, each named by its path
 // relative to the directory (the org.opencontainers.image.title annotation):
 // the UKI and disk of every image (<id>_<version>.efi and .raw, the
-// .roothash and .repart.d/ next to them, a per-image .policy.json), the
+// .roothash, .crt and .repart.d/ next to them, a per-image .policy.json), the
 // shared policy.json with the expected PCR values, and the sysupdate/ tree
 // the guests update from. Nothing else of a build directory travels.
 //
@@ -210,8 +210,8 @@ func Pull(ctx context.Context, reference, dir string, opts Options) (Result, err
 
 // Contents lists, relative to dir and sorted, the files a guest image
 // artifact carries: for every <id>_<version>.efi with its .raw disk the two,
-// plus the .roothash, the .repart.d/ tree and the .policy.json next to them
-// when present; policy.json; and the sysupdate/ tree. At least one image and
+// plus the .roothash, the .crt (the image's signing certificate), the
+// .repart.d/ tree and the .policy.json next to them when present; policy.json; and the sysupdate/ tree. At least one image and
 // the policy are required.
 func Contents(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
@@ -230,7 +230,7 @@ func Contents(dir string) ([]string, error) {
 		}
 		images++
 		files = append(files, stem+".efi", stem+".raw")
-		for _, opt := range []string{stem + ".roothash", stem + ".policy.json"} {
+		for _, opt := range []string{stem + ".roothash", stem + ".crt", stem + ".policy.json"} {
 			if fileExists(filepath.Join(dir, opt)) {
 				files = append(files, opt)
 			}

@@ -30,6 +30,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/tpm"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -77,6 +78,10 @@ type Image struct {
 	// RootHash is the verity root hash (hex), empty when the .roothash file
 	// is absent. The root and verity partition UUIDs are its two halves.
 	RootHash string
+	// Certificate is the image's signing certificate (<id>_<version>.crt),
+	// empty when absent. The harness enrolls it into the VM's UEFI db, as
+	// vm-manager does, which is what the image's IPE policy needs.
+	Certificate string
 }
 
 // Harness is the per-test VM stack: the state directory, the ssh key, the
@@ -151,6 +156,15 @@ func New(t *testing.T) *Harness {
 	}
 	h.PrivateKey, h.AuthorizedKey = generateSSHKey(t, dir)
 	h.signer = loadSigner(t, h.PrivateKey)
+	if image.Certificate != "" {
+		// What vm.Service.provision does: the VM's own copy of the
+		// template, with the image's certificate in db. The runtime
+		// copies the template only when the file is missing.
+		certs, err := uefivars.ReadCertificates(image.Certificate)
+		require.NoError(t, err, "image certificate")
+		require.NoError(t, copyFile(ovmfVars, h.OVMFVars))
+		require.NoError(t, uefivars.EnrollDB(h.OVMFVars, certs...), "enroll the image certificate into db")
+	}
 
 	// A blank, sparse target: what a fresh volume from the storage layer
 	// looks like to the installer.
@@ -229,6 +243,9 @@ func locateImage(t *testing.T) Image {
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, imageID+"_"+version+".roothash")); err == nil { // #nosec G304 G703 -- build artifact under the configured image dir
 		img.RootHash = strings.TrimSpace(string(b))
+	}
+	if cert := filepath.Join(dir, imageID+"_"+version+".crt"); fileExists(cert) {
+		img.Certificate = cert
 	}
 	return img
 }
@@ -592,4 +609,19 @@ func Describe(parts []Partition) string {
 		fmt.Fprintf(&b, "  %2d %10d KiB  %s  %s  %s\n", p.Number(), p.SizeKiB(), p.Type, p.UUID, p.Name)
 	}
 	return b.String()
+}
+
+// copyFile copies src to dst (created or truncated, mode 0600).
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src) // #nosec G304 -- host firmware template
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o600) // #nosec G703 -- under the test's state dir
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path) // #nosec G703 -- build artifact under the configured image dir
+	return err == nil
 }

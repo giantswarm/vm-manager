@@ -4,6 +4,11 @@
 # finished; we assert from the captured console log that multi-user.target was
 # reached. The two-phase sysinstall flow is exercised by vm-manager's own tests.
 #
+# The firmware's variable store has the image certificate in db, as vm-manager
+# writes it for every VM (`vm-manager image enroll`): the guest kernel trusts
+# the image's verity signatures and IPE policy only through it, and PID 1
+# refuses to go on without the policy. Secure Boot stays off.
+#
 # `mkosi vm` is not used because mkosi 27 unconditionally passes
 # file.aio=io_uring to QEMU, which fails on hosts with kernel.io_uring_disabled;
 # systemd-vmspawn probes for io_uring support and falls back.
@@ -17,6 +22,19 @@ log="$build/smoke.log"
 timeout="${SMOKE_TIMEOUT:-180}"
 
 [[ -s "$img" ]] || { echo "smoke-boot: $img missing, run make base" >&2; exit 1; }
+cert="$build/$name.crt"
+[[ -s "$cert" ]] || { echo "smoke-boot: $cert missing, run make base" >&2; exit 1; }
+
+# The variable store template of the host's OVMF, in the order vm-manager
+# looks for it (internal/vm FindOVMF).
+template=
+for t in /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+        [[ -s "$t" ]] && { template="$t"; break; }
+done
+[[ -n "$template" ]] || { echo "smoke-boot: no OVMF variable store template on this host" >&2; exit 1; }
+nvram="$build/smoke-vars.fd"
+cp "$template" "$nvram"
+go -C "$(dirname "$0")/../.." run . image enroll "$(realpath "$nvram")" --cert "$(realpath "$cert")"
 
 # Throw-away copy of the image, grown so systemd-repart can create var on
 # first boot (what happens on the installed disk as well).
@@ -37,7 +55,8 @@ Description=smoke-boot: power off after startup finished
 
 [Service]
 Type=exec
-ExecStart=sh -c 'systemctl is-system-running --wait >/dev/null; echo "smoke-boot: startup finished, powering off"; systemctl poweroff'
+StandardOutput=journal+console
+ExecStart=sh -c 'systemctl is-system-running --wait >/dev/null; echo "smoke-boot: ipe policy giantswarm-vm active=$(cat /sys/kernel/security/ipe/policies/giantswarm-vm/active) enforce=$(cat /sys/kernel/security/ipe/enforce)"; echo "smoke-boot: startup finished, powering off"; systemctl poweroff'
 EOF
 cat >| "$creds/systemd.unit-dropin.multi-user.target" <<'EOF'
 [Unit]
@@ -47,6 +66,8 @@ EOF
 args=(
         --image="$disk"
         --firmware=uefi
+        --secure-boot=no
+        --efi-nvram-template="$(realpath "$nvram")"
         --tpm=yes
         --console=read-only
         --network-user-mode
@@ -62,8 +83,12 @@ set +e
 timeout --foreground "$timeout" systemd-vmspawn "${args[@]}" </dev/null 2>&1 | tee "$log" | tail -n 40
 rc=${PIPESTATUS[0]}
 set -e
-rm -f "$disk" "$disk".efinvramstate*
+rm -f "$disk" "$disk".efinvramstate* "$nvram"
 
+if ! /usr/bin/grep -q "smoke-boot: ipe policy giantswarm-vm active=1 enforce=1" "$log"; then
+        echo "smoke-boot: FAILED, the IPE policy is not active and enforcing (see 'smoke-boot: ipe' in $log)" >&2
+        exit 1
+fi
 if /usr/bin/grep -q "Reached target.*Multi-User System" "$log"; then
         echo "smoke-boot: OK, multi-user.target reached (vmspawn exit $rc)"
 elif [[ -n "$profile" ]] && /usr/bin/grep -q "login:" "$log"; then

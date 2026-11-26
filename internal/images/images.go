@@ -10,6 +10,7 @@
 //	<dir>/giantswarm-vm-base_<version>.efi      UKI, booted directly in the installer phase
 //	<dir>/giantswarm-vm-base_<version>.raw      base DDI, attached read-only as the installer disk
 //	<dir>/giantswarm-vm-base_<version>.policy.json   optional PCR policy of that image
+//	<dir>/giantswarm-vm-base_<version>.crt      optional signing certificate of that image
 //	<dir>/policy.json                            optional policy; applies to the image its image_id/image_version name
 //	<dir>/sysupdate/base/                        served at /sysupdate/base/ by the IMDS
 //	<dir>/sysupdate/kubernetes/SHA256SUMS        lists kubernetes_<kver>.raw, one per available version
@@ -38,6 +39,7 @@ import (
 const (
 	ukiSuffix    = ".efi"
 	diskSuffix   = ".raw"
+	certSuffix   = ".crt"
 	policySuffix = ".policy.json"
 	policyFile   = "policy.json"
 	// SysupdateDirName is the subdirectory holding the sysupdate components.
@@ -66,6 +68,11 @@ type Image struct {
 	// Policy is the image's PCR policy as written by `make verify-base`,
 	// nil when no policy is present.
 	Policy json.RawMessage `json:"policy,omitempty"`
+	// Certificate is the path of the certificate the image's verity root
+	// hash, sysexts and IPE policy are signed with (<id>_<version>.crt),
+	// empty when the image has none. Create enrolls it into the VM's UEFI
+	// db, where the guest kernel takes it onto its platform keyring.
+	Certificate string `json:"certificate,omitempty"`
 }
 
 // Ref is the image reference, "<id>_<version>".
@@ -145,6 +152,10 @@ func (c *Catalog) Refresh() error {
 			c.log.Warn("image has no disk next to its UKI, skipped", "file", name, "disk", disk)
 			continue
 		}
+		cert := filepath.Join(c.dir, stem+certSuffix)
+		if _, err := os.Stat(cert); err != nil {
+			cert = ""
+		}
 		images = append(images, Image{
 			ID:                 id,
 			Version:            version,
@@ -153,6 +164,7 @@ func (c *Catalog) Refresh() error {
 			SysupdateDir:       sysupdate,
 			KubernetesVersions: kversions,
 			Policy:             c.policy(id, version),
+			Certificate:        cert,
 		})
 	}
 	sort.Slice(images, func(i, j int) bool {

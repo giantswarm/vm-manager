@@ -28,6 +28,9 @@ system credentials and through `systemd-imdsd` from the IMDS; user-data is appli
 Ignition in the initrd; Kubernetes is a `systemd-sysext` pulled with `systemd-sysupdate`
 and measured into PCR 13; `/etc` persists through an overlay on the var partition;
 readiness is `READY=1` over vsock, and the guest reports back with `systemd-report`. The
+kernel runs only code from the image's signed dm-verity volumes: an IPE policy, locked for
+the boot, against the image certificate vm-manager enrolls into each VM's UEFI db. Until
+container images arrive as signed dm-verity layers, a node runs no container. The
 only Giant Swarm binary in the guest, `vm-agent`, does one thing: quote the TPM. A VM
 built this way behaves like an AWS or GCP instance from CAPI's point of view, on hardware
 you own, without a hypervisor management plane in between.

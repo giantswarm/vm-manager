@@ -1,0 +1,15 @@
+# The root's verity device is opened with its signature
+# (systemd.verity_root_options=root-hash-signature=auto on the UKI command
+# line): systemd-veritysetup reads it from the ID_DISSECT_PART_ROOTHASH_SIG
+# property of the root partition, which udev's dissect_image builtin derives
+# from the verity signature partition. 90-image-dissect.rules probes only the
+# disk systemd-boot reported (ID_PART_GPT_AUTO_ROOT_DISK=1); vm-manager's
+# installer boot starts the UKI with -kernel, so no disk carries that and the
+# root would stay unopened. Probe every other GPT disk too: the probe matches
+# the root by roothash= and leaves a disk without a matching image alone. The
+# partitions inherit ID_DISSECT_IMAGE (60-persistent-storage.rules) and
+# 90-image-dissect.rules copies their properties. Initrd only.
+ACTION=="remove", GOTO="vm_manager_dissect_image_end"
+SUBSYSTEM!="block", GOTO="vm_manager_dissect_image_end"
+ENV{DEVTYPE}=="disk", ENV{ID_PART_TABLE_TYPE}=="gpt", ENV{ID_PART_GPT_AUTO_ROOT_DISK}!="1", IMPORT{builtin}="dissect_image probe"
+LABEL="vm_manager_dissect_image_end"

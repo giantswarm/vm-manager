@@ -3,15 +3,23 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +28,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -133,4 +142,43 @@ func TestImageGolden(t *testing.T) {
 	// An image without any policy is refused rather than given a bare one.
 	require.NoError(t, os.Remove(policyPath))
 	assert.ErrorContains(t, runImageGolden(ctx, opts("vm-ready"), "giantswarm-vm-base", io.Discard), "has no policy.json")
+}
+
+func TestImageEnroll(t *testing.T) {
+	dir := t.TempDir()
+	vars := filepath.Join(dir, "vars.fd")
+	require.NoError(t, os.WriteFile(vars, uefivars.Blank(), 0o600))
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "image"}, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<31, 0)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	certFile := filepath.Join(dir, "image.crt")
+	require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+
+	cmd := newImageEnrollCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{vars, "--cert", certFile})
+	require.NoError(t, cmd.Execute())
+	assert.Contains(t, out.String(), `enrolled "CN=image" into db of `+vars)
+
+	data, err := os.ReadFile(vars) // #nosec G304 -- the test's temp file
+	require.NoError(t, err)
+	store, err := uefivars.Parse(data)
+	require.NoError(t, err)
+	_, ok := store.Get("db", uefivars.ImageSecurityDatabase)
+	assert.True(t, ok)
+
+	cmd = newImageEnrollCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{vars, "--cert", filepath.Join(dir, "missing.crt")})
+	assert.ErrorContains(t, cmd.Execute(), "missing.crt")
+
+	cmd = newImageEnrollCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{vars})
+	assert.ErrorContains(t, cmd.Execute(), `"cert" not set`)
 }

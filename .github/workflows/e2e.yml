@@ -6,11 +6,12 @@ name: e2e
 #
 #   pull_request, push main   fast subset (~10 min): TestInstallBoot and
 #                             TestInstallBootSystemdBoot, TestNetworkIMDS, TestPersistentEtc,
-#                             TestKubernetesSysext
+#                             TestKubernetesSysext, TestIPE
 #   schedule (nightly)        full suite: also TestIgnition, TestKubernetesVersions
 #                             (one VM per sysext version), TestAttestation (three
 #                             servers, ~2 min) and TestKubernetesCluster (two
-#                             nodes, pulls from registry.k8s.io, ~3 min)
+#                             nodes, pulls from registry.k8s.io, ~3 min; skipped
+#                             for an image with IPE, which runs no container)
 #   workflow_dispatch         full by default, `suite: fast` for the subset
 #
 # The image comes from image.yml: built in this run when the PR touches the
@@ -19,8 +20,9 @@ name: e2e
 # manual runs always build (that also exercises the image build against the
 # current Arch repos); `image_run_id` reuses a specific run's artifact.
 #
-# The fast subset is the four quickest tests that together cover install,
-# reboot, IMDS, the persistent /etc and the sysext; TestIgnition (45 s on the
+# The fast subset is the quickest tests that together cover install,
+# reboot, IMDS, the persistent /etc, the sysext and the IPE policy (TestIPE
+# installs, boots twice and takes under a minute); TestIgnition (45 s on the
 # development host) joins them nightly to hold the 40-minute PR budget on the
 # slower hosted runner.
 
@@ -243,7 +245,7 @@ jobs:
         run: |
           args=(-tags e2e -count=1 -timeout 35m -v)
           if [ "$SUITE" = fast ]; then
-            args+=(-run 'TestInstallBoot|TestNetworkIMDS|TestPersistentEtc|TestKubernetesSysext')
+            args+=(-run 'TestInstallBoot|TestNetworkIMDS|TestPersistentEtc|TestKubernetesSysext|TestIPE')
           fi
           go test "${args[@]}" ./e2e/... 2>&1 | tee "$E2E_ROOT/e2e.log"
 

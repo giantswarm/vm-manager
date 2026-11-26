@@ -2,6 +2,9 @@ package vm
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -16,6 +19,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/storage"
 	"github.com/giantswarm/vm-manager/internal/tpm"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 )
 
 const (
@@ -70,7 +74,7 @@ func (s *Service) Create(ctx context.Context, spec Spec) (*VM, error) {
 func (s *Service) launch(ctx context.Context, e *entry, img images.Image, nw Network) error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
-	if err := s.provision(ctx, e, nw); err != nil {
+	if err := s.provision(ctx, e, img, nw); err != nil {
 		s.discard(ctx, e)
 		return err
 	}
@@ -255,7 +259,7 @@ func isCIDInUse(err error) bool {
 
 // provision creates the per-VM files and takes the volume and the lease.
 // Each handle is recorded as soon as it exists so discard can release it.
-func (s *Service) provision(ctx context.Context, e *entry, nw Network) error {
+func (s *Service) provision(ctx context.Context, e *entry, img images.Image, nw Network) error {
 	p := e.rec.Paths
 	pub, err := generateSSHKey(p.SSHKey, e.rec.ID)
 	if err != nil {
@@ -268,6 +272,9 @@ func (s *Service) provision(ctx context.Context, e *entry, nw Network) error {
 	}
 	if err := copyFile(s.opts.OVMFVarsTemplate, p.OVMFVars); err != nil {
 		return fmt.Errorf("copy OVMF variable store: %w", err)
+	}
+	if err := s.enrollCertificate(e, img, p.OVMFVars); err != nil {
+		return err
 	}
 	vol, err := s.opts.Storage.Acquire(ctx, storage.AcquireSpec{
 		Name:      volumeName(e.rec.ID),
@@ -293,6 +300,30 @@ func (s *Service) provision(ctx context.Context, e *entry, nw Network) error {
 	s.save(e)
 	s.mu.Unlock()
 	return s.persistNetworks()
+}
+
+// enrollCertificate writes the image's signing certificate into the VM's
+// UEFI db. The guest kernel loads db onto its platform keyring and checks
+// the image's dm-verity root hash signatures and its IPE policy against it;
+// an image with an IPE policy does not boot without it (images/README.md,
+// IPE). It happens once, when the variable store is created: the VM keeps
+// trusting the image it was installed from, whatever image the catalog
+// offers later. An image without a certificate leaves db empty.
+func (s *Service) enrollCertificate(e *entry, img images.Image, vars string) error {
+	if img.Certificate == "" {
+		return nil
+	}
+	certs, err := uefivars.ReadCertificates(img.Certificate)
+	if err != nil {
+		return fmt.Errorf("image %s certificate: %w", img.Ref(), err)
+	}
+	if err := uefivars.EnrollDB(vars, certs...); err != nil {
+		return fmt.Errorf("enroll the image certificate: %w", err)
+	}
+	for _, c := range certs {
+		s.log.Info("image certificate enrolled into the UEFI db", "id", e.rec.ID, "image", img.Ref(), "subject", c.Subject.String(), "sha256", certFingerprint(c))
+	}
+	return nil
 }
 
 // discard undoes a Create that failed before the installer was up.
@@ -905,3 +936,10 @@ func (s *Service) snapshot(e *entry) *VM {
 }
 
 func volumeName(id string) string { return volumePrefix + id }
+
+// certFingerprint is the SHA-256 of a certificate's DER, as
+// `openssl x509 -fingerprint -sha256` prints it without the colons.
+func certFingerprint(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
+}

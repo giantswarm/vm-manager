@@ -3,11 +3,18 @@ package vm_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -31,6 +38,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
 	"github.com/giantswarm/vm-manager/internal/storage"
 	"github.com/giantswarm/vm-manager/internal/tpm"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 	"github.com/giantswarm/vm-manager/internal/vm"
 	"github.com/giantswarm/vm-manager/internal/vm/vmtest"
 )
@@ -134,18 +142,29 @@ func (m *metricsRecorder) snapshot() (installs, boots []time.Duration, forgotten
 // newHarness wires a vm.Service to fakes with one network "lan".
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness with a hook that may change the image (and
+// the files in the image directory) before the service starts.
+func newHarnessWith(t *testing.T, prepare func(imageDir string, img *images.Image)) *harness {
+	t.Helper()
 	h := &harness{t: t, ctx: context.Background(), stateDir: t.TempDir(), imageDir: t.TempDir(), metrics: &metricsRecorder{}}
 	d := vmtest.NewDeps(t.TempDir(), time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC))
 	h.ev, h.clock, h.rt, h.tpm, h.store, h.nets, h.notify = d.Events, d.Clock, d.Runtime, d.TPM, d.Storage, d.Networks, d.Notifier
 	for _, f := range []string{"giantswarm-vm-base_0.1.0.efi", "giantswarm-vm-base_0.1.0.raw", "OVMF_CODE.fd", "OVMF_VARS.fd"} {
 		require.NoError(t, os.WriteFile(filepath.Join(h.imageDir, f), []byte(f), 0o600))
 	}
-	h.imgs = vmtest.NewImages(h.imageDir, images.Image{
+	img := images.Image{
 		ID: "giantswarm-vm-base", Version: "0.1.0",
 		UKI:                filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.efi"),
 		Disk:               filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.raw"),
 		KubernetesVersions: []string{"1.32.0", "1.31.2"},
-	})
+	}
+	if prepare != nil {
+		prepare(h.imageDir, &img)
+	}
+	h.imgs = vmtest.NewImages(h.imageDir, img)
 	h.start()
 	_, err := h.svc.CreateNetwork(h.ctx, network.Spec{Name: testNetwork, CIDR: "127.0.0.0/24"})
 	require.NoError(t, err)
@@ -1222,4 +1241,42 @@ func TestCreateRetriesWhenTheVsockCIDIsTaken(t *testing.T) {
 	stored, err := h.svc.Get(v.ID)
 	require.NoError(t, err)
 	assert.Equal(t, got.CID, stored.CID)
+}
+
+// TestCreateEnrollsTheImageCertificate: the VM's variable store is the
+// template with the image's signing certificate in db, which is what makes
+// the guest kernel trust the image's verity signatures and IPE policy. A
+// failure to enroll fails the create and leaves nothing behind.
+func TestCreateEnrollsTheImageCertificate(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "image"}, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<31, 0)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	h := newHarnessWith(t, func(dir string, img *images.Image) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "OVMF_VARS.fd"), uefivars.Blank(), 0o600))
+		img.Certificate = filepath.Join(dir, "giantswarm-vm-base_0.1.0.crt")
+		require.NoError(t, os.WriteFile(img.Certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	})
+	v := h.create("node1")
+	data, err := os.ReadFile(v.Paths.OVMFVars)
+	require.NoError(t, err)
+	store, err := uefivars.Parse(data)
+	require.NoError(t, err)
+	db, ok := store.Get("db", uefivars.ImageSecurityDatabase)
+	require.True(t, ok, "db in the VM's variable store")
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	assert.Equal(t, uefivars.SignatureList(cert), db.Data)
+	template, err := os.ReadFile(filepath.Join(h.imageDir, "OVMF_VARS.fd"))
+	require.NoError(t, err)
+	assert.Equal(t, uefivars.Blank(), template, "the template stays untouched")
+
+	// The template is not a variable store: the create fails before the
+	// installer starts and releases what it took.
+	require.NoError(t, os.WriteFile(filepath.Join(h.imageDir, "OVMF_VARS.fd"), []byte("junk"), 0o600))
+	_, err = h.svc.Create(h.ctx, h.spec("node2"))
+	require.ErrorContains(t, err, "enroll the image certificate")
+	assert.Len(t, h.svc.List(), 1, "node2 left nothing behind")
 }
