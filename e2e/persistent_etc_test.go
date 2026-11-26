@@ -66,7 +66,8 @@ const etcTestTimeout = 10 * time.Minute
 // survive, the unit runs on the new boot, the SSH host key and the machine
 // id are unchanged, the system is healthy, and /etc is an overlay whose
 // upper directory is on the var partition (the file written to /etc is
-// found there).
+// found there). A reboot from inside the guest comes back ready as a new
+// QEMU process.
 func TestPersistentEtc(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), etcTestTimeout)
 	defer cancel()
@@ -109,6 +110,21 @@ func TestPersistentEtc(t *testing.T) {
 	after := recordEtc(ctx, t, g)
 	assertEtcLayout(ctx, t, g)
 	assertEtcPersisted(ctx, t, g, before, after)
+
+	// The guest's own reboot: QEMU of the installed boot runs with
+	// -no-reboot, ends, and vm-manager starts the next boot as a new
+	// process (whose start rewrites the UEFI variable store from the image
+	// certificate); the VM comes back ready on its own.
+	require.NotNil(t, v.Processes, "a running VM records its processes")
+	qemuPID, secondBoot := v.Processes.QEMU.PID, *v.BootedAt
+	_, _ = g.run(ctx, "systemctl reboot --no-block")
+	v = waitRebooted(ctx, t, m, v.ID, secondBoot)
+	require.NotNil(t, v.Processes)
+	assert.NotEqual(t, qemuPID, v.Processes.QEMU.PID, "the guest's reboot started a new QEMU")
+	assert.Empty(t, v.LastError)
+	g.waitSSH(ctx)
+	assert.NotEqual(t, after.bootID, g.sh(ctx, "cat /proc/sys/kernel/random/boot_id"), "a new boot")
+	assert.Equal(t, after.machineID, g.sh(ctx, "cat /etc/machine-id"), "the same installed system")
 
 	var deleted api.DeletedResponse
 	m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)

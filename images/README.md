@@ -599,21 +599,24 @@ How it holds together:
 
 | Piece | Where | Does |
 |---|---|---|
-| Trust in the image's key | vm-manager, `create_vm` | Writes the image's certificate (`<id>_<v>.crt`, which is `keys/verity.crt`) into the db of the VM's UEFI variable store when it creates the store (`internal/uefivars`; Secure Boot stays off, no PK or KEK). The guest kernel loads db onto its `.platform` keyring, which Arch's kernel trusts for dm-verity root hash signatures and for IPE policies (`CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_PLATFORM_KEYRING`, `CONFIG_IPE_POLICY_SIG_PLATFORM_KEYRING`). A VM keeps the certificate of the image it was created from |
+| Trust in the image's key | vm-manager | `create_vm` keeps a copy of the image's certificate (`<id>_<v>.crt`, which is `keys/verity.crt`) in the VM's directory, and every start of the VM's QEMU writes it into the db of the VM's UEFI variable store and removes PK, KEK, dbx, dbt and dbr (`internal/uefivars`, `qemu.Spec.UEFIDB`; Secure Boot stays off). The guest kernel loads db onto its `.platform` keyring, which Arch's kernel trusts for dm-verity root hash signatures and for IPE policies (`CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_PLATFORM_KEYRING`, `CONFIG_IPE_POLICY_SIG_PLATFORM_KEYRING`). A VM keeps the certificate of the image it was created from |
+| The trust anchor out of the guest's reach | vm-manager | The firmware stays in setup mode, which authenticates no write to db, so the store is rewritten before every QEMU start, and the installed boot runs with `-no-reboot`: the guest's reboot ends QEMU (`SHUTDOWN` reason `guest-reset`) and vm-manager starts the next boot as a new process, instead of a reset that would boot from the store as the guest left it. Whatever a boot writes into db, PK, KEK or dbx is gone at the next one |
 | IPE started | UKI command line | `lsm=` is the kernel's `CONFIG_LSM` (`landlock,lockdown,yama,integrity,bpf`) plus `ipe`: Arch builds IPE in but does not start it |
 | The root verified by the kernel | UKI command line, initrd | `systemd.verity_root_options=root-hash-signature=auto`: systemd-veritysetup opens the root with the signature from the verity signature partition, which udev's `dissect_image` builtin puts on the root partition. Stock udev dissects only the disk systemd-boot reported; `85-vm-manager-dissect-image.rules` in the initrd dissects every other GPT disk too, the installer disk of a `-kernel` boot included. `dmsetup table root` shows `root_hash_sig_key_desc` |
 | The sysext verified by the kernel | systemd-sysext | Hands the signature to the kernel first and falls back to `/usr/lib/verity.d` in userspace only when the kernel refuses; with the certificate on `.platform` it does not refuse |
 | The policy | `/etc/ipe/giantswarm-vm.p7b` | Signed inline (PKCS#7) with the verity key by `scripts/sign-ipe-policy`. PID 1 loads and activates every `/etc/ipe/*.p7b` right after the switch to the real root, before it starts anything there |
-| Locked | `/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf` | `CapabilityBoundingSet=~CAP_MAC_ADMIN`, applied by PID 1 after it loaded the policy: no process holds `CAP_MAC_ADMIN` for the rest of the boot, and every write below `/sys/kernel/security/ipe/` needs it. Nobody can set `enforce` to 0, load a policy or activate one |
+| Locked | `/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf`, UKI command line | `CapabilityBoundingSet=~CAP_MAC_ADMIN`, applied by PID 1 after it loaded the policy, and `sysctl.kernel.usermodehelper.{bset,inheritable}` without it for the processes the kernel starts itself (core_pattern pipes, modprobe, the hotplug and request-key helpers), set before init and never raised again: no process holds `CAP_MAC_ADMIN` for the rest of the boot, and every write below `/sys/kernel/security/ipe/` needs it. Nobody can set `enforce` to 0, load a policy or activate one |
 | Locked across boots | `persistent-etc` (initrd) | Drops whatever the `/etc` overlay's upper layer holds for `ipe/`, `systemd/system.conf` and `systemd/system.conf.d` (a file, a whiteout, a symlink in place of `/etc/systemd`) before it mounts the overlay, so a boot cannot hide the policy or hand the capability back for the next |
 | Fail closed | PID 1 | A policy the kernel refuses (no certificate in db: a variable store created without it, another firmware) stops PID 1 with `Failed to load IPE policy`, `Freezing execution`; the root, opened without a kernel-verified signature (the kernel logs `Root hash verification failed (-ENOKEY)`), would run nothing under the policy anyway |
 
 On a running VM: `cat /sys/kernel/security/ipe/policies/giantswarm-vm/{active,version}`,
 `cat /sys/kernel/security/ipe/enforce`, `keyctl show %:.platform`,
-`dmsetup table --target verity`; denials are audit records in the journal
-(`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rule="DEFAULT action=DENY"`).
-`e2e/ipe_test.go` proves all of it, including a reboot after root hid the policy and planted
-a drop-in that restores the capability.
+`dmsetup table --target verity`, `cat /proc/sys/kernel/usermodehelper/bset`; denials are audit
+records in the journal (`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rule="DEFAULT action=DENY"`).
+`e2e/ipe_test.go` proves all of it, including a core_pattern helper refused when it tries to
+switch enforcement off and a reboot after root hid the policy and planted a drop-in that
+restores the capability; `e2e/persistent_etc_test.go` a reboot from inside the guest coming
+back as a new QEMU process.
 
 What the policy means for workloads and what it does not cover:
 
@@ -639,7 +642,7 @@ What the policy means for workloads and what it does not cover:
   allowed process.
 
 Local work: `make -C images smoke-boot` enrolls the certificate into the NVRAM template it
-hands systemd-vmspawn (`vm-manager image enroll <vars> --cert <crt>`, what `create_vm` does)
+hands systemd-vmspawn (`vm-manager image enroll <vars> --cert <crt>`, what vm-manager does before every QEMU start)
 and asserts the policy active and enforcing; the e2e harness enrolls it the same way. Without
 the certificate the image does not boot (see Fail closed above).
 

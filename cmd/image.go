@@ -140,8 +140,9 @@ func newImageEnrollCmd() *cobra.Command {
 		Use:   "enroll <ovmf-vars-file> --cert <file>",
 		Short: "Enroll an image's signing certificate into the UEFI db of an OVMF variable store",
 		Long: `Write the certificates of --cert (PEM or DER; an image's <id>_<version>.crt) as the
-db of the OVMF variable store <ovmf-vars-file>, replacing what db held. What
-create_vm does to every VM's copy of the firmware variable template: the guest
+db of the OVMF variable store <ovmf-vars-file>, replacing what db held, and remove PK,
+KEK, dbx, dbt and dbr. What vm-manager does to a VM's variable store before every
+start of its QEMU: the guest
 kernel takes db onto its platform keyring and checks the image's dm-verity root
 hash signatures and its IPE policy against it, and an image with an IPE policy
 does not boot without it. Secure Boot stays off. ` + "`make -C images smoke-boot`" + ` uses it
@@ -152,11 +153,17 @@ for the NVRAM template it hands systemd-vmspawn.`,
 			if err != nil {
 				return fmt.Errorf("--cert %s: %w", cert, err)
 			}
-			if err := uefivars.EnrollDB(args[0], certs...); err != nil {
+			changes, err := uefivars.EnrollDB(args[0], certs...)
+			if err != nil {
 				return err
 			}
 			for _, c := range certs {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "enrolled %q into db of %s\n", c.Subject.String(), args[0])
+			}
+			if len(changes) == 0 {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "the store already held it, nothing changed")
+			} else {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "changed: %s\n", strings.Join(changes, ", "))
 			}
 			return nil
 		},

@@ -224,6 +224,9 @@ type Instance struct {
 	once sync.Once
 	// Pid is what PID returns; 0 (no process to read) unless a test sets it.
 	Pid int
+
+	mu     sync.Mutex
+	reason string
 }
 
 func (i *Instance) Wait() <-chan proc.ExitStatus { return i.exit }
@@ -250,6 +253,23 @@ func (i *Instance) Kill() error {
 	i.ev.Add("qemu.kill")
 	i.end(proc.ExitStatus{Code: -1, Err: errors.New("signal: killed")})
 	return nil
+}
+
+// ShutdownReason is what Reboot set, "" otherwise.
+func (i *Instance) ShutdownReason() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.reason
+}
+
+// Reboot ends the process the way QEMU under -no-reboot ends on the
+// guest's reboot: exit 0 after a SHUTDOWN event of reason guest-reset.
+func (i *Instance) Reboot() {
+	i.ev.Add("qemu.guest-reboot")
+	i.mu.Lock()
+	i.reason = qemu.ShutdownGuestReset
+	i.mu.Unlock()
+	i.Exit(0)
 }
 
 // Exit ends the process with code, once.

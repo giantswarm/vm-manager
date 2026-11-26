@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,6 +84,21 @@ func TestIPE(t *testing.T) {
 	assert.Contains(t, sh("{ echo 0 > "+ipeFS+"/enforce; } 2>&1 || true"), "Operation not permitted", "switching enforcement off")
 	assert.Contains(t, sh("{ cat /etc/ipe/"+ipePolicy+".p7b > "+ipeFS+"/new_policy; } 2>&1 || true"), "Operation not permitted", "loading a policy")
 	assert.Equal(t, "1", sh("cat "+ipeFS+"/enforce"), "IPE still enforces")
+
+	// The processes the kernel starts itself do not hold it either: a
+	// core_pattern pipe runs the image's bash on a script from var, as root
+	// and outside PID 1's bounding set, and its write is refused.
+	assertNoMACAdmin(t, "CapBnd: "+capHex(t, sh("cat /proc/sys/kernel/usermodehelper/bset")))
+	sh("printf '#!/usr/bin/bash\\n{ echo 0 > " + ipeFS + "/enforce; } 2>> /var/tmp/umh.log; echo helper ran >> /var/tmp/umh.log\\n' > /var/tmp/umh.sh && " +
+		"echo '|/usr/bin/bash /var/tmp/umh.sh' > /proc/sys/kernel/core_pattern && " +
+		"{ bash -c 'ulimit -c unlimited; kill -SEGV $$' || true; }")
+	umh := ""
+	require.Eventually(t, func() bool {
+		umh = sh("cat /var/tmp/umh.log 2>/dev/null || true")
+		return strings.Contains(umh, "helper ran")
+	}, 15*time.Second, 500*time.Millisecond, "the core_pattern helper did not run")
+	assert.Contains(t, umh, "Operation not permitted", "a usermode helper switching IPE off")
+	assert.Equal(t, "1", sh("cat "+ipeFS+"/enforce"), "IPE still enforces after the helper")
 	assert.Empty(t, unexpectedFailures(sh("systemctl --failed --no-legend --plain")), "failed units\n%s", h.ConsoleTail(inst))
 
 	// What root could leave in /etc for the next boot.
@@ -121,6 +137,19 @@ func stopInstalled(ctx context.Context, t *testing.T, h *Harness, inst *qemu.Ins
 	require.NoError(t, inst.Stop(sctx))
 	st := <-inst.Wait()
 	require.Equal(t, 0, st.Code, "guest did not power down cleanly: %s\n%s", st, h.ConsoleTail(inst))
+}
+
+// capHex turns the two 32-bit words of /proc/sys/kernel/usermodehelper/bset
+// (low, high) into the hex form of /proc/<pid>/status.
+func capHex(t *testing.T, words string) string {
+	t.Helper()
+	fields := strings.Fields(words)
+	require.Len(t, fields, 2, "usermodehelper bset %q", words)
+	lo, err := strconv.ParseUint(fields[0], 10, 32)
+	require.NoError(t, err)
+	hi, err := strconv.ParseUint(fields[1], 10, 32)
+	require.NoError(t, err)
+	return strconv.FormatUint(hi<<32|lo, 16)
 }
 
 // assertNoMACAdmin checks that no CapBnd line of the grep output has

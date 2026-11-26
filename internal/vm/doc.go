@@ -9,7 +9,7 @@
 //	State       Meaning                                                    Process
 //	creating    id, CID, key, volume and lease being allocated             none
 //	installing  installer boot (phase A): sysinstall copies the OS         QEMU -kernel UKI, -no-reboot
-//	booting     installed boot (phase B) started, guest not yet ready      QEMU from the target disk
+//	booting     installed boot (phase B) started, guest not yet ready      QEMU from the target disk, -no-reboot
 //	attesting   attestation required and the guest asked for a nonce       same
 //	ready       guest sent READY=1 over vsock                              same
 //	running     process up, READY=1 not received within BootTimeout        same
@@ -32,14 +32,18 @@
 //	running     -> ready        a late READY=1
 //	<live>      -> stopping     Stop, Reboot, Delete
 //	stopping    -> stopped      process exited
+//	<live>      -> booting      phase B exited 0 with SHUTDOWN reason guest-reset (the guest rebooted): the next boot starts as a new process
 //	<live>      -> stopped      process exited 0 on its own (guest poweroff)
 //	<live>      -> failed       process exited non-zero on its own, or phase B failed to start
 //	stopped|failed -> booting   Start (phase B only; a VM that never installed cannot be started)
 //	<any>       -> deleting     Delete; the record disappears when it is done
 //
-// <live> is installing, booting, attesting, ready or running. A reboot from
-// inside the guest is invisible here: only phase A runs with -no-reboot, phase
-// B lets QEMU reset internally and the next READY=1 keeps the VM ready.
+// <live> is installing, booting, attesting, ready or running. Both phases run
+// with -no-reboot: a reboot from inside the guest ends phase B's QEMU and
+// starts a new one, whose start writes the UEFI variable store from the
+// image's certificate again (qemu.Spec.UEFIDB); a reset inside the same
+// process would boot from the store as the guest left it, and the firmware's
+// setup mode lets the guest write db (images/README.md, IPE).
 //
 // Invariant: once Close or Delete has begun for a VM, no process is started
 // for it. Every start (Create, Start, the install-to-boot handoff) holds the

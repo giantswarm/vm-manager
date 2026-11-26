@@ -41,6 +41,7 @@ const (
 	consoleFile  = "console.log"
 	tpmDir       = "tpm"
 	ovmfVarsFile = "ovmf_vars.fd"
+	uefiDBFile   = "uefi-db.crt"
 	qmpFile      = "qmp.sock"
 	qemuLogFile  = "qemu.log"
 	sshKeyFile   = "ssh_key"

@@ -145,6 +145,12 @@ type Spec struct {
 	// writable copy of the variable store (Runtime creates it).
 	OVMFCode string
 	OVMFVars string
+	// UEFIDB is a certificate file (PEM or DER) whose certificates Runtime
+	// writes into OVMFVars as db before every start, removing PK, KEK, dbx,
+	// dbt and dbr (uefivars.EnrollDB): the firmware stays in setup mode,
+	// where the guest can write them itself. Empty leaves the store as it
+	// is.
+	UEFIDB string
 	// SerialLog receives the guest serial console (the first serial port,
 	// ttyS0, which the image's kernel command line uses at 115200 baud).
 	SerialLog string
@@ -155,7 +161,8 @@ type Spec struct {
 	// keeps the output in memory, which is lost with the vm-manager that
 	// started the process.
 	ProcessLog string
-	// NoReboot makes a guest reboot end the process instead (PhaseInstall).
+	// NoReboot makes a guest reboot end the process instead, with a
+	// SHUTDOWN event of reason ShutdownGuestReset (Instance.ShutdownReason).
 	NoReboot bool
 }
 

@@ -112,7 +112,7 @@ runs two boots:
 |---|---|
 | `creating` | resources allocated, nothing running yet |
 | `installing` | **installer boot**: QEMU boots the image's UKI directly (`-kernel`) with the image attached read-only and the blank target disk; `vm-sysinstall.service` runs `systemd-sysinstall` onto the target and reboots; QEMU runs with `-no-reboot`, its exit ends the phase. About 12 s. |
-| `booting` | **installed boot**: OVMF, systemd-boot, the UKI from the target's ESP. Every later boot (`start_vm`, `reboot_vm`) is this phase. |
+| `booting` | **installed boot**: OVMF, systemd-boot, the UKI from the target's ESP. Every later boot (`start_vm`, `reboot_vm`, a reboot from inside the guest) is this phase, each a new QEMU process. |
 | `attesting` | `require_attestation` is set and the guest fetched its first nonce |
 | `ready` | the guest's service manager sent `READY=1` over vsock: 11 to 15 s after the installed boot starts for the bare image, longer when user-data runs `kubeadm`, which `READY=1` waits for |
 | `running` | the process is up but `READY=1` did not arrive within `--boot-timeout`; `lastError` says so, a late `READY=1` still moves it to `ready` |
@@ -165,8 +165,9 @@ does the following in order:
     `systemd-report upload` to the IMDS every 15 s from then on.
 
 Attestation and the user-data gate reset on every installed boot, so `start_vm` and
-`reboot_vm` attest again. A reboot from inside the guest is invisible to vm-manager (only
-the installer runs with `-no-reboot`). A reboot to ready takes 11 s; what user-data and
+`reboot_vm` attest again, as does a reboot from inside the guest: QEMU runs with
+`-no-reboot`, ends on it, and vm-manager starts the next boot as a new process, so that the
+firmware starts from a variable store vm-manager wrote. A reboot to ready takes 11 s; what user-data and
 firstboot wrote survives it, as do the machine ID and the ssh host key. vm-manager does not
 reattach to QEMU across its own restarts: on shutdown every VM is stopped gracefully, on
 startup such VMs are `stopped` with a note in `lastError`.

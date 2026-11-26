@@ -44,6 +44,10 @@ type Instance interface {
 	PID() int
 	// Handle is what the record persists for Runtime.Attach.
 	Handle() proc.Handle
+	// ShutdownReason is the reason of QEMU's last SHUTDOWN event
+	// (qemu.ShutdownGuestReset when the guest rebooted), "" without one;
+	// asked after Wait yielded.
+	ShutdownReason() string
 }
 
 // TPMManager starts swtpm processes (tpm.Manager through TPM).

@@ -1,6 +1,7 @@
 package uefivars
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -139,7 +140,9 @@ func TestEnrollDB(t *testing.T) {
 	require.NoError(t, os.WriteFile(vars, emptyStore(t), 0o600))
 	c := testCert(t, "image")
 
-	require.NoError(t, EnrollDB(vars, c))
+	changes, err := EnrollDB(vars, c)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"db written"}, changes)
 	st, err := os.Stat(vars)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm(), "mode kept")
@@ -152,19 +155,91 @@ func TestEnrollDB(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, SignatureList(c), v.Data)
 
+	// Already in that state: nothing changes, the file is not rewritten.
+	before, err := os.Stat(vars)
+	require.NoError(t, err)
+	changes, err = EnrollDB(vars, c)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+	after, err := os.Stat(vars)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(before, after), "an unchanged store is left in place")
+
 	// Deterministic: the same certificate gives the same store, which keeps
 	// PCR 7 the same for every VM of an image.
 	other := filepath.Join(dir, "other.fd")
 	require.NoError(t, os.WriteFile(other, emptyStore(t), 0o600))
-	require.NoError(t, EnrollDB(other, c))
+	_, err = EnrollDB(other, c)
+	require.NoError(t, err)
 	otherData, err := os.ReadFile(other) // #nosec G304 -- the test's temp file
 	require.NoError(t, err)
 	assert.Equal(t, data, otherData)
 
-	assert.Error(t, EnrollDB(vars), "no certificate")
-	assert.Error(t, EnrollDB(filepath.Join(dir, "missing.fd"), c))
+	_, err = EnrollDB(vars)
+	assert.Error(t, err, "no certificate")
+	_, err = EnrollDB(filepath.Join(dir, "missing.fd"), c)
+	assert.Error(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "junk.fd"), []byte("junk"), 0o600))
-	assert.Error(t, EnrollDB(filepath.Join(dir, "junk.fd"), c))
+	_, err = EnrollDB(filepath.Join(dir, "junk.fd"), c)
+	assert.Error(t, err)
+}
+
+// TestEnrollDBUndoesTheGuest: what a guest in setup mode may have written
+// (its own certificate in db, a PK, KEK or dbx) is gone after the next
+// enrollment, and db is the image's again.
+func TestEnrollDBUndoesTheGuest(t *testing.T) {
+	vars := filepath.Join(t.TempDir(), "vars.fd")
+	data := emptyStore(t)
+	img, guest := testCert(t, "image"), testCert(t, "guest")
+	s, err := Parse(data)
+	require.NoError(t, err)
+	require.NoError(t, s.Set("db", ImageSecurityDatabase, AttrDB, SignatureList(img, guest)))
+	require.NoError(t, s.Set("PK", GlobalVariable, AttrDB, SignatureList(guest)))
+	require.NoError(t, s.Set("KEK", GlobalVariable, AttrDB, SignatureList(guest)))
+	require.NoError(t, s.Set("dbx", ImageSecurityDatabase, AttrDB, SignatureList(img)))
+	require.NoError(t, s.Set("BootOrder", GlobalVariable, 0x7, []byte{1, 0}))
+	require.NoError(t, os.WriteFile(vars, s.Bytes(), 0o600))
+
+	changes, err := EnrollDB(vars, img)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"PK removed", "KEK removed", "dbx removed", "db replaced"}, changes)
+	got, err := os.ReadFile(vars) // #nosec G304 -- the test's temp file
+	require.NoError(t, err)
+	s, err = Parse(got)
+	require.NoError(t, err)
+	names := []string{}
+	for _, v := range s.Variables() {
+		names = append(names, v.Name)
+	}
+	assert.ElementsMatch(t, []string{"BootOrder", "db"}, names, "other variables stay")
+	db, _ := s.Get("db", ImageSecurityDatabase)
+	assert.Equal(t, SignatureList(img), db.Data)
+}
+
+// TestSetCompacts: a store whose free space deleted variables used up is
+// compacted the way the firmware reclaims it, live records unchanged.
+func TestSetCompacts(t *testing.T) {
+	s, err := Parse(emptyStore(t))
+	require.NoError(t, err)
+	require.NoError(t, s.Set("BootOrder", GlobalVariable, 0x7, []byte{1, 0}))
+	boot, _ := s.Get("BootOrder", GlobalVariable)
+	record := append([]byte(nil), s.data[boot.offset:boot.offset+varHeaderSize+len(encodeName("BootOrder"))+2]...)
+	big := bytes.Repeat([]byte{0xab}, 0x10000)
+	for range 10 {
+		require.NoError(t, s.Set("db", ImageSecurityDatabase, AttrDB, big))
+	}
+	s2, err := Parse(s.Bytes())
+	require.NoError(t, err)
+	names := []string{}
+	for _, v := range s2.Variables() {
+		names = append(names, v.Name)
+	}
+	assert.Equal(t, []string{"BootOrder", "db"}, names)
+	boot, _ = s2.Get("BootOrder", GlobalVariable)
+	assert.Equal(t, record, s2.data[boot.offset:boot.offset+len(record)], "the record is moved, not rewritten")
+	db, _ := s2.Get("db", ImageSecurityDatabase)
+	assert.Equal(t, big, db.Data)
+	assert.Less(t, s2.free, s2.start+0x30000, "the deleted copies are gone")
 }
 
 // TestHostTemplates enrolls into the firmware variable templates this host

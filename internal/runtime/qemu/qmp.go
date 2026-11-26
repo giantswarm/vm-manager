@@ -19,6 +19,10 @@ const (
 	EventReset     = "RESET"
 	EventStop      = "STOP"
 	EventPowerdown = "POWERDOWN"
+
+	// ShutdownGuestReset is the SHUTDOWN reason of a guest's reboot under
+	// -no-reboot; a power-off is "guest-shutdown".
+	ShutdownGuestReset = "guest-reset"
 )
 
 // eventBuffer is how many events queue before new ones are dropped.
@@ -39,7 +43,10 @@ type QMP struct {
 	dropped atomic.Uint64
 	done    chan struct{}
 	err     error
-	closer  sync.Once
+	// shutdownReason is data.reason of the last SHUTDOWN event, kept
+	// whether or not anyone reads Events.
+	shutdownReason string
+	closer         sync.Once
 }
 
 // Event is an asynchronous QMP message.
@@ -144,7 +151,17 @@ func (q *QMP) read(dec *json.Decoder) {
 		}
 		switch {
 		case m.Event != "":
-			q.deliver(Event{Name: m.Event, Data: m.Data, Timestamp: m.Timestamp})
+			ev := Event{Name: m.Event, Data: m.Data, Timestamp: m.Timestamp}
+			if ev.Name == EventShutdown {
+				var data struct {
+					Reason string `json:"reason"`
+				}
+				_ = json.Unmarshal(ev.Data, &data)
+				q.mu.Lock()
+				q.shutdownReason = data.Reason
+				q.mu.Unlock()
+			}
+			q.deliver(ev)
 		case m.ID != nil:
 			q.mu.Lock()
 			ch := q.pending[*m.ID]
@@ -263,6 +280,14 @@ func (q *QMP) SystemPowerdown(ctx context.Context) error {
 // Quit ends QEMU immediately, like SIGTERM but acknowledged.
 func (q *QMP) Quit(ctx context.Context) error {
 	return q.Execute(ctx, "quit", nil, nil)
+}
+
+// ShutdownReason is the reason of the last SHUTDOWN event QEMU sent
+// (ShutdownGuestReset, "guest-shutdown", ...), "" without one.
+func (q *QMP) ShutdownReason() string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.shutdownReason
 }
 
 // Events delivers asynchronous events; it is closed when the connection

@@ -7,6 +7,14 @@
 // (images/README.md, IPE). Secure Boot stays off: no PK or KEK is written, the
 // firmware remains in setup mode and boots what it booted before.
 //
+// Setup mode authenticates no write to the Secure Boot variables, so root in
+// the guest can change db at runtime, and a reset of the same QEMU process
+// would boot with it. EnrollDB is therefore not a one-time enrollment but the
+// state vm-manager writes before every start of a VM's QEMU (Spec.UEFIDB in
+// internal/runtime/qemu), and a guest's reboot is a new QEMU process: db is
+// the image's certificate and PK, KEK, dbx, dbt and dbr are absent, whatever
+// the previous boot wrote.
+//
 // The store is the authenticated-variable format of
 // MdeModulePkg/Include/Guid/VariableFormat.h: an EFI_FIRMWARE_VOLUME_HEADER
 // whose file system GUID is EFI_SYSTEM_NV_DATA_FV_GUID, a
@@ -79,6 +87,8 @@ var (
 	// ImageSecurityDatabase is EFI_IMAGE_SECURITY_DATABASE_GUID, the vendor
 	// GUID of db, dbx and dbt.
 	ImageSecurityDatabase = MustParseGUID("d719b2cb-3d3a-4596-a3bc-dad00e67656f")
+	// GlobalVariable is EFI_GLOBAL_VARIABLE, the vendor GUID of PK and KEK.
+	GlobalVariable = MustParseGUID("8be4df61-93ca-11d2-aa0d-00e098032b8c")
 	// certX509 is EFI_CERT_X509_GUID, the signature type of a DER X.509
 	// certificate in an EFI_SIGNATURE_LIST.
 	certX509 = MustParseGUID("a5c059a1-94e4-4aa7-87b5-ab155c2bf072")
@@ -231,23 +241,35 @@ func (s *Store) Get(name string, guid GUID) (Variable, bool) {
 	return Variable{}, false
 }
 
-// Set writes the variable, marking a live one of the same name and GUID
-// deleted. The timestamp and monotonic count of the authenticated header are
-// zero and no public key index is set: the store is written in setup mode,
-// where the firmware applies no authentication, and none of these fields is
-// measured.
-func (s *Store) Set(name string, guid GUID, attributes uint32, data []byte) error {
-	nameBytes := encodeName(name)
-	need := varHeaderSize + len(nameBytes) + len(data)
-	if s.free+need > s.end {
-		return fmt.Errorf("variable store: %d bytes for %s do not fit, %d free", need, name, s.end-s.free)
-	}
+// Delete marks the live variable name/guid deleted and reports whether
+// there was one.
+func (s *Store) Delete(name string, guid GUID) bool {
 	for i, v := range s.vars {
 		if v.Name == name && v.GUID == guid {
 			s.data[v.offset+2] &= varDeleted
 			s.vars = append(s.vars[:i], s.vars[i+1:]...)
-			break
+			return true
 		}
+	}
+	return false
+}
+
+// Set writes the variable, marking a live one of the same name and GUID
+// deleted. When the appended copy does not fit, the store is compacted
+// first, as the firmware reclaims it: deleted variables are dropped and the
+// live ones moved together, byte for byte. The timestamp and monotonic count
+// of the authenticated header are zero and no public key index is set: the
+// store is written in setup mode, where the firmware applies no
+// authentication, and none of these fields is measured.
+func (s *Store) Set(name string, guid GUID, attributes uint32, data []byte) error {
+	nameBytes := encodeName(name)
+	need := varHeaderSize + len(nameBytes) + len(data)
+	s.Delete(name, guid)
+	if s.free+need > s.end {
+		s.compact()
+	}
+	if s.free+need > s.end {
+		return fmt.Errorf("variable store: %d bytes for %s do not fit, %d free", need, name, s.end-s.free)
 	}
 	p := s.free
 	h := s.data[p : p+varHeaderSize]
@@ -273,6 +295,29 @@ func (s *Store) Set(name string, guid GUID, attributes uint32, data []byte) erro
 	return nil
 }
 
+// compact rewrites the variable area with the live variables only, each
+// record (header, name, data) copied unchanged and marked added, and erases
+// the rest.
+func (s *Store) compact() {
+	records := make([][]byte, 0, len(s.vars))
+	for _, v := range s.vars {
+		_, next, _ := s.readVariable(v.offset)
+		records = append(records, append([]byte(nil), s.data[v.offset:next]...))
+	}
+	area := s.data[s.start:s.end]
+	for i := range area {
+		area[i] = 0xff
+	}
+	s.vars, s.free = nil, s.start
+	for _, r := range records {
+		copy(s.data[s.free:], r)
+		s.data[s.free+2] = varAdded
+		v, next, _ := s.readVariable(s.free)
+		s.vars = append(s.vars, v)
+		s.free = next
+	}
+}
+
 // Bytes returns the store's file content.
 func (s *Store) Bytes() []byte { return s.data }
 
@@ -296,25 +341,58 @@ func SignatureList(certs ...*x509.Certificate) []byte {
 	return buf.Bytes()
 }
 
-// EnrollDB sets db of the variable store file at path to the certificates,
-// replacing what db held. The file is rewritten in place of the old one
-// (a temporary file renamed over it).
-func EnrollDB(path string, certs ...*x509.Certificate) error {
+// removed are the Secure Boot variables EnrollDB keeps out of a store: with
+// a PK the firmware leaves setup mode (and boots only what its db signed),
+// KEK authorizes db updates, dbx, dbt and dbr revoke or add trust (the guest
+// kernel loads dbx onto its blacklist keyring).
+var removed = []struct {
+	name string
+	guid GUID
+}{
+	{"PK", GlobalVariable}, {"KEK", GlobalVariable},
+	{"dbx", ImageSecurityDatabase}, {"dbt", ImageSecurityDatabase}, {"dbr", ImageSecurityDatabase},
+}
+
+// EnrollDB makes the variable store file at path hold the certificates as
+// db, with AttrDB, and none of PK, KEK, dbx, dbt and dbr. It returns what it
+// changed ("db written", "db replaced", "PK removed", ...), nothing for a
+// store that already was in that state, which it leaves untouched;
+// otherwise the file is replaced (a temporary file renamed over it).
+func EnrollDB(path string, certs ...*x509.Certificate) ([]string, error) {
 	if len(certs) == 0 {
-		return errors.New("enroll db: no certificate")
+		return nil, errors.New("enroll db: no certificate")
 	}
 	data, err := os.ReadFile(path) // #nosec G304 -- the VM's own variable store.
 	if err != nil {
-		return fmt.Errorf("enroll db: %w", err)
+		return nil, fmt.Errorf("enroll db: %w", err)
 	}
 	s, err := Parse(data)
 	if err != nil {
-		return fmt.Errorf("enroll db: %s: %w", path, err)
+		return nil, fmt.Errorf("enroll db: %s: %w", path, err)
 	}
-	if err := s.Set("db", ImageSecurityDatabase, AttrDB, SignatureList(certs...)); err != nil {
-		return fmt.Errorf("enroll db: %s: %w", path, err)
+	var changes []string
+	for _, r := range removed {
+		if s.Delete(r.name, r.guid) {
+			changes = append(changes, r.name+" removed")
+		}
 	}
-	return writeFile(path, s.Bytes())
+	want := SignatureList(certs...)
+	switch db, ok := s.Get("db", ImageSecurityDatabase); {
+	case !ok:
+		changes = append(changes, "db written")
+	case db.Attributes != AttrDB || !bytes.Equal(db.Data, want):
+		changes = append(changes, "db replaced")
+	}
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	if err := s.Set("db", ImageSecurityDatabase, AttrDB, want); err != nil {
+		return nil, fmt.Errorf("enroll db: %s: %w", path, err)
+	}
+	if err := writeFile(path, s.Bytes()); err != nil {
+		return nil, fmt.Errorf("enroll db: %w", err)
+	}
+	return changes, nil
 }
 
 // ReadCertificates parses the PEM or DER certificates of a file.

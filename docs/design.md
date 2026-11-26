@@ -31,7 +31,7 @@ systemd-pcrextend (PCR 13), and observed through the guest's systemd-report uplo
 | Provisioning | Installer boot runs systemd-sysinstall onto a storage-provider volume, then reboots into systemd-firstboot | Same flow later works for bare metal; credentials bound to the VM's own vTPM |
 | Network | Rootless userspace SDN via gvisor-tap-vsock embedded in vm-manager | No root, runs on laptops and GitHub Actions; IMDS served inside the stack |
 | Attestation | swtpm vTPM + measured boot; vm-manager verifies a TPM quote and gates user-data | The "shielded VM" story: only integrity-proven VMs get bootstrap secrets |
-| Code integrity | IPE: the kernel executes and loads code only from dm-verity volumes whose signature it verified (the root, the sysexts); vm-manager enrolls the image's certificate into each VM's UEFI db (platform keyring); PID 1 drops `CAP_MAC_ADMIN` after loading the signed policy | Immutable for real: root on the node can write to `/var` and `/etc` but runs nothing the image did not ship, and cannot switch the policy off. No container runs until images arrive as signed dm-verity layers ([images/README.md](../images/README.md#ipe)) |
+| Code integrity | IPE: the kernel executes and loads code only from dm-verity volumes whose signature it verified (the root, the sysexts); vm-manager writes the image's certificate into each VM's UEFI db before every QEMU start (platform keyring), and a guest's reboot is a new QEMU; PID 1 and the kernel's usermode helpers lose `CAP_MAC_ADMIN` after the signed policy is loaded | Immutable for real: root on the node can write to `/var` and `/etc` but runs nothing the image did not ship, and cannot switch the policy off. No container runs until images arrive as signed dm-verity layers ([images/README.md](../images/README.md#ipe)) |
 | Kubernetes | systemd-sysext layer pulled at boot as a systemd-sysupdate component | One base image, N Kubernetes versions, measured into PCR 13 |
 | User-data executor | Ignition in the mkosi initrd; cluster-manager sets KubeadmConfig `format: ignition` | The standard first-boot provisioner for immutable images (Flatcar, FCOS); the guest agent only attests |
 | CI | GitHub Actions with KVM for image build + boot e2e; unit/lint everywhere | Hosted runners expose /dev/kvm; no self-hosted infra to start |
@@ -151,9 +151,9 @@ vm-manager only serves signed artifacts and never holds private keys.
 
 Phase A, installer boot (no persistent disk yet):
 
-1. `create_vm` acquires a target volume, creates the swtpm state dir and OVMF vars copy
-   with the image's certificate in db (`internal/uefivars`), allocates a MAC + DHCP lease,
-   stores user-data.
+1. `create_vm` acquires a target volume, creates the swtpm state dir and OVMF vars copy,
+   keeps a copy of the image's certificate, which every QEMU start writes into db
+   (`internal/uefivars`), allocates a MAC + DHCP lease, stores user-data.
 2. QEMU starts with `-kernel base_<v>.efi` (direct UKI boot under OVMF), the base DDI
    attached read-only (`serial=installer`), the blank target (`serial=target`), swtpm via
    `tpm-crb`, `-smbios type=1,manufacturer=GiantSwarm,product=vm-manager,serial=<vm-id>`,
@@ -196,8 +196,10 @@ Phase B, installed boot (every boot from now on):
    into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
    the stages run with an empty config.
 7. Real system: PID 1 first loads and activates the signed IPE policy from `/etc/ipe`
-   and then drops `CAP_MAC_ADMIN` from every process's bounding set; from here on only
-   code from kernel-verified dm-verity volumes runs (images/README.md, IPE). Then
+   and then drops `CAP_MAC_ADMIN` from every process's bounding set (the usermode
+   helpers lost it on the kernel command line); from here on only code from
+   kernel-verified dm-verity volumes runs (images/README.md, IPE). A reboot of the guest
+   ends QEMU (`-no-reboot`), and vm-manager starts the next boot as a new process. Then
    systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
    then `vm-kubernetes.service` (base image, `After=network-online.target
    systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service`, wanted

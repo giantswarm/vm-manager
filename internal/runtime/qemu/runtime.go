@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
+	"github.com/giantswarm/vm-manager/internal/uefivars"
 )
 
 // DefaultBinary is the QEMU executable looked up on PATH.
@@ -230,6 +231,26 @@ func (i *Instance) setQMP(qmp *QMP) {
 	}()
 }
 
+// shutdownEventsWait bounds how long ShutdownReason waits for the QMP
+// connection of an exited QEMU to end.
+const shutdownEventsWait = 2 * time.Second
+
+// ShutdownReason is the reason of the last SHUTDOWN event QEMU sent
+// (ShutdownGuestReset, "guest-shutdown", "host-qmp-quit", ...), "" without
+// one or without QMP. Asked after Wait yielded, it first waits for the QMP
+// connection to end, so that an event QEMU sent right before it exited
+// counts.
+func (i *Instance) ShutdownReason() string {
+	if i.qmp == nil {
+		return ""
+	}
+	select {
+	case <-i.qmp.done:
+	case <-time.After(shutdownEventsWait):
+	}
+	return i.qmp.ShutdownReason()
+}
+
 // prepare creates the directories the VM writes into, seeds the OVMF
 // variable store and removes a QMP socket left by an earlier process.
 func (r *Runtime) prepare(spec Spec) error {
@@ -238,13 +259,37 @@ func (r *Runtime) prepare(spec Spec) error {
 			return fmt.Errorf("vm directory: %w", err)
 		}
 	}
+	fresh := !fileExists(spec.OVMFVars)
 	if err := copyIfMissing(r.varsTemplate, spec.OVMFVars); err != nil {
 		return fmt.Errorf("OVMF vars: %w", err)
+	}
+	if spec.UEFIDB != "" {
+		certs, err := uefivars.ReadCertificates(spec.UEFIDB)
+		if err != nil {
+			return fmt.Errorf("UEFI db certificate %s: %w", spec.UEFIDB, err)
+		}
+		changes, err := uefivars.EnrollDB(spec.OVMFVars, certs...)
+		if err != nil {
+			return fmt.Errorf("OVMF vars: %w", err)
+		}
+		switch {
+		case len(changes) == 0:
+		case fresh || (len(changes) == 1 && changes[0] == "db written"):
+			r.log.Info("UEFI db set from the image certificate", "vm", spec.ID, "changes", changes)
+		default:
+			r.log.Warn("the guest changed its UEFI Secure Boot variables, restored from the image certificate", "vm", spec.ID, "changes", changes)
+		}
 	}
 	if err := os.Remove(spec.QMPSocket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stale QMP socket: %w", err)
 	}
 	return nil
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // copyIfMissing copies src to dst (0600) unless dst exists.

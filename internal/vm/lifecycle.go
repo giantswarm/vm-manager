@@ -273,7 +273,7 @@ func (s *Service) provision(ctx context.Context, e *entry, img images.Image, nw 
 	if err := copyFile(s.opts.OVMFVarsTemplate, p.OVMFVars); err != nil {
 		return fmt.Errorf("copy OVMF variable store: %w", err)
 	}
-	if err := s.enrollCertificate(e, img, p.OVMFVars); err != nil {
+	if err := s.keepCertificate(e, img); err != nil {
 		return err
 	}
 	vol, err := s.opts.Storage.Acquire(ctx, storage.AcquireSpec{
@@ -302,26 +302,36 @@ func (s *Service) provision(ctx context.Context, e *entry, img images.Image, nw 
 	return s.persistNetworks()
 }
 
-// enrollCertificate writes the image's signing certificate into the VM's
-// UEFI db. The guest kernel loads db onto its platform keyring and checks
-// the image's dm-verity root hash signatures and its IPE policy against it;
-// an image with an IPE policy does not boot without it (images/README.md,
-// IPE). It happens once, when the variable store is created: the VM keeps
-// trusting the image it was installed from, whatever image the catalog
-// offers later. An image without a certificate leaves db empty.
-func (s *Service) enrollCertificate(e *entry, img images.Image, vars string) error {
+// keepCertificate copies the image's signing certificate into the VM's
+// directory: every start of the VM's QEMU writes it into the UEFI variable
+// store as db (qemu.Spec.UEFIDB), where the guest kernel takes it onto its
+// platform keyring and checks the image's dm-verity root hash signatures and
+// its IPE policy against it; an image with an IPE policy does not boot
+// without it (images/README.md, IPE). The copy keeps the VM on the image it
+// was installed from, whatever image the catalog offers later. An image
+// without a certificate leaves db alone.
+func (s *Service) keepCertificate(e *entry, img images.Image) error {
 	if img.Certificate == "" {
 		return nil
 	}
-	certs, err := uefivars.ReadCertificates(img.Certificate)
+	data, err := os.ReadFile(img.Certificate) // #nosec G304 -- a certificate of the image directory
 	if err != nil {
 		return fmt.Errorf("image %s certificate: %w", img.Ref(), err)
 	}
-	if err := uefivars.EnrollDB(vars, certs...); err != nil {
-		return fmt.Errorf("enroll the image certificate: %w", err)
+	certs, err := uefivars.ParseCertificates(data)
+	if err != nil {
+		return fmt.Errorf("image %s certificate %s: %w", img.Ref(), img.Certificate, err)
 	}
+	path := filepath.Join(e.rec.Paths.Dir, uefiDBFile)
+	if err := writeAtomic(path, data, 0o600); err != nil {
+		return fmt.Errorf("keep the image certificate: %w", err)
+	}
+	s.mu.Lock()
+	e.rec.Paths.UEFIDB = path
+	s.save(e)
+	s.mu.Unlock()
 	for _, c := range certs {
-		s.log.Info("image certificate enrolled into the UEFI db", "id", e.rec.ID, "image", img.Ref(), "subject", c.Subject.String(), "sha256", certFingerprint(c))
+		s.log.Info("image certificate kept for the VM's UEFI db", "id", e.rec.ID, "image", img.Ref(), "subject", c.Subject.String(), "sha256", certFingerprint(c))
 	}
 	return nil
 }
@@ -463,6 +473,7 @@ func (s *Service) qemuSpec(rec *VM, phase qemu.Phase, img images.Image, netSocke
 		TPMSocket:   tpmSocket,
 		OVMFCode:    s.opts.OVMFCode,
 		OVMFVars:    rec.Paths.OVMFVars,
+		UEFIDB:      rec.Paths.UEFIDB,
 		SerialLog:   rec.Paths.Console,
 		QMPSocket:   rec.Paths.QMPSocket,
 		ProcessLog:  rec.Paths.QEMULog,
@@ -477,6 +488,11 @@ func (s *Service) qemuSpec(rec *VM, phase qemu.Phase, img images.Image, netSocke
 		if !rec.Booted {
 			spec.KernelCmdlineExtra = firstBootCmdline
 		}
+		// A guest's reboot ends QEMU, and onExit starts it again: a reset of
+		// the same process would boot from the variable store as the guest
+		// left it, which setup mode lets it write (db included), instead of
+		// the one Spec.UEFIDB restores before every start.
+		spec.NoReboot = true
 	}
 	return spec
 }
@@ -578,6 +594,11 @@ func (s *Service) onNotify(e *entry, n qemu.Notification) {
 // run, starts the installed boot.
 func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout time.Duration) {
 	id := e.rec.ID
+	// QEMU of the installed boot runs with -no-reboot (qemuSpec): it ends
+	// on the guest's reboot as on its power-off, and only the SHUTDOWN
+	// event's reason tells the two apart.
+	guestReboot := p.phase == qemu.PhaseBoot && exit.Code == 0 && !p.timedOut &&
+		p.inst != nil && p.inst.ShutdownReason() == qemu.ShutdownGuestReset
 	s.stopTPM(id, p.tpm)
 	if p.phase == qemu.PhaseBoot {
 		s.opts.Notify.Unsubscribe(e.rec.CID)
@@ -600,6 +621,10 @@ func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout tim
 	case p.phase == qemu.PhaseInstall && prev == StateInstalling:
 		e.rec.State = StateFailed
 		e.rec.LastError = s.failureMessage(e, "installer", exit, p.timedOut, timeout)
+	case guestReboot:
+		// rebootAfterGuest starts the next boot.
+		e.rec.State = StateBooting
+		e.rec.ReadyAt = nil
 	case exit.Code == 0:
 		e.rec.State = StateStopped
 		e.rec.LastError = "guest shut down"
@@ -615,6 +640,35 @@ func (s *Service) onExit(e *entry, p *process, exit proc.ExitStatus, timeout tim
 
 	if installed {
 		s.boot(e)
+	}
+	if guestReboot {
+		s.rebootAfterGuest(e)
+	}
+}
+
+// rebootAfterGuest starts the installed boot again after the guest rebooted
+// (onExit), unless the VM was stopped, deleted or vm-manager is closing in
+// between: a new QEMU process, whose start writes the UEFI variable store
+// from the image's certificate again.
+func (s *Service) rebootAfterGuest(e *entry) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	s.mu.Lock()
+	ok := e.proc == nil && e.rec.State == StateBooting
+	if ok && s.closing {
+		ok = false
+		e.rec.State = StateStopped
+		e.rec.LastError = "vm-manager shut down while the guest rebooted; start the VM"
+		s.save(e)
+		s.broadcastLocked()
+	}
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.log.Info("guest rebooted, starting its next boot", "id", e.rec.ID)
+	if err := s.startBoot(s.ctx, e); err != nil {
+		s.fail(e, fmt.Errorf("start the boot after the guest's reboot: %w", err))
 	}
 }
 

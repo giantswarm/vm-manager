@@ -156,6 +156,10 @@ type Paths struct {
 	// QEMULog is QEMU's own stdout/stderr (not the serial console); the
 	// swtpm log sits in TPMState.
 	QEMULog string `json:"qemuLog"`
+	// UEFIDB is the VM's copy of the certificate of the image it was
+	// created from, which every QEMU start writes into OVMFVars as db
+	// (qemu.Spec.UEFIDB); empty for an image without one.
+	UEFIDB string `json:"uefiDB,omitempty"`
 }
 
 // Processes are the host processes of the VM's current run, persisted so

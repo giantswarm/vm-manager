@@ -226,6 +226,9 @@ ok "vm-agent $("$tmp/initrd/usr/bin/vm-agent" version 2>/dev/null | awk '{print 
 cmdline_lsm="$(/usr/bin/grep -o 'lsm=[^ ]*' "$tmp/ukify.txt" | head -n1)"
 [[ ",${cmdline_lsm#lsm=}," == *,ipe,* ]] || fail "UKI cmdline does not start IPE (${cmdline_lsm:-no lsm=})"
 /usr/bin/grep -q 'systemd.verity_root_options=root-hash-signature=auto' "$tmp/ukify.txt" || fail "UKI cmdline does not open the root with its verity signature"
+for umh in bset inheritable; do
+        /usr/bin/grep -qF "sysctl.kernel.usermodehelper.$umh=\"4294967295 509\"" "$tmp/ukify.txt" || fail "UKI cmdline does not drop CAP_MAC_ADMIN from the usermode helpers' $umh"
+done
 cmp -s "$build/$name.crt" "$keys/verity.crt" || fail "$build/$name.crt is not $keys/verity.crt"
 ipe_p7b="$tmp/root/etc/ipe/giantswarm-vm.p7b"
 [[ -s "$ipe_p7b" ]] || fail "/etc/ipe/giantswarm-vm.p7b missing from the root"
@@ -240,7 +243,7 @@ extract /usr/lib/tmpfiles.d
 /usr/bin/grep -qx usr/lib/udev/rules.d/85-vm-manager-dissect-image.rules "$tmp/initrd.lst" || fail "initrd lacks the dissect rule for the installer disk"
 zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/vm-manager/persistent-etc 2>/dev/null) || true
 /usr/bin/grep -q '^for pinned in ipe systemd/system.conf systemd/system.conf.d; do' "$tmp/initrd/usr/lib/vm-manager/persistent-etc" || fail "persistent-etc does not pin /etc/ipe and the manager configuration"
-ok "ipe: $cmdline_lsm, policy giantswarm-vm $version signed by the published $name.crt, CAP_MAC_ADMIN dropped, exitrd and initrd ready"
+ok "ipe: $cmdline_lsm, policy giantswarm-vm $version signed by the published $name.crt, CAP_MAC_ADMIN dropped (manager and usermode helpers), exitrd and initrd ready"
 
 # 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
 #    --keyring file it opens (leaving import-pubring.pgp~ behind), which would
