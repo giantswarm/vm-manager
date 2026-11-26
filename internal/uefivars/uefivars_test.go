@@ -216,6 +216,45 @@ func TestEnrollDBUndoesTheGuest(t *testing.T) {
 	assert.Equal(t, SignatureList(img), db.Data)
 }
 
+// TestEnrollDBDuplicateRecords: a store with two live db records (the
+// image's first, another after it), or the image's in deleted transition, is
+// not taken as enrolled: every record goes and one plain db is written.
+func TestEnrollDBDuplicateRecords(t *testing.T) {
+	img, guest := testCert(t, "image"), testCert(t, "guest")
+	for name, prepare := range map[string]func(t *testing.T, s *Store){
+		"two live records": func(t *testing.T, s *Store) {
+			require.NoError(t, s.Set("db", ImageSecurityDatabase, AttrDB, SignatureList(img)))
+			first, _ := s.Get("db", ImageSecurityDatabase)
+			require.NoError(t, s.Set("db", ImageSecurityDatabase, AttrDB, SignatureList(guest)))
+			s.data[first.offset+2] = varAdded // the first record comes back to life
+		},
+		"in deleted transition": func(t *testing.T, s *Store) {
+			require.NoError(t, s.Set("db", ImageSecurityDatabase, AttrDB, SignatureList(img)))
+			db, _ := s.Get("db", ImageSecurityDatabase)
+			s.data[db.offset+2] = varAdded & varInDeletedTr
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := Parse(emptyStore(t))
+			require.NoError(t, err)
+			prepare(t, s)
+			vars := filepath.Join(t.TempDir(), "vars.fd")
+			require.NoError(t, os.WriteFile(vars, s.Bytes(), 0o600))
+			changes, err := EnrollDB(vars, img)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"db replaced"}, changes)
+			got, err := os.ReadFile(vars) // #nosec G304 -- the test's temp file
+			require.NoError(t, err)
+			s, err = Parse(got)
+			require.NoError(t, err)
+			dbs := s.records("db", ImageSecurityDatabase)
+			require.Len(t, dbs, 1, "one live db")
+			assert.Equal(t, byte(varAdded), dbs[0].state)
+			assert.Equal(t, SignatureList(img), dbs[0].Data)
+		})
+	}
+}
+
 // TestSetCompacts: a store whose free space deleted variables used up is
 // compacted the way the firmware reclaims it, live records unchanged.
 func TestSetCompacts(t *testing.T) {

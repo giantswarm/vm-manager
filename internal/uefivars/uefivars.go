@@ -241,17 +241,33 @@ func (s *Store) Get(name string, guid GUID) (Variable, bool) {
 	return Variable{}, false
 }
 
-// Delete marks the live variable name/guid deleted and reports whether
-// there was one.
+// Delete marks every live record of name/guid deleted (a store should hold
+// one, a damaged or crafted one may hold more) and reports whether there
+// was any.
 func (s *Store) Delete(name string, guid GUID) bool {
-	for i, v := range s.vars {
+	found := false
+	kept := s.vars[:0]
+	for _, v := range s.vars {
 		if v.Name == name && v.GUID == guid {
 			s.data[v.offset+2] &= varDeleted
-			s.vars = append(s.vars[:i], s.vars[i+1:]...)
-			return true
+			found = true
+			continue
+		}
+		kept = append(kept, v)
+	}
+	s.vars = kept
+	return found
+}
+
+// records are the live records of name/guid, in store order.
+func (s *Store) records(name string, guid GUID) []Variable {
+	var out []Variable
+	for _, v := range s.vars {
+		if v.Name == name && v.GUID == guid {
+			out = append(out, v)
 		}
 	}
-	return false
+	return out
 }
 
 // Set writes the variable, marking a live one of the same name and GUID
@@ -376,11 +392,14 @@ func EnrollDB(path string, certs ...*x509.Certificate) ([]string, error) {
 			changes = append(changes, r.name+" removed")
 		}
 	}
+	// Exactly one plain record with the image's content counts as in place:
+	// with two live records, or one in deleted transition, which one the
+	// firmware reads is not this parser's to decide, so db is rewritten.
 	want := SignatureList(certs...)
-	switch db, ok := s.Get("db", ImageSecurityDatabase); {
-	case !ok:
+	switch dbs := s.records("db", ImageSecurityDatabase); {
+	case len(dbs) == 0:
 		changes = append(changes, "db written")
-	case db.Attributes != AttrDB || !bytes.Equal(db.Data, want):
+	case len(dbs) > 1 || dbs[0].state != varAdded || dbs[0].Attributes != AttrDB || !bytes.Equal(dbs[0].Data, want):
 		changes = append(changes, "db replaced")
 	}
 	if len(changes) == 0 {
