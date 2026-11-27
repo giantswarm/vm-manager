@@ -89,7 +89,7 @@ const OSSeparator = "os-separator"
 //	  },
 //	  "sysexts": {
 //	    "kubernetes": { "1.36.4": "<sha256 of kubernetes_1.36.4.raw>" },
-//	    "cni": { "flannel-1.9.1-flannel3": "<sha256 of cni_flannel-1.9.1-flannel3.raw>" }
+//	    "cni": { "cilium-1.20.5": "<sha256 of cni_cilium-1.20.5.raw>" }
 //	  },
 //	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } },
 //	  "golden_firmware": { "sha256": "<hex>", "package": "ovmf-generic", "version": "2025.11-3ubuntu7.2" }
@@ -245,7 +245,7 @@ func (p Policy) golden(index int) (string, bool) {
 // computed from the Sysexts entries of the VM's Kubernetes and CNI
 // versions, or the PCR13 entry of a VM without CNI, otherwise the golden
 // value. sysexts names the versions the value belongs to ("kubernetes
-// 1.36.4, cni flannel-1.9.1-flannel3"), empty for a golden value.
+// 1.36.4, cni cilium-1.20.5"), empty for a golden value.
 func (p Policy) expected(index int) (want, sysexts string, ok bool) {
 	if index == PCRSysext && p.KubernetesVersion != "" {
 		measured := p.measured()

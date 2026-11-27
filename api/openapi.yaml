@@ -520,7 +520,7 @@ components:
           type: array
           items:
             type: string
-          description: CNI sysext versions available ("<cni>-<release>", e.g. "flannel-1.9.1-flannel3"), highest first.
+          description: CNI sysext versions available ("<cni>-<release>", e.g. "cilium-1.20.5"), highest first.
         policy:
           type: object
           description: The image's PCR policy as written by the image build; absent when none.
@@ -592,7 +592,7 @@ components:
           description: Served as /kubernetes-version; default: the newest the image offers.
         cni_version:
           type: string
-          description: 'CNI sysext ("<cni>-<release>") served as /cni-version; its plugins are the only ones containerd runs besides the reference plugins of the Kubernetes sysext. Default: the newest flannel release the image offers; only with a Kubernetes version.'
+          description: 'CNI sysext ("<cni>-<release>") served as /cni-version; its plugins are the only ones containerd runs besides the reference plugins of the Kubernetes sysext. Default: the newest cilium release the image offers; only with a Kubernetes version.'
         cpus:
           type: integer
           default: 2

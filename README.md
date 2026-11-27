@@ -207,7 +207,7 @@ under the `/etc` and `/usr` overlays. The Kubernetes sysext
 containerd, runc, crictl and the CNI plugins, signed with the verity certificate the base
 trusts, its units started through `Upholds=` on `multi-user.target` because a layer merged
 during boot cannot be enabled by presets. A CNI's plugins come from a CNI sysext
-(`cni_<cni>-<release>.raw`, chosen per VM with `cni_version`, default the newest flannel
+(`cni_<cni>-<release>.raw`, chosen per VM with `cni_version`, default the newest Cilium
 release): containerd's `bin_dirs` is `/usr/lib/cni` alone, and the copy a CNI DaemonSet
 still makes into `/opt/cni/bin` is ignored.
 

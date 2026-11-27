@@ -1,0 +1,22 @@
+# Cilium's CNI plugin, from the Cilium agent image Giant Swarm runs (the
+# gsoci mirror giantswarm/cilium-app deploys): the binary its
+# install-cni-binaries init container copies into /opt/cni/bin, which IPE
+# refuses to execute. The cni sysext cni_cilium-<release without v>.raw
+# ships it as /usr/lib/cni/cilium-cni, and cni.extra/cilium adds what the
+# chart's host-binary init containers would set up (images/README.md, CNI).
+#
+# An entry is a POSIX shell fragment that scripts/fetch-cni-plugins and the
+# Makefile source; its file name is the CNI's name in the sysext version
+# (<name>-<release without v>). It sets:
+#   release  the image tag, the CNI's release
+#   image    the image repository
+#   digest   the digest of image:release (the multi-arch index); the plugins
+#            come from its linux/amd64 image
+#   plugins  the files of the image to install into /usr/lib/cni, each as
+#            <path in the image>[:<name>]
+# Renovate bumps release and digest together (renovate-custom.json5).
+# renovate: datasource=docker
+release=v1.20.5
+image=gsoci.azurecr.io/giantswarm/cilium
+digest=sha256:aa72499f075ad729947ea91b026218aceba24f1a8e4534bf36b8368c7c561526
+plugins=opt/cni/bin/cilium-cni

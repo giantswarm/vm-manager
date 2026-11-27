@@ -4,14 +4,15 @@
 # mtools for the ESP, cpio for the initrd, Go and base-devel for vm-agent and
 # Ignition (cgo), gnupg and openssl for the dev keys, python-pefile for ukify
 # and scripts/verify, file for the static check of `make agent`, zstd for
-# mkosi's initrd compression, git for the CI checkouts. Run as root in an
+# mkosi's initrd compression, git for the CI checkouts, crane for the CNI
+# plugins scripts/fetch-cni-plugins exports from the CNI's image. Run as root in an
 # archlinux container (.github/workflows/image.yml, hack/guest-image-build.sh).
 set -euo pipefail
 
 pacman-key --init
 pacman -Syu --noconfirm --needed \
   base-devel git go mkosi systemd systemd-ukify erofs-utils dosfstools mtools cpio \
-  zstd openssl gnupg python-pefile python-cryptography util-linux file
+  zstd openssl gnupg python-pefile python-cryptography util-linux file crane
 mkosi --version
 systemctl --version | head -1
 go version

@@ -233,7 +233,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		mcp.WithString(argName, mcp.Required(), mcp.Description(fmt.Sprintf("VM name, a DNS label of at most %d characters; also the default hostname", vm.MaxNameLen))),
 		mcp.WithString(argImage, mcp.Description(`Image reference ("<id>_<version>" or bare id); default: the catalog's newest image`)),
 		mcp.WithString(argKubernetesVersion, mcp.Description("Kubernetes sysext version served as /kubernetes-version; default: the newest the image offers. See get_image")),
-		mcp.WithString(argCNIVersion, mcp.Description(`CNI sysext "<cni>-<release>" served as /cni-version, the only CNI plugins besides the reference ones; default: the newest flannel. See get_image`)),
+		mcp.WithString(argCNIVersion, mcp.Description(`CNI sysext "<cni>-<release>" served as /cni-version, the only CNI plugins besides the reference ones: "cilium-<release>" ("cilium-1.20.5"); default: the newest cilium-* the image offers. See get_image`)),
 		mcp.WithNumber(argCPUs, mcp.Description(fmt.Sprintf("Virtual CPUs, default %d", DefaultCPUs))),
 		mcp.WithNumber(argMemoryMiB, mcp.Description(fmt.Sprintf("Memory in MiB, default %d, at least %d", DefaultMemoryMiB, vm.MinMemoryMiB))),
 		mcp.WithNumber(argDiskGiB, mcp.Description(fmt.Sprintf("Disk size in GiB, default %d", DefaultDiskGiB))),
