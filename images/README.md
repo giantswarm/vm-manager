@@ -506,7 +506,8 @@ Image layers run only from signed dm-verity devices (`containerd.toml`):
   `enable_dmverity_referrers`. A pull then fetches the image's
   `application/vnd.containerd.erofs.dmverity.v1` referrer with the pull's own resolver
   and credentials: per layer the EROFS tar index, the dm-verity hash tree and the PKCS#7
-  signature of its root hash, made by the publisher. The node runs no `mkfs.erofs`: the
+  signature of its root hash, made by the publisher with `vm-manager layers sign`
+  ([docs/layer-signing.md](../docs/layer-signing.md)). The node runs no `mkfs.erofs`: the
   layer's device is the published index followed by the layer's uncompressed tar, checked
   once against the published tree and the signed root hash.
 - A pull fails for an image without signed layers, naming the layer:
