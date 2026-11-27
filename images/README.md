@@ -682,8 +682,9 @@ records in the journal (`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rul
 `e2e/ipe_test.go` proves all of it, including a core_pattern helper refused when it tries to
 switch enforcement off and a reboot after root hid the policy and planted a drop-in that
 restores the capability; `e2e/kubernetes_sysext_test.go` that a file of the Kubernetes sysext
-executes but is refused as a kernel module and kexec image (`ipe_op=KMODULE`, `KEXEC_IMAGE`)
-while the base root's modules load, and that firmware a second signed sysext brings
+executes but is refused as a kernel module (`ipe_op=KMODULE`) and as a kexec image (`EPERM`
+from `kexec_load_disabled` before IPE, see [Layer certificates](#layer-certificates); IPE's
+`KEXEC_IMAGE` on an image without it) while the base root's modules load, and that firmware a second signed sysext brings
 (`build/e2e/ipe-e2e.raw`, merged next to it) is refused when cfg80211 requests it
 (`ipe_op=FIRMWARE`); `e2e/persistent_etc_test.go` a reboot from inside the guest coming
 back as a new QEMU process.
@@ -716,6 +717,73 @@ hands systemd-vmspawn (`vm-manager image enroll <vars> --cert <crt>`, what vm-ma
 and asserts the policy active and enforcing; the e2e harness enrolls it the same way. Without
 the certificate the image does not boot (see Fail closed above).
 
+## Layer certificates
+
+dm-verity verifies a device's root hash signature against the kernel's builtin and secondary
+keyrings, then the platform keyring (the UEFI db, where vm-manager enrolls the image's
+`build/<id>_<v>.crt`), and last against the `.dm-verity` keyring, which it consults only
+once that keyring is non-empty and sealed. The base root, the sysexts and any layer signed
+with the image's own verity key therefore verify through the platform keyring; the
+`.dm-verity` keyring is where the keys that sign container layers go.
+
+The UKI's command line (`mkosi.conf`) carries:
+
+| Flag | Effect |
+|---|---|
+| `dm_verity.require_signatures=1` | Every dm-verity device needs a root hash signature the kernel verifies; an unsigned one does not open |
+| `dm_verity.keyring_unsealed=1` | The `.dm-verity` keyring starts writable, for the initrd to fill and seal |
+| `module.sig_enforce=1` | Only modules signed by the kernel's build key load (Arch signs its modules) |
+| `sysctl.kernel.kexec_load_disabled=1` | Set by the kernel before init starts and never undone: `kexec_load` and `kexec_file_load` fail with `EPERM`, before IPE sees the file |
+
+`vm-layer-keyring.service` in the initrd (required by `initrd.target`, before
+`ignition-fetch.service`, so before user-data reaches the initrd and before the switch root)
+runs `/usr/lib/vm-manager/layer-keyring` with `keyctl` (keyutils), `openssl`,
+`systemd-imds` and `systemd-pcrextend`:
+
+1. It enrolls the Giant Swarm layer certificate the initrd carries
+   (`/usr/lib/vm-manager/layer-certificates/giantswarm.crt`). It is part of the UKI, so PCR 11
+   covers it, and it is not measured into PCR 15.
+2. On a vm-manager boot (the conditions of `vm-agent-attest.service`: SMBIOS vendor
+   GiantSwarm, no `systemd.imds=no`, not the installer boot) it reads the installation's
+   certificates from the IMDS (`/layer-certificates`, the `layer_certificates` of `create_vm`
+   in their order; none when unset) and, for each in order, converts it to DER, adds it to
+   `.dm-verity` and extends PCR 15 with `layer-certificate:<lowercase hex sha256 of the DER>`.
+   The ready attestation replays those records, and the verifier rejects a node whose
+   measured certificates differ from the ones served, naming what is missing or not served
+   ([Attestation](#attestation)).
+3. It seals the keyring (`keyctl restrict_keyring %:.dm-verity`: every further key is
+   refused), also when it holds nothing. From the running root, `keyctl padd asymmetric ""
+   %:.dm-verity` fails with `Operation not permitted`.
+
+A malformed certificate, an IMDS error other than an unset key, a key the kernel refuses, a
+failed measurement or a failed seal stop the boot (`OnFailure=emergency.target`, as
+`vm-ipe-policy.service`): no node runs with an unsealed keyring or without its installation's
+certificates.
+
+Where the certificates come from:
+
+- **Giant Swarm:** the build input `LAYER_CERT` of the Makefile (PEM), `keys/layer.crt` by
+  default, which `scripts/gen-keys` creates per build as a test certificate
+  (`vm-manager dev layer signing key`, its key `keys/layer.key` signs test layers). The
+  release build (`hack/guest-image-build.sh`) passes `LAYER_CERT=` and enrolls none until the
+  release pipeline hands it the real certificate
+  ([giantswarm/architect-orb#1084](https://github.com/giantswarm/architect-orb/issues/1084)).
+- **Installation:** `create_vm`'s `layer_certificates`, served by the IMDS and measured as
+  above.
+
+Rotation overlaps the lists: a new signing certificate joins the installation's
+`layer_certificates` (or the next image's `LAYER_CERT`) while the old one stays, layers are
+re-signed with the new key, and the old certificate leaves the list once no node pulls a
+layer signed with it. The keyring is filled once per boot, so a node picks up a changed list
+when it is recreated or rebooted.
+
+`make verify` checks the flags in the UKI, the unit, its tools and the certificate in the
+initrd. `e2e/ipe_test.go` boots without an IMDS and finds the Giant Swarm certificate alone in
+the sealed keyring; `e2e/attestation_test.go` creates a VM with two `layer_certificates` and
+finds all three in the keyring, the root's `keyctl padd` refused, both digests in the ready
+verdict, and the verifier rejecting the node, naming the digest, after the root extends PCR 15
+with one more.
+
 ## Keys
 
 `make keys` (`scripts/gen-keys`) writes into the git-ignored `images/keys/`:
@@ -724,6 +792,7 @@ the certificate the image does not boot (see Fail closed above).
 |---|---|
 | `verity.key`, `verity.crt` | `VerityKey=`/`VerityCertificate=`: signature partition of the verity root hash, of the sysexts' too; signs the IPE policy (`scripts/sign-ipe-policy`). The certificate is published as `build/<id>_<v>.crt` for vm-manager's db enrollment |
 | `pcr.key`, `pcr.crt` | `SignExpectedPcrKey=`/`SignExpectedPcrCertificate=`: `.pcrsig`/`.pcrpkey` in the UKI |
+| `layer.key`, `layer.crt` | Test Giant Swarm layer certificate: `LAYER_CERT`'s default, enrolled into the `.dm-verity` keyring by the initrd ([Layer certificates](#layer-certificates)); the key signs test container layers |
 | `gnupg/`, `import-pubring.pgp` | PGP key that signs `SHA256SUMS`; the public keyring is installed as `/etc/systemd/import-pubring.pgp` (systemd-pull executes `gpg` against it, which is why `gnupg` is in the image) |
 
 Keys are never committed. CI generates them per build; vm-manager only ever serves

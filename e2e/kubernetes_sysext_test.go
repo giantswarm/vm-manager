@@ -139,7 +139,8 @@ func TestKubernetesSysext(t *testing.T) {
 // Kubernetes sysext executes, but the kernel refuses it as a kernel module and
 // as a kexec image, and the firmware a second signed sysext of the test brings
 // (e2eSysextFile) as firmware (IPE_ACCESS records with ipe_op=KMODULE,
-// KEXEC_IMAGE, FIRMWARE and action=DENY), while the base root's own modules
+// FIRMWARE and action=DENY; kexec_load_disabled refuses the kexec image before
+// IPE does), while the base root's own modules
 // still load. IPE judges the file before the module loader, the firmware
 // loader or kexec look at its content, so a sysext binary stands in for a .ko
 // and a kernel, and a placeholder for the firmware: the same call with a file
@@ -185,14 +186,24 @@ func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest, image
 	// kexec: systemctl kexec loads the default boot entry's kernel with
 	// kexec_file_load(); a one-shot type 1 entry whose kernel is the sysext's
 	// file. The refused load leaves systemctl without a kernel to boot, so it
-	// does not reboot.
+	// does not reboot. With kernel.kexec_load_disabled=1 (the UKI's command
+	// line) the kernel refuses the call with EPERM before IPE sees the file;
+	// an image without it gets IPE's denial. Either refusal will do.
 	out := g.sh(ctx, `esp=$(bootctl --print-esp-path) && mkdir -p "$esp/loader/entries" && `+
 		`printf 'title ipe-e2e
 linux /ipe-e2e-kernel
 ' > "$esp/loader/entries/ipe-e2e.conf" && touch "$esp/ipe-e2e-kernel" && `+
 		`mount --bind `+sysextFile+` "$esp/ipe-e2e-kernel" && bootctl set-oneshot ipe-e2e.conf; `+
 		`{ systemctl kexec 2>&1 || true; }; bootctl set-oneshot ''; umount "$esp/ipe-e2e-kernel"; rm -f "$esp/ipe-e2e-kernel" "$esp/loader/entries/ipe-e2e.conf"`)
-	assert.Contains(t, denials("KEXEC_IMAGE"), "ipe-e2e-kernel", "IPE refused the sysext file (bind-mounted on the ESP) as a kexec image\nsystemctl kexec: %s", out)
+	switch {
+	case strings.Contains(denials("KEXEC_IMAGE"), "ipe-e2e-kernel"):
+		t.Logf("kexec of the sysext file: refused by IPE (KEXEC_IMAGE)")
+	case g.sh(ctx, "cat /proc/sys/kernel/kexec_load_disabled") == "1" && strings.Contains(out, "Operation not permitted"):
+		t.Logf("kexec of the sysext file: refused by the kernel with EPERM (kexec_load_disabled=1), before IPE: %s", out)
+	default:
+		t.Errorf("kexec of the sysext file (bind-mounted on the ESP) was refused neither by IPE nor by kexec_load_disabled\nsystemctl kexec: %s", out)
+	}
+	assert.Equal(t, "0", g.sh(ctx, "cat /sys/kernel/kexec_loaded"), "no kexec kernel loaded")
 	t.Logf("IPE denials of the sysexts:\n%s\n%s\n%s", denials("KMODULE"), denials("FIRMWARE"), denials("KEXEC_IMAGE"))
 }
 

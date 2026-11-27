@@ -89,10 +89,20 @@ export SOURCE_DATE_EPOCH
 # are signed with, published next to the UKI for vm-manager to enroll into
 # each VM's UEFI db (internal/uefivars).
 CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
+# The Giant Swarm layer certificate (PEM) the initrd enrolls into the kernel's
+# .dm-verity keyring next to the installation's certificates from the IMDS
+# (vm-layer-keyring.service). The default is the per-build test certificate of
+# scripts/gen-keys; LAYER_CERT= (empty) builds an image that enrolls none, as
+# the release build does until it is handed the real one. See README.md,
+# Layer certificates.
+LAYER_CERT ?= $(KEYS)/layer.crt
+LAYER_TREE := $(BUILD)/layer/tree
+LAYER_DST  := $(LAYER_TREE)/usr/lib/vm-manager/layer-certificates/giantswarm.crt
+export LAYER_CERT
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
+.PHONY: all keys ignition agent layer-certificate images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
 
 # `images` builds the default Kubernetes version and CNI release; the other
 # listed releases follow, one `make kubernetes` or `make cni` each.
@@ -112,6 +122,13 @@ $(IGNITION_STAMP): $(SCRIPTS)/build-ignition
 	$(SCRIPTS)/build-ignition $(IGNITION_DIR) $(IGNITION_VERSION)
 	rm -f $(IGNITION_DIR)/stamp-*
 	touch $@
+
+# Restaged on every image build: the tree ExtraTrees= of
+# mkosi.initrd.conf/mkosi.conf copies in, empty when LAYER_CERT is.
+layer-certificate: keys
+	rm -rf $(LAYER_TREE)
+	mkdir -p $(LAYER_TREE)
+	$(if $(LAYER_CERT),openssl x509 -in $(LAYER_CERT) -noout && install -Dm0644 $(LAYER_CERT) $(LAYER_DST))
 
 # go build is incremental, so the agent is rebuilt on every image build; a
 # changed binary changes the base tree and the initrd (and with them PCR 11).
@@ -159,7 +176,7 @@ cni-plugins:
 # and the disk image with the IPE policy for the first one's root, then it
 # lays out the sysupdate directories (renamed artifacts, SHA256SUMS,
 # SHA256SUMS.gpg) and the e2e tests' sysext.
-images: keys ignition agent kubernetes-packages cni-plugins
+images: keys layer-certificate ignition agent kubernetes-packages cni-plugins
 	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
@@ -168,7 +185,7 @@ images: keys ignition agent kubernetes-packages cni-plugins
 	install -m0644 $(KEYS)/verity.crt $(CERT)
 
 # Base tree and disk image only (two mkosi runs, mkosi-ipe).
-base: keys ignition agent
+base: keys layer-certificate ignition agent
 	$(call mkosi-ipe,)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	install -m0644 $(KEYS)/verity.crt $(CERT)

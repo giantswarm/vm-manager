@@ -31,7 +31,9 @@ const (
 // the kernel trusts the certificate (platform keyring), opened the root's
 // verity device with its signature, and PID 1 loaded and activated the
 // signed policy the initrd handed it in /run/ipe, in enforce mode, with every
-// operation but EXECUTE pinned to this image's root hash; a copy of an image binary outside the
+// operation but EXECUTE pinned to this image's root hash; the initrd sealed the
+// .dm-verity keyring with the image's layer certificate, kexec is off and
+// modules must be signed (assertLayerKeyring); a copy of an image binary outside the
 // verity root does not execute, from the var partition, the /etc overlay,
 // /run or /tmp alike; nobody holds CAP_MAC_ADMIN, so root can neither switch
 // enforcement off nor load a policy. Then it plants what would undo IPE on
@@ -72,6 +74,9 @@ func TestIPE(t *testing.T) {
 	t.Logf("platform keyring:\n%s", sh("keyctl show %:.platform"))
 	assert.Contains(t, sh("keyctl show %:.platform"), "asymmetric", "the image certificate on the platform keyring")
 	assert.Contains(t, sh("dmsetup table root"), "root_hash_sig_key_desc", "the root's verity device carries its signature, verified by the kernel")
+	// No IMDS (systemd.imds=no): the initrd enrolled the image's Giant Swarm
+	// layer certificate alone and sealed the keyring.
+	assertLayerKeyring(t, sh, gsLayerCertificateCN)
 
 	// Nothing outside the signed dm-verity root runs, from any writable file
 	// system the guest has.

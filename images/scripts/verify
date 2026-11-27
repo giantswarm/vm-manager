@@ -265,6 +265,41 @@ zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/v
 /usr/bin/grep -q '^for pinned in ipe systemd/system.conf systemd/system.conf.d; do' "$tmp/initrd/usr/lib/vm-manager/persistent-etc" || fail "persistent-etc does not pin /etc/ipe and the manager configuration"
 ok "ipe: $cmdline_lsm, policy giantswarm-vm $version in the initrd for root $roothash, signed by the published $name.crt, CAP_MAC_ADMIN dropped (manager and usermode helpers), exitrd and initrd ready"
 
+# 6e. Layer keyring (README.md, Layer certificates): the UKI cmdline requires
+# signed dm-verity devices, leaves the .dm-verity keyring unsealed for the
+# initrd, enforces module signatures and disables kexec; the initrd carries
+# the unit that enrolls the Giant Swarm certificate of LAYER_CERT (the
+# Makefile's; none when empty) and the IMDS's, measures the latter into PCR
+# 15 and seals the keyring, required by initrd.target, failing closed, before
+# Ignition fetches user-data, with every tool it runs.
+for flag in dm_verity.require_signatures=1 dm_verity.keyring_unsealed=1 module.sig_enforce=1 sysctl.kernel.kexec_load_disabled=1; do
+        /usr/bin/grep -qw -- "$flag" "$tmp/ukify.txt" || fail "UKI cmdline lacks $flag"
+done
+for f in usr/lib/vm-manager/layer-keyring usr/lib/systemd/system/vm-layer-keyring.service \
+         usr/lib/systemd/system/initrd.target.requires/vm-layer-keyring.service \
+         usr/bin/keyctl usr/bin/openssl usr/bin/sha256sum usr/bin/modprobe usr/bin/systemd-analyze \
+         usr/lib/systemd/systemd-imds usr/lib/systemd/systemd-pcrextend; do
+        /usr/bin/grep -qx "$f" "$tmp/initrd.lst" || fail "initrd lacks $f"
+done
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/vm-manager/layer-keyring \
+        usr/lib/systemd/system/vm-layer-keyring.service 'usr/lib/vm-manager/layer-certificates/*' 2>/dev/null) || true
+unit="$tmp/initrd/usr/lib/systemd/system/vm-layer-keyring.service"
+/usr/bin/grep -qx 'ExecStart=/usr/lib/vm-manager/layer-keyring' "$unit" || fail "vm-layer-keyring.service does not run layer-keyring"
+/usr/bin/grep -qx 'OnFailure=emergency.target' "$unit" || fail "vm-layer-keyring.service does not fail closed"
+/usr/bin/grep -q '^Before=.*ignition-fetch.service' "$unit" || fail "vm-layer-keyring.service does not seal before ignition-fetch.service"
+/usr/bin/grep -qx 'keyctl restrict_keyring "$keyring" || fail "cannot seal the .dm-verity keyring"' "$tmp/initrd/usr/lib/vm-manager/layer-keyring" \
+        || fail "layer-keyring does not seal the keyring"
+layer_cert="${LAYER_CERT-$keys/layer.crt}"
+layer_dst="$tmp/initrd/usr/lib/vm-manager/layer-certificates/giantswarm.crt"
+if [[ -n "$layer_cert" ]]; then
+        cmp -s "$layer_dst" "$layer_cert" || fail "the initrd's Giant Swarm layer certificate is not $layer_cert"
+        layer_note="Giant Swarm layer certificate $(openssl x509 -in "$layer_dst" -noout -subject -nameopt sep_multiline | sed -n 's/^ *CN=//p')"
+else
+        [[ ! -e "$layer_dst" ]] || fail "LAYER_CERT is empty, the initrd carries a Giant Swarm layer certificate"
+        layer_note="no Giant Swarm layer certificate (LAYER_CERT empty)"
+fi
+ok "layer keyring: cmdline requires dm-verity signatures, unsealed keyring for the initrd, module signatures, kexec off; vm-layer-keyring in the initrd with $layer_note"
+
 # 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
 #    --keyring file it opens (leaving import-pubring.pgp~ behind), which would
 #    make the next build bake a pubring that differs from the one in this
