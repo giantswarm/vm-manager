@@ -17,8 +17,10 @@ version = 4
       SystemdCgroup = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  # First match wins: plugins a CNI DaemonSet installs into /opt/cni/bin
-  # (writable per boot, systemd.volatile=overlay) take precedence over the
-  # reference plugins shipped in this extension.
-  bin_dirs = ['/opt/cni/bin', '/usr/lib/cni']
+  # Only directories inside sysexts: /usr/lib/cni holds the reference plugins
+  # of this extension and the plugins of the VM's CNI sysext (cni_<cni>-
+  # <release>.raw, /cni-version), merged into one directory by systemd-sysext.
+  # /opt/cni/bin is not searched: IPE executes nothing from /opt, and a plugin
+  # a CNI DaemonSet still copies there is ignored.
+  bin_dirs = ['/usr/lib/cni']
   conf_dir = '/etc/cni/net.d'

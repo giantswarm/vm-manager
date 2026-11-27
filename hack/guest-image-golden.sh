@@ -13,8 +13,12 @@
 #
 # What a boot measures into those PCRs are files: the firmware code and
 # variable store (PCRs 0 and 7), the virtio-net option ROM (PCR 2, QEMU's
-# efi-virtio.rom), the boot loader, UKI and sysext of the guest image (PCRs 4
-# and 13), separators (3, 6). The VMs boot on <vm-manager-image> itself, as a
+# efi-virtio.rom), the boot loader and UKI of the guest image (PCR 4), the
+# Kubernetes and CNI sysexts create_vm picks by default (PCR 13), separators
+# (3, 6). PCR 13 is not learned when policy.json carries sysexts entries for
+# that pair: the verifier computes it from them (one sha256 per sysext, so
+# every Kubernetes x CNI pair verifies), and golden 13 is only the fallback of
+# a VM whose versions lack an entry. The VMs boot on <vm-manager-image> itself, as a
 # pod of it does: its vm-manager serves them with the process launcher, its
 # QEMU, swtpm and OVMF_CODE_4M.fd / OVMF_VARS_4M.fd. vm-manager keeps QEMU off
 # the io_uring main loop that lost firmware TPM commands

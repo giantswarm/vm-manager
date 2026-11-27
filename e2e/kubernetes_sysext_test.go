@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,8 @@ const (
 	e2eFirmware    = "regulatory.db"
 )
 
-// pulledLine is what /usr/lib/vm-manager/kubernetes logs after the download.
+// pulledLine is what /usr/lib/vm-manager/kubernetes logs after the download;
+// the Kubernetes sysext is pulled first.
 var pulledLine = regexp.MustCompile(`pulled (kubernetes_\S+\.raw) \((\d+) bytes\) in ([0-9.]+) s`)
 
 // A VM created with the newest kubernetes_version of the image pulls that
@@ -74,7 +76,6 @@ func TestKubernetesSysext(t *testing.T) {
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
 
-	sums := readSHA256SUMS(t, filepath.Join(image.Dir, "sysupdate", "kubernetes", "SHA256SUMS"))
 	policy := readPolicy(t, filepath.Join(image.Dir, "policy.json"))
 
 	srv := startServer(ctx, t, dir, image.Dir, flagLearnGolden)
@@ -83,16 +84,13 @@ func TestKubernetesSysext(t *testing.T) {
 	var img images.Image
 	m.call(ctx, api.ToolGetImage, map[string]any{"ref": imageID}, &img)
 	require.NotEmpty(t, img.KubernetesVersions, "get_image lists no Kubernetes versions; run `make -C images kubernetes verify-kubernetes`")
+	require.NotEmpty(t, img.CNIVersions, "get_image lists no CNI versions; run `make -C images cni verify-cni`")
 	version := img.KubernetesVersions[0]
-	file := "kubernetes_" + version + ".raw"
-	require.Contains(t, sums, file, "SHA256SUMS of the kubernetes component")
-
-	// The host side of the PCR 13 rule: verify-kubernetes (Python) and
-	// attest.SysextPCR (Go) agree on the artifact.
-	line := attest.SysextMeasurement(sums[file], file)
-	wantPCR13 := attest.SysextPCR(line)
-	require.Equal(t, wantPCR13, policy.PCR13[version], "policy.json pcr13[%s] disagrees with attest.SysextPCR(%q); run `make -C images verify-kubernetes`", version, line)
-	t.Logf("kubernetes %s: measurement %q, expected pcr 13 %s", version, line, wantPCR13)
+	// The host side of the PCR 13 rule: the sha256 verify-sysext records per
+	// sysext is the published file's, and attest.SysextPCR computes the value
+	// of the pair from them.
+	sx := publishedSysexts(t, image.Dir, policy, version, img.DefaultCNIVersion())
+	t.Logf("kubernetes %s, cni %s: measurements %q, expected pcr 13 %s", version, sx.cni.version, sx.lines(), sx.pcr13())
 
 	m.call(ctx, api.ToolCreateNetwork, map[string]any{"name": kubernetesNetwork, "cidr": kubernetesCIDR}, nil)
 	started := time.Now()
@@ -109,18 +107,24 @@ func TestKubernetesSysext(t *testing.T) {
 	t.Logf("create_vm returned after %.1fs: id %s state %s ip %s", time.Since(started).Seconds(), v.ID, v.State, v.IP)
 	require.Equal(t, vm.StateReady, v.State, "create_vm with wait_for ready: lastError %q\n%s", v.LastError, srv.logTail())
 	assert.Equal(t, version, v.KubernetesVersion, "the record pins the version served as /kubernetes-version")
+	assert.Equal(t, sx.cni.version, v.CNIVersion, "create_vm's default CNI, served as /cni-version")
 	require.NotNil(t, v.BootedAt)
 	require.NotNil(t, v.ReadyAt)
 	t.Logf("boot_to_ready_seconds=%.1f", v.ReadyAt.Sub(*v.BootedAt).Seconds())
 
 	g := &guest{m: m, id: v.ID}
 	g.waitSSH(ctx)
-	assertKubernetesPulled(ctx, t, g, version, file, line)
+	assertKubernetesPulled(ctx, t, g, sx)
 	assertKubernetesRunning(ctx, t, g, version)
-	assertPCR13(ctx, t, g, wantPCR13)
+	assertCNIPlugins(ctx, t, g, sx, image.Certificate != "")
+	assertPCR13(ctx, t, g, sx)
 	if image.Certificate != "" {
+		// Before the stray extension: it merges and drops the test's own
+		// sysext, which neither that check nor vm-kubernetes may see.
 		assertSysextOnlyExecutes(ctx, t, g, image.Dir)
 	}
+	// Last: every run of the unit extends PCR 13 again.
+	assertStrayExtensionRefused(ctx, t, g, sx)
 
 	var deleted api.DeletedResponse
 	m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)
@@ -168,11 +172,15 @@ func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest, image
 	require.NoError(t, err, "the e2e sysext; run `make -C images e2e-sysext`")
 	g.put(ctx, e2eSysextGuest, raw)
 	g.sh(ctx, "systemd-sysext refresh")
-	require.Contains(t, g.sh(ctx, "systemd-sysext status --no-legend --no-pager"), "ipe-e2e", "the e2e sysext merged next to the Kubernetes sysext")
+	require.Contains(t, g.sh(ctx, "systemd-sysext status --no-legend --no-pager"), "ipe-e2e", "the e2e sysext merged next to the Kubernetes and CNI sysexts")
 	t.Logf("cfg80211 before the reload: %s", g.sh(ctx, "{ grep '^cfg80211 ' /proc/modules || echo 'not loaded'; } && "+
 		"{ ! grep -q '^cfg80211 ' /proc/modules || modprobe -r cfg80211; } && modprobe cfg80211"))
 	assert.Eventually(t, func() bool { return strings.Contains(denials("FIRMWARE"), e2eFirmware) }, 30*time.Second, time.Second,
 		"IPE refused the e2e sysext's firmware\n%s", g.sh(ctx, "journalctl -b -k -o short-monotonic --no-pager | grep -iE 'regulatory|firmware|cfg80211|ipe|VFS' | tail -n 20 || true"))
+	// Unmerge the test's sysext again: the merged set is the Kubernetes and
+	// the CNI sysext alone for what follows (vm-kubernetes checks it).
+	g.sh(ctx, "rm -f "+e2eSysextGuest+" && systemd-sysext refresh")
+	require.NotContains(t, g.sh(ctx, "systemd-sysext status --no-legend --no-pager"), "ipe-e2e", "the e2e sysext unmerged")
 
 	// kexec: systemctl kexec loads the default boot entry's kernel with
 	// kexec_file_load(); a one-shot type 1 entry whose kernel is the sysext's
@@ -203,10 +211,48 @@ func (g *guest) put(ctx context.Context, path string, data []byte) {
 	g.sh(ctx, "mkdir -p "+filepath.Dir(path)+" && printf %s "+enc+" | base64 -d | zstd -dcq > "+path)
 }
 
+// sysext is one published sysext file and the SHA256SUMS line
+// vm-kubernetes.service measures into PCR 13 for it.
+type sysext struct{ component, version, file, line string }
+
+// sysexts is what a VM merges: its Kubernetes sysext and its CNI sysext, in
+// the order of their PCR 13 events.
+type sysexts struct{ kubernetes, cni sysext }
+
+func (s sysexts) all() []sysext { return []sysext{s.kubernetes, s.cni} }
+
+func (s sysexts) lines() []string {
+	var out []string
+	for _, x := range s.all() {
+		out = append(out, x.line)
+	}
+	return out
+}
+
+// pcr13 is the value the verifier computes for the pair (attest.SysextPCR).
+func (s sysexts) pcr13() string { return attest.SysextPCR(s.lines()...) }
+
+// publishedSysexts reads the published files of a Kubernetes version and a
+// CNI release from their SHA256SUMS and checks that policy.json records
+// their sha256 (sysexts.<component>), what the verifier computes PCR 13
+// from.
+func publishedSysexts(t *testing.T, imageDir string, policy attest.Policy, kubernetes, cni string) sysexts {
+	t.Helper()
+	get := func(component, version string) sysext {
+		sums := readSHA256SUMS(t, filepath.Join(imageDir, "sysupdate", component, "SHA256SUMS"))
+		file := component + "_" + version + ".raw"
+		require.Contains(t, sums, file, "SHA256SUMS of the %s component", component)
+		require.Equal(t, sums[file], policy.Sysexts[component][version], "policy.json sysexts.%s[%s] is not the published sha256; run `make -C images verify`", component, version)
+		return sysext{component: component, version: version, file: file, line: attest.SysextMeasurement(sums[file], file)}
+	}
+	return sysexts{kubernetes: get(attest.SysextKubernetes, kubernetes), cni: get(attest.SysextCNI, cni)}
+}
+
 // assertKubernetesPulled checks the pull unit and the file lifecycle: the
-// unit succeeded in this boot, downloaded the file, logged the measurement,
-// and exactly one kubernetes extension is merged from exactly one file.
-func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, version, file, line string) {
+// unit succeeded in this boot, downloaded the files, logged the measurements
+// in order, and exactly the Kubernetes and the CNI extension are merged,
+// each from exactly one file.
+func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, sx sysexts) {
 	t.Helper()
 	show := g.sh(ctx, "systemctl show -p ActiveState -p Result -p ExecMainStartTimestampMonotonic -p ExecMainExitTimestampMonotonic "+kubernetesUnit)
 	assert.Contains(t, show, "ActiveState=active", kubernetesUnit)
@@ -219,29 +265,30 @@ func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, version
 	t.Logf("%s journal:\n%s", kubernetesUnit, journal)
 	pulled := pulledLine.FindStringSubmatch(journal)
 	if assert.NotNil(t, pulled, "the unit logs the download") {
-		assert.Equal(t, file, pulled[1])
+		assert.Equal(t, sx.kubernetes.file, pulled[1])
 		t.Logf("kubernetes_pull_seconds=%s (%s bytes)", pulled[3], pulled[2])
 	}
-	assert.Contains(t, journal, "measured '"+line+"' into PCR 13", "the unit measures the SHA256SUMS line")
+	assert.Contains(t, journal, "pulled "+sx.cni.file+" (", "the unit downloads the CNI sysext")
+	k := strings.Index(journal, "measured '"+sx.kubernetes.line+"' into PCR 13")
+	c := strings.Index(journal, "measured '"+sx.cni.line+"' into PCR 13")
+	assert.True(t, k >= 0 && c > k, "the unit measures the SHA256SUMS line of kubernetes, then of cni")
 	assert.NotContains(t, journal, "removing superseded", "a fresh VM has nothing to supersede")
 
 	status := g.sh(ctx, "systemd-sysext status --no-legend --no-pager")
 	t.Logf("systemd-sysext status:\n%s", status)
-	merged := ""
-	for _, row := range strings.Split(status, "\n") {
-		if fields := strings.Fields(row); len(fields) >= 2 && fields[0] == "/usr" {
-			merged = fields[1]
-		}
-	}
-	assert.Equal(t, "kubernetes_"+version, merged, "exactly this extension merged on /usr")
-	assert.Equal(t, file, g.sh(ctx, "ls "+extensionsDir), "exactly one file in %s", extensionsDir)
-	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.kubernetes_"), "one extension-release")
+	// The extensions of a hierarchy are one per line in that table; its
+	// JSON form names them as a list.
+	merged := strings.Join(strings.Fields(g.sh(ctx, `systemd-sysext status --json=short --no-pager | jq -r '.[] | select(.hierarchy == "/usr") | .extensions | if type == "array" then .[] else empty end'`)), ",")
+	assert.ElementsMatch(t, []string{"kubernetes_" + sx.kubernetes.version, "cni_" + sx.cni.version}, strings.Split(merged, ","), "exactly these extensions merged on /usr")
+	assert.ElementsMatch(t, []string{sx.kubernetes.file, sx.cni.file}, strings.Fields(g.sh(ctx, "ls "+extensionsDir)), "exactly one file per component in %s", extensionsDir)
+	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.kubernetes_"), "one kubernetes extension-release")
+	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.cni_"), "one cni extension-release")
 	// The extension's verity device, like the root's, was opened with its
 	// signature and the kernel verified it: what lets the image's IPE
 	// policy run the binaries it brings (images/README.md, IPE).
 	tables := g.sh(ctx, "dmsetup table --target verity")
 	t.Logf("verity devices:\n%s", tables)
-	assert.Equal(t, "2", g.sh(ctx, "dmsetup table --target verity | grep -c root_hash_sig_key_desc || true"), "the root and the extension verified by the kernel")
+	assert.Equal(t, "3", g.sh(ctx, "dmsetup table --target verity | grep -c root_hash_sig_key_desc || true"), "the root and both extensions verified by the kernel")
 }
 
 // assertKubernetesRunning checks that the node stack of the extension is
@@ -278,17 +325,72 @@ func assertKubernetesRunning(ctx context.Context, t *testing.T, g *guest, versio
 	assert.Equal(t, "running", g.sh(ctx, "systemctl is-system-running || true"), "system state")
 }
 
+// assertCNIPlugins checks where containerd finds CNI plugins: its effective
+// plugin directories are /usr/lib/cni alone, the CNI sysext's plugins are
+// there and execute (under IPE: from the extension's signed verity device),
+// and on an IPE image a copy of the plugin in /opt/cni/bin, where a CNI
+// DaemonSet still installs it, is refused.
+func assertCNIPlugins(ctx context.Context, t *testing.T, g *guest, sx sysexts, ipe bool) {
+	t.Helper()
+	var info struct {
+		CNIConfig struct{ PluginDirs []string } `json:"cniconfig"`
+	}
+	raw := g.sh(ctx, "crictl --runtime-endpoint "+containerdSocket+" info -o json")
+	require.NoError(t, json.Unmarshal([]byte(raw), &info), "crictl info: %s", raw)
+	assert.Equal(t, []string{"/usr/lib/cni"}, info.CNIConfig.PluginDirs, "containerd's effective bin_dirs: only the sysexts' /usr/lib/cni")
+
+	plugins := strings.Fields(g.sh(ctx, "ls /usr/lib/cni"))
+	t.Logf("/usr/lib/cni (kubernetes %s + cni %s): %v", sx.kubernetes.version, sx.cni.version, plugins)
+	assert.Contains(t, plugins, "bridge", "reference plugins of the kubernetes sysext")
+	name := strings.SplitN(sx.cni.version, "-", 2)[0]
+	require.Contains(t, plugins, name, "the plugin of the cni sysext")
+	out := g.sh(ctx, "CNI_COMMAND=VERSION /usr/lib/cni/"+name+" </dev/null")
+	t.Logf("CNI_COMMAND=VERSION /usr/lib/cni/%s: %s", name, out)
+	assert.Contains(t, out, "supportedVersions", "the cni sysext's plugin executes")
+	if !ipe {
+		return
+	}
+	res, err := g.run(ctx, "install -D -m0755 /usr/lib/cni/"+name+" /opt/cni/bin/"+name+" && CNI_COMMAND=VERSION /opt/cni/bin/"+name+" </dev/null")
+	require.NoError(t, err)
+	t.Logf("copy in /opt/cni/bin: exit %d %s%s", res.ExitCode, res.Stdout, res.Stderr)
+	assert.NotZero(t, res.ExitCode, "IPE refuses the plugin copied into /opt/cni/bin")
+	assert.Contains(t, res.Stderr, "Permission denied")
+	g.sh(ctx, "rm -f /opt/cni/bin/"+name)
+}
+
+// assertStrayExtensionRefused adds an extension the VM was not created with
+// (a directory extension in /run/extensions, which systemd-sysext merges like
+// any other) and runs the unit again: it must fail, naming the stray image
+// in the set systemd-sysext merged, and succeed again once the image is gone.
+func assertStrayExtensionRefused(ctx context.Context, t *testing.T, g *guest, sx sysexts) {
+	t.Helper()
+	const stray = "/run/extensions/stray"
+	g.sh(ctx, "mkdir -p "+stray+"/usr/lib/extension-release.d && echo ID=_any > "+stray+"/usr/lib/extension-release.d/extension-release.stray")
+	res, err := g.run(ctx, "systemctl restart "+kubernetesUnit)
+	require.NoError(t, err)
+	journal := g.sh(ctx, "journalctl -b -o cat -u "+kubernetesUnit+" --no-pager | tail -n 5")
+	t.Logf("%s with a stray extension: exit %d\n%s", kubernetesUnit, res.ExitCode, journal)
+	assert.NotZero(t, res.ExitCode, "the unit refuses a merged extension the VM was not created with")
+	assert.Contains(t, journal, "systemd-sysext merged '"+"cni_"+sx.cni.version+",kubernetes_"+sx.kubernetes.version+",stray' on /usr")
+
+	g.sh(ctx, "rm -r "+stray+" && systemctl reset-failed "+kubernetesUnit)
+	res, err = g.run(ctx, "systemctl restart "+kubernetesUnit)
+	require.NoError(t, err)
+	assert.Zero(t, res.ExitCode, "the unit passes again without the stray extension: %s%s", res.Stdout, res.Stderr)
+}
+
 // assertPCR13 compares the TPM's PCR 13 with the host-computed value and
 // logs the events behind it: the initrd's os-separator and the unit's
-// measurement, from systemd's userspace event log.
-func assertPCR13(ctx context.Context, t *testing.T, g *guest, want string) {
+// measurements, from systemd's userspace event log.
+func assertPCR13(ctx context.Context, t *testing.T, g *guest, sx sysexts) {
+	want := sx.pcr13()
 	t.Helper()
 	got := strings.ToLower(g.sh(ctx, "cat "+pcr13Sysfs))
 	t.Logf("pcr 13: %s\n%s", got, g.sh(ctx, "systemd-analyze pcrs 13 --no-pager 2>&1 || true"))
 	events := g.sh(ctx, "grep -E '\"pcr\" *: *13' "+tpmUserspaceLog+" || true")
 	t.Logf("pcr 13 events in %s:\n%s", tpmUserspaceLog, events)
 	assert.Equal(t, want, got, "PCR 13 must equal attest.SysextPCR of the artifact")
-	assert.Equal(t, 2, strings.Count(events, "\n")+1, "two PCR 13 events: os-separator and the sysext measurement")
+	assert.Equal(t, 1+len(sx.all()), strings.Count(events, "\n")+1, "PCR 13 events: os-separator and one measurement per sysext")
 }
 
 // unitRunSeconds derives the run time of a oneshot unit from the monotonic
@@ -342,6 +444,7 @@ func readPolicy(t *testing.T, path string) attest.Policy {
 	}
 	p, err := attest.ParsePolicy(raw)
 	require.NoError(t, err, "%s", path)
-	require.NotEmpty(t, p.PCR13, fmt.Sprintf("%s has no pcr13 values; run `make -C images verify-kubernetes`", path))
+	require.NotEmpty(t, p.Sysexts[attest.SysextKubernetes], fmt.Sprintf("%s has no sysexts.kubernetes values; run `make -C images verify`", path))
+	require.NotEmpty(t, p.Sysexts[attest.SysextCNI], fmt.Sprintf("%s has no sysexts.cni values; run `make -C images verify`", path))
 	return p
 }

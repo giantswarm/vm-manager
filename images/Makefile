@@ -1,11 +1,13 @@
-# giantswarm-vm-base image and kubernetes sysext build. Everything runs
+# giantswarm-vm-base image, kubernetes and cni sysext build. Everything runs
 # unprivileged.
 #
-#   make                                     keys, all images (every Kubernetes version), verify
+#   make                                     keys, all images (every Kubernetes version and CNI release), verify
 #   make keys base verify-base smoke-boot    base-only cycle
 #   make kubernetes verify-kubernetes        one sysext (KUBERNETES_VERSION), base tree is reused
 #   make kubernetes KUBERNETES_VERSION=1.35.4   another release, published next to the others
 #   make kubernetes-all                      every release of KUBERNETES_VERSIONS
+#   make cni verify-cni                      one CNI sysext (CNI_VERSION), base tree is reused
+#   make cni-all                             every release of CNI_VERSIONS
 #   make ignition                            Ignition binary for the initrd (cached)
 #   make agent                               vm-agent binary for base and initrd (make -C .. agent)
 #   make e2e-sysext                          the e2e tests' firmware sysext, base tree is reused
@@ -34,6 +36,20 @@ KUBERNETES_VERSION  ?= $(firstword $(KUBERNETES_VERSIONS))
 export KUBERNETES_VERSION
 PKGS                := $(BUILD)/pkgs
 KUBERNETES_PKGS     := $(PKGS)/$(KUBERNETES_VERSION)
+# CNI releases a cni sysext is built for, one per entry of cni/ (the entry
+# pins the release, the asset and its sha256; Renovate bumps the release):
+# "<entry>-<release without v>". The first is the default of `make cni` and
+# the one `make images` builds in the same mkosi run as the base image;
+# `make cni-all` (part of `make`) builds every one, and build/sysupdate/cni/
+# accumulates them. scripts/fetch-cni-plugins stages the release's plugins
+# into $(CNI_TREE), ExtraTrees= of mkosi.images/cni/mkosi.conf, and the
+# subimage's executable mkosi.version turns the exported CNI_VERSION into the
+# image version.
+CNI_VERSIONS ?= $(shell for f in cni/*; do (. "./$$f" && echo "$${f##*/}-$${release#v}"); done)
+CNI_VERSION  ?= $(firstword $(CNI_VERSIONS))
+export CNI_VERSION
+CNI_CACHE    := $(BUILD)/cni/$(CNI_VERSION)
+CNI_TREE     := $(BUILD)/cni/tree
 # Volatile: the package directory is not part of mkosi's incremental cache
 # manifest, so switching versions leaves the cached base tree alone (the base
 # installs nothing from it; the sysext's pinned package list changes anyway).
@@ -76,11 +92,12 @@ CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages e2e-sysext verify verify-base verify-kubernetes smoke-boot clean summary
+.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
 
-# `images` builds the default Kubernetes version; the other listed releases
-# follow, one `make kubernetes` each.
-all: keys images $(addprefix kubernetes-,$(filter-out $(KUBERNETES_VERSION),$(KUBERNETES_VERSIONS))) verify
+# `images` builds the default Kubernetes version and CNI release; the other
+# listed releases follow, one `make kubernetes` or `make cni` each.
+all: keys images $(addprefix kubernetes-,$(filter-out $(KUBERNETES_VERSION),$(KUBERNETES_VERSIONS))) \
+	$(addprefix cni-,$(filter-out $(CNI_VERSION),$(CNI_VERSIONS))) verify
 
 keys: $(KEYS)/import-pubring.pgp
 
@@ -131,14 +148,22 @@ $(KUBERNETES_PKGS)/.verified: $(SCRIPTS)/fetch-kubernetes-packages
 	$(SCRIPTS)/fetch-kubernetes-packages $(KUBERNETES_VERSION) $(KUBERNETES_PKGS)
 	touch $@
 
+# The plugins of $(CNI_VERSION), staged as the cni sysext's tree. Always
+# restaged: the tree is shared by every release (the download is cached and
+# re-verified in $(CNI_CACHE)).
+cni-plugins:
+	$(SCRIPTS)/fetch-cni-plugins $(CNI_VERSION) $(CNI_CACHE) $(CNI_TREE)
+
 # Two mkosi runs (mkosi-ipe): the second builds the base tree, the kubernetes
-# sysext (--dependency= appends to Dependencies=base of mkosi.conf) and the
-# disk image with the IPE policy for the first one's root, then it lays out
-# both sysupdate directories (renamed artifacts, SHA256SUMS, SHA256SUMS.gpg).
-images: keys ignition agent kubernetes-packages
-	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes)
+# and cni sysexts (--dependency= appends to Dependencies=base of mkosi.conf)
+# and the disk image with the IPE policy for the first one's root, then it
+# lays out the sysupdate directories (renamed artifacts, SHA256SUMS,
+# SHA256SUMS.gpg) and the e2e tests' sysext.
+images: keys ignition agent kubernetes-packages cni-plugins
+	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
+	$(SCRIPTS)/publish-sysupdate cni $(BUILD) cni $(CNI_VERSION) $(KEYS)
 	$(SCRIPTS)/build-e2e-sysext $(BUILD) $(KEYS)
 	install -m0644 $(KEYS)/verity.crt $(CERT)
 
@@ -171,25 +196,42 @@ kubernetes-all: $(addprefix kubernetes-,$(KUBERNETES_VERSIONS))
 kubernetes-%:
 	$(MAKE) kubernetes KUBERNETES_VERSION=$*
 
+# One CNI sysext, like `kubernetes`: the main image is skipped, the base tree
+# reused, the previous build of this release removed by hand.
+cni: keys cni-plugins
+	rm -f $(BUILD)/cni_$(CNI_VERSION) $(BUILD)/cni_$(CNI_VERSION).*
+	$(MKOSI) $(MKOSI_ARGS) --format=none --bootable=no --dependency=cni build
+	$(SCRIPTS)/publish-sysupdate cni $(BUILD) cni $(CNI_VERSION) $(KEYS)
+
+# Every release of CNI_VERSIONS, published side by side.
+cni-all: $(addprefix cni-,$(CNI_VERSIONS))
+
+cni-%:
+	$(MAKE) cni CNI_VERSION=$*
+
 # Offline checks of the built artifacts, no root, no boot.
-verify: verify-base verify-kubernetes
+verify: verify-base verify-kubernetes verify-cni
 
 # Writes $(BUILD)/policy.json.
 verify-base:
 	$(SCRIPTS)/verify $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 
-# Every version published in $(BUILD)/sysupdate/kubernetes/; adds their
-# pcr13 values to $(BUILD)/policy.json.
+# Every version published in $(BUILD)/sysupdate/<component>/; records the
+# sha256 of each in $(BUILD)/policy.json (sysexts.<component>), from which
+# vm-manager computes PCR 13.
 verify-kubernetes:
-	$(SCRIPTS)/verify-kubernetes $(BUILD) $(KEYS)
+	$(SCRIPTS)/verify-sysext kubernetes $(BUILD) $(KEYS)
+
+verify-cni:
+	$(SCRIPTS)/verify-sysext cni $(BUILD) $(KEYS)
 
 # Headless boot with a vTPM; console log in $(BUILD)/smoke.log.
 smoke-boot:
 	$(SCRIPTS)/smoke-boot $(BUILD) $(IMAGE_ID) $(VERSION) "$(PROFILE)"
 
-# All images, the sysext for $(KUBERNETES_VERSION).
+# All images, the sysexts for $(KUBERNETES_VERSION) and $(CNI_VERSION).
 summary: kubernetes-packages
-	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes summary
+	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni summary
 
 clean:
 	-$(MKOSI) $(MKOSI_ARGS) clean

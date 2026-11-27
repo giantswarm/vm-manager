@@ -24,8 +24,10 @@
 //     VM, see goldenFirmwarePCRs; they are quoted and recorded, not
 //     compared); a PCR without a golden value is accepted only in learn mode
 //     (Options.LearnGolden) and reported in Result.Learned; PCR 13 is
-//     compared at the ready stage against the policy's pcr13 entry for the
-//     VM's Kubernetes version, else against the golden value, and recorded
+//     compared at the ready stage against the value computed from the
+//     policy's sysexts entries of the VM's Kubernetes and CNI versions (or
+//     the pcr13 entry of a VM without CNI), else against the golden value,
+//     and recorded
 //     when the policy has neither. A mismatch of a firmware PCR names the
 //     firmware build the values were recorded under next to the one this
 //     server boots (Policy.GoldenFirmware, Options.Firmware), which tells a
@@ -202,20 +204,20 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	firmwareMismatch := false
 	compare := func(index int) {
 		got := res.PCRs[index]
-		want, kubernetes, ok := policy.expected(index)
+		want, sysexts, ok := policy.expected(index)
 		switch {
 		case !ok && (v.opts.LearnGolden || index == PCRSysext):
 			res.Learned = append(res.Learned, index)
 			learned = append(learned, fmt.Sprintf("%d=%s", index, got))
 		case !ok:
 			unknown = append(unknown, fmt.Sprint(index))
-		case want != got && kubernetes != "":
-			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s for kubernetes %s, got %s", index, want, kubernetes, got))
+		case want != got && sysexts != "":
+			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s for %s, got %s", index, want, sysexts, got))
 		case want != got:
 			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s, got %s", index, want, got))
 			firmwareMismatch = firmwareMismatch || index != PCRSysext
-		case kubernetes != "":
-			sysext = kubernetes
+		case sysexts != "":
+			sysext = sysexts
 		}
 	}
 	for _, i := range goldenFirmwarePCRs {
@@ -238,7 +240,7 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	res.Verified = true
 	res.Message = fmt.Sprintf("verified: ak %s, pcr 11 phase %s", short(q.AKFingerprint), phase)
 	if sysext != "" {
-		res.Message += ", pcr 13 kubernetes " + sysext
+		res.Message += ", pcr 13 " + sysext
 	}
 	if len(learned) > 0 {
 		res.Message += "; accepted without golden value: " + strings.Join(learned, " ")

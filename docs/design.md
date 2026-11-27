@@ -205,14 +205,17 @@ Phase B, installed boot (every boot from now on):
    systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
    then `vm-kubernetes.service` (base image, `After=network-online.target
    systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service`, wanted
-   by `multi-user.target`) reads `/kubernetes-version` from the IMDS and runs
-   `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
+   by `multi-user.target`) reads `/kubernetes-version` and `/cni-version` from the IMDS and runs
+   `systemd-sysupdate --component=kubernetes update <version>`, then `--component=cni` for
+   the CNI sysext (one per CNI release, `<cni>-<release>`, the only place CNI plugins
+   come from: containerd's `bin_dirs` is `/usr/lib/cni` alone) (explicit version selection;
    the artifact directory is served unfiltered because its `SHA256SUMS` is signed at build
-   time), removes any other `kubernetes_*.raw`, merges the extension with
+   time), removes any other `kubernetes_*.raw` and `cni_*.raw`, merges the extensions with
    `systemd-sysext refresh` (daemon-reload via `EXTENSION_RELOAD_MANAGER=1`, `Upholds=`
-   starts containerd and kubelet) and extends PCR 13 with `systemd-pcrextend` using the
-   file's `SHA256SUMS` line (`<sha256>  kubernetes_<version>.raw`), so the host predicts
-   PCR 13 from the artifact (`policy.json` `pcr13.<version>`, images/README.md). A VM
+   starts containerd and kubelet) and extends PCR 13 with `systemd-pcrextend` using each
+   file's `SHA256SUMS` line (`<sha256>  kubernetes_<version>.raw`, then the cni one), so
+   the host computes PCR 13 from the artifacts (`policy.json` `sysexts.<component>.<version>`,
+   images/README.md). A VM
    without a Kubernetes version skips the unit. CAPI's unit, ordered
    `After=vm-kubernetes.service`, runs `kubeadm init|join` and writes
    `/run/cluster-api/bootstrap-success.complete`. `vm-agent-attest.service` of the root
@@ -241,11 +244,12 @@ closed it; the two without it are open and scheduled in [plan.md](plan.md).
   is the stub's cpio archive, which a host cannot predict from the artifact alone, and the
   206 MB would have to fit the 512 MB ESP before the first installed boot. Decided:
   `vm-kubernetes.service` extends PCR 13 itself after the merge with `systemd-pcrextend`
-  and the file's `SHA256SUMS` line. PCR 13 of a boot is then exactly two events,
-  "os-separator" (initrd, `systemd-pcrosseparator.service`) and that line, each
-  `PCR := sha256(PCR || sha256(word))`; `images/scripts/verify-kubernetes` writes the
-  result as `pcr13.<version>` into `policy.json`, `attest.SysextPCR` is the same rule in
-  Go, and the ready-stage verifier compares the VM's Kubernetes version against it,
+  and the file's `SHA256SUMS` line. PCR 13 of a boot is then exactly three events,
+  "os-separator" (initrd, `systemd-pcrosseparator.service`), the Kubernetes line and the
+  CNI line, each `PCR := sha256(PCR || sha256(word))`; `images/scripts/verify-sysext`
+  writes the published sha256 of every sysext as `sysexts.<component>.<version>` into
+  `policy.json`, and the ready-stage verifier computes the VM's Kubernetes x CNI pair
+  from them with `attest.SysextPCR` (one entry per sysext, never per pair),
   falling back to `golden.sha256.13` (a VM without Kubernetes: the os-separator value
   alone). Verified end to end by `e2e/kubernetes_sysext_test.go` against the vTPM.
   `vm-manager image golden` still records golden 13 from whatever VM it is pointed at;
@@ -337,10 +341,10 @@ table is the single source of truth and generates the hwdb record at image build
 | `/region`, `/zone` | `IMDS_KEY_REGION/ZONE` | host name, network name |
 | `/public-keys/0` | `IMDS_KEY_SSH_KEY` | first authorized key |
 | `/user-data` | none (Ignition's `ignition.config.url`) | CAPI bootstrap data as Ignition JSON; 503 + `Retry-After` while gated by attestation, 204 when the VM has none |
-| `/instance-id`, `/kubernetes-version`, `/metadata/<k>` | extra | plain values |
+| `/instance-id`, `/kubernetes-version`, `/cni-version`, `/metadata/<k>` | extra | plain values |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |
-| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` |
+| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` and `/cni-version` |
 
 Attestation protocol: `GET /attest/nonce` returns 32 hex bytes valid 5 minutes.
 `POST /attest/quote` with JSON `{stage, nonce, ak_pub, ek_pub, quote, signature,
@@ -351,8 +355,8 @@ for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
 `enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0, 2-4, 6 and 7 equal the
 image policy's golden values recorded by `vm-manager image golden` (PCR 1 and 5 are quoted
 and recorded, not compared: see the open point below), and at `ready` PCR 13 equals the
-policy's `pcr13` entry for the VM's Kubernetes version (written by
-`images/scripts/verify-kubernetes`; golden 13 when the VM has none). Only the
+value computed from the policy's `sysexts` entries of the VM's Kubernetes and CNI
+versions (written by `images/scripts/verify-sysext`; golden 13 when the VM has none). Only the
 `initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
 
@@ -428,7 +432,7 @@ proving integrity before secrets are released (`vm-agent attest`).
 
 Read-only: `get_info`, `get_host`, `list_images`, `get_image`, `list_networks`, `get_network`,
 `list_vms`, `get_vm`, `get_vm_console`, `get_vm_metrics`, `get_vm_attestation`.
-Writes: `create_network`, `delete_network`, `create_vm` (name, image, kubernetes_version,
+Writes: `create_network`, `delete_network`, `create_vm` (name, image, kubernetes_version, cni_version,
 cpus, memory_mib, disk_gib, network, user_data, ssh_authorized_keys, hostname, metadata,
 require_attestation, wait_for none|installed|attested|ready), `start_vm`, `stop_vm`,
 `reboot_vm`, `delete_vm`, `exec_vm`, `forward_port`. REST mirrors each under `/api/v1`.

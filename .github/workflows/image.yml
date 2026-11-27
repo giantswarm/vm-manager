@@ -67,9 +67,11 @@ jobs:
         run: images/scripts/install-build-deps
 
       - name: Build keys, base image and every kubernetes sysext version; verify
-        # `make -C images` (all): keys, one mkosi run for base tree, disk
-        # image and the default sysext, the other KUBERNETES_VERSIONS, then
-        # verify-base and verify-kubernetes (which covers every published
+        # `make -C images` (all): keys, two mkosi runs (the IPE policy names
+        # the first one's root) for base tree, disk image and the default
+        # kubernetes and cni sysexts, the e2e tests' sysext, the other
+        # KUBERNETES_VERSIONS and CNI_VERSIONS, then verify-base,
+        # verify-kubernetes and verify-cni (which cover every published
         # version). The bind-mounted checkout belongs to the runner user, the
         # container runs as root: without safe.directory, git (Make's
         # rev-parse, Go's VCS stamping of vm-agent) refuses it with "dubious
