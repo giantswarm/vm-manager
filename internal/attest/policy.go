@@ -62,6 +62,13 @@ var GoldenIndexes = append(append([]int(nil), goldenFirmwarePCRs...), PCRSysext)
 // failing the request.
 var ErrNoPolicy = errors.New("no attestation policy")
 
+// Sysext components vm-kubernetes.service merges and measures into PCR 13,
+// in its order: the Kubernetes sysext first, then the CNI sysext.
+const (
+	SysextKubernetes = "kubernetes"
+	SysextCNI        = "cni"
+)
+
 // OSSeparator is the word systemd-pcrosseparator.service measures into PCRs
 // 0-7, 9 and 12-14 in the initrd: the first and, without a sysext, the only
 // event of PCR 13 in a boot of the image.
@@ -70,8 +77,8 @@ const OSSeparator = "os-separator"
 // Policy is an image's policy.json as images/scripts/verify and
 // verify-kubernetes write it and `vm-manager image golden` completes it.
 // Fields the verifier does not use (uki, roothash, partitions) are ignored.
-// Values are lowercase hex sha256 digests; pcr13 and golden entries are
-// optional.
+// Values are lowercase hex sha256 digests; sysexts, pcr13 and golden
+// entries are optional.
 //
 //	{
 //	  "image_id": "giantswarm-vm-base",
@@ -80,7 +87,10 @@ const OSSeparator = "os-separator"
 //	    "enter-initrd": "<hex>",
 //	    "enter-initrd:leave-initrd:sysinit:ready": "<hex>"
 //	  },
-//	  "pcr13": { "1.36.4": "<hex>" },
+//	  "sysexts": {
+//	    "kubernetes": { "1.36.4": "<sha256 of kubernetes_1.36.4.raw>" },
+//	    "cni": { "flannel-1.9.1-flannel3": "<sha256 of cni_flannel-1.9.1-flannel3.raw>" }
+//	  },
 //	  "pcr15": "layer-certificates",
 //	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } },
 //	  "golden_firmware": { "sha256": "<hex>", "package": "ovmf-generic", "version": "2025.11-3ubuntu7.2" }
@@ -90,15 +100,22 @@ type Policy struct {
 	ImageVersion string `json:"image_version,omitempty"`
 	// PCR11 maps a phase path to the expected PCR 11 value.
 	PCR11 map[string]string `json:"pcr11"`
-	// PCR13 maps a Kubernetes version to the PCR 13 value a guest running
-	// that sysext quotes at the ready stage (SysextPCR of the published
-	// artifact). A version without an entry falls back to Golden.
-	PCR13 map[string]string `json:"pcr13,omitempty"`
+	// Sysexts maps a sysext component (SysextKubernetes, SysextCNI) and a
+	// published version to the sha256 of <component>_<version>.raw, its
+	// SHA256SUMS line. PCR 13 of a VM is computed from the entries of its
+	// Kubernetes and CNI versions (SysextPCR), so every combination
+	// verifies without an entry per pair. A VM whose versions lack an
+	// entry falls back to PCR13, then to Golden.
+	Sysexts map[string]map[string]string `json:"sysexts,omitempty"`
 	// PCR15 names what the image measures into PCR 15 that the verifier
 	// judges: PCR15LayerCertificates, set by images/scripts/verify for
 	// every image whose initrd enrolls and measures layer certificates.
 	// Empty for an image that predates them.
 	PCR15 string `json:"pcr15,omitempty"`
+	// PCR13 maps a Kubernetes version to the PCR 13 value of a guest that
+	// merged that sysext alone, as images built before Sysexts wrote it;
+	// used only for a VM without a CNI version.
+	PCR13 map[string]string `json:"pcr13,omitempty"`
 	// Golden maps bank -> PCR index -> value recorded on a known-good boot.
 	Golden map[string]map[int]string `json:"golden,omitempty"`
 	// GoldenFirmware is the firmware build the golden values were recorded
@@ -113,6 +130,9 @@ type Policy struct {
 	// measure layer certificates (PCR15) cannot be served any. The
 	// PolicyProvider sets it; policy.json does not carry it.
 	LayerCertificates []string `json:"-"`
+	// CNIVersion selects the Sysexts entry of the VM's CNI sysext; the
+	// PolicyProvider sets it, empty when the VM has none.
+	CNIVersion string `json:"-"`
 }
 
 // Firmware identifies a build of the firmware code image VMs boot with, as
@@ -143,21 +163,20 @@ func (f Firmware) String() string {
 }
 
 // SysextMeasurement is the string vm-kubernetes.service measures into PCR
-// 13 after merging the Kubernetes sysext: the line `sha256sum <file>`
+// 13 for each sysext it merged: the line `sha256sum <file>`
 // prints in /var/lib/extensions, which is also the file's line in the
 // published SHA256SUMS.
 func SysextMeasurement(sha256Hex, file string) string {
 	return strings.ToLower(sha256Hex) + "  " + file
 }
 
-// SysextPCR is the PCR 13 value of a guest that merged one sysext measured
-// as measurement: the PCR starts at zero, the initrd extends it with
-// OSSeparator and vm-kubernetes.service with the measurement, each as
-// PCR := sha256(PCR || sha256(word)). Lowercase hex; the rule
-// images/scripts/verify-kubernetes implements for policy.json.
-func SysextPCR(measurement string) string {
+// SysextPCR is the PCR 13 value of a guest that merged sysexts measured as
+// measurements, in order: the PCR starts at zero, the initrd extends it
+// with OSSeparator and vm-kubernetes.service with each measurement, each as
+// PCR := sha256(PCR || sha256(word)). Lowercase hex.
+func SysextPCR(measurements ...string) string {
 	pcr := make([]byte, sha256.Size)
-	for _, word := range []string{OSSeparator, measurement} {
+	for _, word := range append([]string{OSSeparator}, measurements...) {
 		digest := sha256.Sum256([]byte(word))
 		sum := sha256.Sum256(append(pcr, digest[:]...))
 		pcr = sum[:]
@@ -200,6 +219,16 @@ func (p Policy) Validate() error {
 	if p.PCR15 != "" && p.PCR15 != PCR15LayerCertificates {
 		return fmt.Errorf("policy: pcr15 %q is not %q", p.PCR15, PCR15LayerCertificates)
 	}
+	for component, versions := range p.Sysexts {
+		for version, v := range versions {
+			if component == "" || version == "" {
+				return fmt.Errorf("policy: sysexts has an entry without a component or version (%q/%q)", component, version)
+			}
+			if err := checkDigest(v); err != nil {
+				return fmt.Errorf("policy: sysexts.%s[%q]: %w", component, version, err)
+			}
+		}
+	}
 	if p.GoldenFirmware != nil {
 		if err := checkDigest(p.GoldenFirmware.SHA256); err != nil {
 			return fmt.Errorf("policy: golden_firmware.sha256: %w", err)
@@ -227,18 +256,45 @@ func (p Policy) golden(index int) (string, bool) {
 	return strings.ToLower(v), ok
 }
 
-// expected is the value a quoted PCR must have: for PCR 13 the entry of
-// the VM's Kubernetes version when the policy has one, otherwise the golden
-// value. kubernetes is the version the value belongs to, empty for a golden
-// value.
-func (p Policy) expected(index int) (want, kubernetes string, ok bool) {
+// expected is the value a quoted PCR must have: for PCR 13 the value
+// computed from the Sysexts entries of the VM's Kubernetes and CNI
+// versions, or the PCR13 entry of a VM without CNI, otherwise the golden
+// value. sysexts names the versions the value belongs to ("kubernetes
+// 1.36.4, cni flannel-1.9.1-flannel3"), empty for a golden value.
+func (p Policy) expected(index int) (want, sysexts string, ok bool) {
 	if index == PCRSysext && p.KubernetesVersion != "" {
-		if v, ok := p.PCR13[p.KubernetesVersion]; ok {
-			return strings.ToLower(v), p.KubernetesVersion, true
+		measured := p.measured()
+		labels := make([]string, 0, len(measured))
+		lines := make([]string, 0, len(measured))
+		for _, s := range measured {
+			labels = append(labels, s.component+" "+s.version)
+			if sum, ok := p.Sysexts[s.component][s.version]; ok {
+				lines = append(lines, SysextMeasurement(sum, s.component+"_"+s.version+".raw"))
+			}
+		}
+		label := strings.Join(labels, ", ")
+		if len(lines) == len(measured) {
+			return SysextPCR(lines...), label, true
+		}
+		if v, ok := p.PCR13[p.KubernetesVersion]; ok && p.CNIVersion == "" {
+			return strings.ToLower(v), label, true
 		}
 	}
 	want, ok = p.golden(index)
 	return want, "", ok
+}
+
+// sysext is one merged sysext: its component and version.
+type sysext struct{ component, version string }
+
+// measured lists the sysexts vm-kubernetes.service measures into PCR 13 on
+// the VM, in its order.
+func (p Policy) measured() []sysext {
+	out := []sysext{{SysextKubernetes, p.KubernetesVersion}}
+	if p.CNIVersion != "" {
+		out = append(out, sysext{SysextCNI, p.CNIVersion})
+	}
+	return out
 }
 
 // PhaseFor is the phase path PCR 11 carries at a stage.

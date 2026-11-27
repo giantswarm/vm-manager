@@ -49,6 +49,7 @@ type CreateVMRequest struct {
 	Name               string            `json:"name"`
 	Image              string            `json:"image,omitempty"`
 	KubernetesVersion  string            `json:"kubernetes_version,omitempty"`
+	CNIVersion         string            `json:"cni_version,omitempty"`
 	CPUs               int               `json:"cpus,omitempty"`
 	MemoryMiB          int               `json:"memory_mib,omitempty"`
 	DiskGiB            int               `json:"disk_gib,omitempty"`
@@ -69,6 +70,7 @@ func (r CreateVMRequest) spec(defaultNetwork string) vm.Spec {
 		Name:               r.Name,
 		Image:              r.Image,
 		KubernetesVersion:  r.KubernetesVersion,
+		CNIVersion:         r.CNIVersion,
 		CPUs:               r.CPUs,
 		MemoryMiB:          r.MemoryMiB,
 		DiskGiB:            r.DiskGiB,

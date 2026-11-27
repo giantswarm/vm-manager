@@ -111,8 +111,9 @@ func (s *Service) applyDefaults(spec *Spec) {
 	}
 }
 
-// resolveImage pins spec.Image to a full reference and spec.KubernetesVersion
-// to one the image offers.
+// resolveImage pins spec.Image to a full reference, spec.KubernetesVersion
+// to one the image offers and spec.CNIVersion to one of its CNI sysexts when
+// the VM has Kubernetes.
 func (s *Service) resolveImage(spec *Spec) (images.Image, error) {
 	var (
 		img images.Image
@@ -133,6 +134,16 @@ func (s *Service) resolveImage(spec *Spec) (images.Image, error) {
 	case spec.KubernetesVersion != "" && !img.HasKubernetesVersion(spec.KubernetesVersion):
 		return img, fmt.Errorf("%w: kubernetes version %q is not available for image %s (available: %s)",
 			apierr.ErrInvalid, spec.KubernetesVersion, img.Ref(), strings.Join(img.KubernetesVersions, ", "))
+	}
+	switch {
+	case spec.CNIVersion != "" && spec.KubernetesVersion == "":
+		return img, fmt.Errorf("%w: cni version %q needs a kubernetes version, image %s offers none",
+			apierr.ErrInvalid, spec.CNIVersion, img.Ref())
+	case spec.CNIVersion == "" && spec.KubernetesVersion != "":
+		spec.CNIVersion = img.DefaultCNIVersion()
+	case spec.CNIVersion != "" && !img.HasCNIVersion(spec.CNIVersion):
+		return img, fmt.Errorf("%w: cni version %q is not available for image %s (available: %s)",
+			apierr.ErrInvalid, spec.CNIVersion, img.Ref(), strings.Join(img.CNIVersions, ", "))
 	}
 	return img, nil
 }

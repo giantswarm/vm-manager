@@ -1,4 +1,4 @@
-# images/ — giantswarm-vm-base and the kubernetes sysext
+# images/ — giantswarm-vm-base, the kubernetes and the cni sysexts
 
 mkosi 27 project that builds the guest image described in
 [docs/design.md](../docs/design.md) ("Guest image", "Boot flow"): Arch Linux,
@@ -10,9 +10,10 @@ the whole boot (see [IPE](#ipe)).
 Everything runs unprivileged (mkosi's own sandbox and user namespaces), no sudo anywhere.
 
 ```
-make -C images                                 # keys, base image + kubernetes sysext (one mkosi run), verify
+make -C images                                 # keys, base image + kubernetes and cni sysexts (one mkosi run), verify
 make -C images keys base verify-base smoke-boot  # base-only cycle (~5 min cold, ~1 min warm)
 make -C images kubernetes verify-kubernetes    # sysext only, base tree reused (~20 s warm)
+make -C images cni verify-cni                  # CNI sysext only (CNI_VERSION), base tree reused
 make -C images PROFILE=debug base smoke-boot   # root autologin + empty root password
 make -C images clean                           # drop build/, keep keys/
 ```
@@ -29,7 +30,8 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp`. It is the IPE policy's version too |
 | `ipe/giantswarm-vm.policy` | the IPE policy, signed by `make ipe` into `build/ipe/tree/etc/ipe/giantswarm-vm.p7b` for the base tree (see [IPE](#ipe)) |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy, with the verity key), `verify` (base), `verify-kubernetes` (every published version), `smoke-boot` |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy, with the verity key), `fetch-cni-plugins` (one CNI release's plugins, sha256-checked against its `cni/<name>` entry, staged into `build/cni/tree/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
+| `cni/` | one entry per CNI (`flannel`): the pinned release, asset and sha256 the cni sysext is built from, see [CNI sysext](#cni-sysext) |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -37,7 +39,8 @@ Make targets: `images` (one `mkosi --dependency=kubernetes build` for base tree,
 and disk image), `base` (plain `mkosi build`: base tree and disk image), `kubernetes`
 (`mkosi --format=none --bootable=no --dependency=kubernetes build`: sysext on the
 existing base tree, without `--force`, which would delete the disk image outputs of the
-skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot`, `clean`.
+skipped main image), `cni` / `cni-all` / `cni-<version>` (the same for `CNI_VERSIONS`),
+`verify` = `verify-base` + `verify-kubernetes` + `verify-cni`, `smoke-boot`, `clean`.
 
 ## What is built
 
@@ -53,7 +56,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}, pcr15: "layer-certificates"}`, where `pcr15` declares that the initrd measures the installation layer certificates into PCR 15, so vm-manager requires PCR 15 in the ready quote; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}` for every published version (and drops entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}, pcr15: "layer-certificates"}`, where `pcr15` declares that the initrd measures the installation layer certificates into PCR 15, so vm-manager requires PCR 15 in the ready quote; `make verify-kubernetes` and `make verify-cni` add `sysexts: {kubernetes: {<kv>: <sha256 of kubernetes_<kv>.raw>}, cni: {<cni>-<release>: <sha256 of cni_<cni>-<release>.raw>}}` for every published version (and drop entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with the value it computes from the `sysexts` entries of the VM's Kubernetes and CNI versions (see [PCR 13](#pcr-13)) or golden 13 |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
 | `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
@@ -280,7 +283,7 @@ stage retries until its 2-minute timeout and the boot lands in `emergency.target
 without it user-data was released when the boot started and the boot proceeds with the
 failed unit on record. `get_vm_attestation` shows both stages either way.
 
-Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only; the
+Golden values: `policy.json` from `make verify` has `pcr11` and `sysexts` only; the
 release pipeline adds the golden values of the release's container image before it
 publishes the artifact (`hack/guest-image-golden.sh`). The
 firmware PCRs a golden value can pin across VMs are 0 (firmware code), 2 and 3 (option
@@ -314,7 +317,7 @@ fills for `systemd.volatile=`.
 | `/var` | ext4 from `/dev/disk/by-partlabel/var` (systemd-repart labels a partition after its type when the definition sets no `Label=`), `systemd-fsck` before, `systemd-growfs` after (`x-systemd.growfs` is fstab-only) | partition 8 of the installed disk |
 | `/etc` | overlayfs, `lowerdir=` the image's `/etc`, `upperdir=`/`workdir=` on var | `/var/lib/etc-overlay/{upper,work}` |
 | `/root` | bind mount (systemd's `tmpfiles.d/provision.conf` writes `/root/.ssh/authorized_keys` from `ssh.authorized_keys.root`) | `/var/roothome` |
-| `/opt` | bind mount (CNI DaemonSets install into `/opt/cni/bin`) | `/var/opt` |
+| `/opt` | bind mount (CNI DaemonSets still copy into `/opt/cni/bin`; containerd does not search it) | `/var/opt` |
 
 - `systemd-firstboot` (host, first boot) writes `/etc/hostname` and friends into the
   overlay, PID 1 commits the `system.machine_id` credential to `/etc/machine-id`, sshd's
@@ -413,12 +416,15 @@ containerd-shim-runc-v2,ctr,runc,crictl,conntrack,socat,ethtool,iptables,...}`, 
 reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
 
 - `containerd.service.d/10-vm-manager.conf`: `--config /usr/lib/vm-manager/containerd.toml`
-  (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/opt/cni/bin',
-  '/usr/lib/cni']`, `conf_dir=/etc/cni/net.d`. `/opt` is deliberately *not* in the
-  extension (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): `/opt` is a
-  bind mount of `/var/opt` (see [Persistent state](#persistent-state)), so CNI DaemonSets
-  can install into `/opt/cni/bin` and keep it across reboots, which a sysext overlay on
-  `/opt` would make read-only.
+  (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/usr/lib/cni']`,
+  `conf_dir=/etc/cni/net.d`. `bin_dirs` lists only directories inside sysexts:
+  `/usr/lib/cni` holds the reference plugins of this extension and the plugins of the
+  VM's [CNI sysext](#cni-sysext), merged into one directory. `/opt/cni/bin` is not
+  searched: IPE executes nothing from `/opt`. `/opt` is still *not* in the extension
+  (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): it is a bind mount of
+  `/var/opt` (see [Persistent state](#persistent-state)), so the copy a CNI DaemonSet
+  still makes into `/opt/cni/bin` succeeds (and is ignored) instead of failing on a
+  read-only sysext overlay.
 - `kubelet.service.d/20-vm-manager.conf`: `KUBELET_ARGS=--container-runtime-endpoint=unix:///run/containerd/containerd.sock`
   (Arch's unit sources it from `/etc/kubernetes/kubelet.env`, which is not shippable),
   `Wants=/After=network-online.target containerd.service`. `10-kubeadm.conf` comes from
@@ -464,17 +470,17 @@ release the directory lacks fails the build instead of silently installing what 
 repositories offer, and `mkosi.postinst` still refuses an installed kubeadm that is not
 `<kv>`. `containerd`, `runc`, `crictl` and `cni-plugins` come from the current repositories
 (the same set for every release: both sysexts of this repository state carry
-containerd 2.3.5, runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1; `verify-kubernetes` prints
+containerd 2.3.5, runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1; `verify-sysext kubernetes` prints
 what a sysext holds).
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
 `build/sysupdate/kubernetes/` then serves the new file next to the old ones,
 `SHA256SUMS` is regenerated over all of them and re-signed, `build/policy.json` gains
-`pcr13.<kv>`, and vm-manager's catalog (`internal/images`, `get_image`) lists it. Retiring a
+`sysexts.kubernetes.<kv>`, and vm-manager's catalog (`internal/images`, `get_image`) lists it. Retiring a
 release: remove it from the list, delete `build/sysupdate/kubernetes/kubernetes_<kv>.raw`,
 publish any version (`make kubernetes`) so the manifest no longer names it, and
-`verify-kubernetes` drops its `pcr13` entry. `make kubernetes` for a version rebuilds only
+`verify-kubernetes` drops its `sysexts.kubernetes` entry. `make kubernetes` for a version rebuilds only
 that sysext (`make clean` if the base tree changed) and replaces only that version's file.
 
 How the VM receives it: vm-manager serves `build/sysupdate/kubernetes/` at
@@ -504,8 +510,12 @@ address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
    `/usr/lib/verity.d/verity.crt`; the kernel's "Required key not available" lines in the
    journal are the keyring attempt before that). `EXTENSION_RELOAD_MANAGER=1` makes the
    refresh a daemon-reload, after which `Upholds=` of `multi-user.target` starts
-   `containerd.service` and `kubelet.service`. The unit checks that
-   `systemd-sysext status` lists exactly `kubernetes_<kv>` on `/usr`.
+   `containerd.service` and `kubelet.service`. The unit fails unless what systemd-sysext
+   reports is exactly the VM's images: `systemd-sysext status --json=short` merged
+   `kubernetes_<kv>` and `cni_<cni>-<release>` (when `/cni-version` is set) on `/usr` and
+   nothing else, `systemd-sysext list --json=short` finds no other image in any extension
+   directory, and every `/usr/lib/extension-release.d/extension-release.*` belongs to a
+   merged image (`jq`, an explicit base package, reads the JSON).
 5. PCR 13 is extended, see below.
 6. The node stack is made usable: `systemd-modules-load.service` and
    `systemd-sysctl.service` are restarted, because on a boot that downloaded the
@@ -555,22 +565,62 @@ place it. The unit therefore measures after the merge with
 `systemd-pcrextend --pcr=13 "<line>"`, where `<line>` is what `sha256sum
 kubernetes_<kv>.raw` prints in `/var/lib/extensions`, i.e. the file's line in the
 published `SHA256SUMS`: `<sha256>  kubernetes_<kv>.raw` (two spaces, no newline).
-The PCR 13 rule, implemented by `scripts/verify-kubernetes` (step 10, Python) and
-`attest.SysextPCR` (Go), both checked against the TPM by the e2e:
+The same unit measures the CNI sysext right after (`<sha256>  cni_<cni>-<release>.raw`).
+The PCR 13 rule, implemented by `attest.SysextPCR` (Go) and checked against the TPM by
+the e2e:
 
     PCR13 = 0 (32 zero bytes)
     PCR13 = sha256(PCR13 || sha256("os-separator"))     systemd-pcrosseparator.service, initrd
     PCR13 = sha256(PCR13 || sha256("<sha256>  kubernetes_<kv>.raw"))   vm-kubernetes.service
+    PCR13 = sha256(PCR13 || sha256("<sha256>  cni_<cni>-<release>.raw"))   vm-kubernetes.service, when /cni-version is set
 
 `systemd-pcrosseparator.service` (initrd, `ConditionSecurity=measured-os`) is the only
 other PCR 13 event of a boot; both events are in `/run/log/systemd/tpm2-measure.log`,
-`systemd-analyze pcrs 13` shows the result. `verify-kubernetes` writes the value to
-`build/policy.json` as `"pcr13": {"<kv>": "<hex>"}` (kept across `verify-base` runs, one
-entry per sysext version built); vm-manager compares it at the ready stage against the
-VM's Kubernetes version and falls back to `golden.sha256.13` for a VM without one
-(`internal/attest`). The trust chain for the content itself stays the verity signature
+`systemd-analyze pcrs 13` shows the result. <a id="pcr-13"></a>Each event is a separate
+extension, so the policy records one value per sysext, not per pair: `verify-sysext`
+writes the published sha256 of every file to `build/policy.json` as
+`"sysexts": {"kubernetes": {"<kv>": "<sha256>"}, "cni": {"<cni>-<release>": "<sha256>"}}`
+(kept across `verify-base` runs), and vm-manager computes the expected PCR 13 of a VM
+from the entries of its Kubernetes and CNI versions, in that order, at the ready stage:
+every Kubernetes x CNI combination verifies without an entry per pair. A VM whose
+versions lack an entry falls back to `pcr13[<kv>]` (written by images built before
+`sysexts`, only without a CNI) and then to `golden.sha256.13` (`internal/attest`). The trust chain for the content itself stays the verity signature
 (`/usr/lib/verity.d/verity.crt`) plus `SHA256SUMS.gpg` for the download; PCR 13 binds
 the attested boot to the exact artifact.
+
+## CNI sysext
+
+`mkosi.images/cni/` builds `cni_<cni>-<release>.raw`, one systemd-sysext DDI per CNI
+release, like the kubernetes sysext: an overlay delta on the base tree, erofs (zstd),
+dm-verity signed with the image's verity key, `SYSEXT_SCOPE=system`. Its only content is
+the CNI's plugin binaries in `/usr/lib/cni`, the one directory containerd's `bin_dirs`
+lists; systemd-sysext merges them next to the reference plugins (`bridge`, `host-local`,
+`loopback`, `portmap`, ...) of the kubernetes sysext, so under IPE every plugin containerd
+runs comes from a signed verity device. A CNI bump rebuilds this extension only, never a
+kubernetes one.
+
+The CNIs are the entries of `cni/` (`flannel`: flannel's `flannel` plugin from
+`flannel-io/cni-plugin`, the release flannel's manifest installs). An entry pins
+`release` (Renovate bumps it, `renovate-custom.json5`), the asset `url`, its `sha256`
+and the `plugins` to install; the sysext version is `<entry>-<release without v>`
+(`flannel-1.9.1-flannel3`), `CNI_VERSIONS` in the Makefile lists one per entry, the
+first is the default of `make cni` and of `make images`. `scripts/fetch-cni-plugins`
+downloads the asset into `build/cni/<version>/`, refuses a sha256 other than the
+entry's (printing the one it got, which a Renovate bump needs) and stages the plugins
+into `build/cni/tree/`, the subimage's `ExtraTrees=`.
+
+Adding a CNI: one entry `cni/<name>` (an asset that is a single binary installs as its
+one plugin; a `.tar.gz` installs the members `plugins` lists, each `<member>[:<name>]`),
+then `make cni CNI_VERSION=<name>-<release> verify-cni` (or `make`). Nothing else
+changes: publishing, the sysupdate transfer (`sysupdate.cni.d/50-cni.transfer`,
+`cni_@v.raw`), the catalog and the PCR 13 policy are per component, not per CNI.
+
+The guest: vm-manager offers the published versions (`get_image` `cniVersions`),
+`create_vm` takes `cni_version` (default: the newest `flannel-*` release, only for a VM
+with a Kubernetes version) and serves it as `/cni-version`; `vm-kubernetes.service` pulls
+it with `systemd-sysupdate --component=cni update <version>` right after the Kubernetes
+sysext, merges both and measures both into PCR 13 (see [PCR 13](#pcr-13)). A CNI's
+DaemonSet that still copies its plugin into `/opt/cni/bin` succeeds and is ignored.
 
 ## IPE
 
@@ -693,7 +743,7 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
 8. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 9. Writes `build/policy.json`.
 
-`make verify-kubernetes` (`scripts/verify-kubernetes`, offline, unprivileged):
+`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and nothing else, the entry's plugins present, the merge):
 
 1. GPT via `sfdisk --json`: root, root-verity, root-verity-sig and nothing else;
    root/verity partition UUIDs equal the halves of `kubernetes_<kv>.roothash`.
@@ -889,8 +939,8 @@ Kubernetes sysext:
   `modules-load.d`/`sysctl.d` files of the extension would race the merge.
 - `/opt` is excluded from the extension (`mkosi.postinst` removes the `cni-plugins`
   copy under `/opt/cni/bin`; `/usr/lib/cni` remains) so that `/opt/cni/bin` stays
-  writable for CNI DaemonSets. containerd searches `/opt/cni/bin` first, `/usr/lib/cni`
-  second.
+  writable for the copy CNI DaemonSets make. containerd searches `/usr/lib/cni` only:
+  a CNI's own plugin comes from its [CNI sysext](#cni-sysext).
 - The `iptables` package is already part of the base tree (`/usr/bin/iptables ->
   xtables-nft-multi`), so it leaves no files in the overlay delta; it stays in the
   package list to keep the extension self-describing.

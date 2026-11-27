@@ -516,6 +516,11 @@ components:
           items:
             type: string
           description: Kubernetes sysext versions available, highest first.
+        cniVersions:
+          type: array
+          items:
+            type: string
+          description: CNI sysext versions available ("<cni>-<release>", e.g. "flannel-1.9.1-flannel3"), highest first.
         policy:
           type: object
           description: The image's PCR policy as written by the image build; absent when none.
@@ -585,6 +590,9 @@ components:
         kubernetes_version:
           type: string
           description: Served as /kubernetes-version; default: the newest the image offers.
+        cni_version:
+          type: string
+          description: 'CNI sysext ("<cni>-<release>") served as /cni-version; its plugins are the only ones containerd runs besides the reference plugins of the Kubernetes sysext. Default: the newest flannel release the image offers; only with a Kubernetes version.'
         cpus:
           type: integer
           default: 2
@@ -708,6 +716,8 @@ components:
           type: string
           description: The resolved image reference.
         kubernetesVersion:
+          type: string
+        cniVersion:
           type: string
         cpus:
           type: integer

@@ -260,7 +260,7 @@ ok "sysupdate/base: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SH
 #    requires PCR 15 in the ready quote of this image. The golden PCR values
 #    `vm-manager image golden` recorded into an existing policy.json for this
 #    image version survive a re-run with the firmware build they belong to, as
-#    do the pcr13 values scripts/verify-kubernetes adds per sysext version.
+#    do the sysexts entries scripts/verify-sysext adds per sysext version.
 python3 - "$policy" "$id" "$version" "$roothash" "$tmp/pcr11.json" "$tmp/partitions.json" "$uki" <<'EOF'
 import json, os, sys
 policy, image_id, version, roothash, pcr11, partitions, uki = sys.argv[1:]
@@ -279,7 +279,7 @@ try:
 except (OSError, ValueError):
     prev = {}
 if prev.get("image_id") == image_id and prev.get("image_version") == version:
-    for key in ("pcr13", "golden", "golden_firmware"):
+    for key in ("sysexts", "golden", "golden_firmware"):
         if isinstance(prev.get(key), dict):
             out[key] = prev[key]
             print(f"verify: kept {key} values from the previous policy.json")

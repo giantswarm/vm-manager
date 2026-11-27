@@ -22,6 +22,7 @@
 //	/user-data                     GET     CAPI bootstrap data (Ignition JSON), gated, see below
 //	/instance-id                   GET     vm-manager's VM ID
 //	/kubernetes-version            GET     version to pass to systemd-sysupdate, see below
+//	/cni-version                   GET     CNI sysext version, the same way
 //	/layer-certificates            GET     installation layer certificates, see below
 //	/metadata/<k>                  GET     free-form per-VM values
 //	/attest/nonce                  GET     fresh nonce for the TPM quote
@@ -46,13 +47,15 @@
 // The sysupdate directories are served unfiltered: their SHA256SUMS is signed
 // at image build time and cannot be rewritten per VM, so a directory lists
 // every version the host has. The guest selects its version explicitly by
-// reading the plain key /kubernetes-version and running
+// reading the plain keys /kubernetes-version and /cni-version and running
 //
 //	systemd-sysupdate --component=kubernetes update <version>
+//	systemd-sysupdate --component=cni update <cni>-<release>
 //
 // The file names must match the MatchPattern of the transfers in the image
 // (giantswarm-vm-base_@v_@u.root.raw etc. under /sysupdate/base/,
-// kubernetes_@v.raw under /sysupdate/kubernetes/); the ArtifactSource is only
+// kubernetes_@v.raw under /sysupdate/kubernetes/, cni_@v.raw under
+// /sysupdate/cni/); the ArtifactSource is only
 // asked for what the guest requests, directory listings are never produced.
 //
 // # Layer certificates

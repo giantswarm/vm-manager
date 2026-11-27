@@ -54,9 +54,12 @@ const (
 	adminKubeconfig   = "/etc/kubernetes/admin.conf"
 	kubectlInGuest    = "kubectl --kubeconfig " + adminKubeconfig
 	providerIDPrefix  = "giantswarm-vm://"
-	// flannelManifest is the CNI: its default pod network is podCIDR, and
-	// its DaemonSet installs the plugin binary into /opt/cni/bin, the bind
-	// mount from var of images/README.md "Persistent state".
+	// flannelManifest is the CNI: its default pod network is podCIDR. Its
+	// plugin binary comes from the VM's CNI sysext (create_vm's default,
+	// the newest flannel release the image offers) in /usr/lib/cni; the copy
+	// its DaemonSet still installs into /opt/cni/bin is not in containerd's
+	// bin_dirs. The manifest's flannel-cni-plugin release is the one the
+	// images/cni/flannel entry pins.
 	// Pinned: releases/latest is a moving target and an unrelated flannel
 	// change must not fail this test.
 	flannelManifest = "https://github.com/flannel-io/flannel/releases/download/v0.28.9/kube-flannel.yml"
@@ -579,8 +582,8 @@ func assertNodesFromHost(ctx context.Context, t *testing.T, kubectl, kubeconfig,
 
 // assertNodeHealthy checks a node after the bootstrap: the kubeadm unit
 // succeeded, the node stack runs, nothing failed, the sysctls kube-proxy and
-// the CNI rely on are set, and flannel could install into /opt/cni/bin and
-// /etc/cni/net.d.
+// the CNI rely on are set, flannel's plugin is the CNI sysext's and its
+// DaemonSet wrote its configuration into /etc/cni/net.d.
 func assertNodeHealthy(ctx context.Context, t *testing.T, g *guest, name string) {
 	t.Helper()
 	show := g.sh(ctx, "systemctl show -p ActiveState -p Result -p ExecMainStatus "+kubeadmUnit)
@@ -590,7 +593,7 @@ func assertNodeHealthy(ctx context.Context, t *testing.T, g *guest, name string)
 	assert.Empty(t, g.sh(ctx, "systemctl --failed --no-legend --plain"), "failed units on %s", name)
 	assert.Equal(t, "running", g.sh(ctx, "systemctl is-system-running || true"), "system state of %s", name)
 	assert.Equal(t, "1\n1", g.sh(ctx, "sysctl -n net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables"), "forwarding sysctls on %s", name)
-	assert.Equal(t, "installed", g.sh(ctx, "test -x /opt/cni/bin/flannel && test -s /etc/cni/net.d/10-flannel.conflist && echo installed"), "flannel's plugin and config on %s", name)
+	assert.Equal(t, "installed", g.sh(ctx, "test -x /usr/lib/cni/flannel && test -s /etc/cni/net.d/10-flannel.conflist && echo installed"), "flannel's plugin (cni sysext) and config on %s", name)
 
 	// The CNI's links belong to the CNI (images/README.md,
 	// 70-kubernetes-cni.network): networkctl's columns are IDX LINK TYPE
