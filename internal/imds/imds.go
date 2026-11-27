@@ -32,6 +32,8 @@ type Instance struct {
 	SSHAuthorizedKeys []string
 	// KubernetesVersion is served as /kubernetes-version.
 	KubernetesVersion string
+	// CNIVersion is served as /cni-version.
+	CNIVersion string
 	// Metadata is served as /metadata/<k>.
 	Metadata map[string]string
 	// UserData is the CAPI bootstrap data (Ignition JSON), served as

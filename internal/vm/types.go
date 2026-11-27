@@ -88,9 +88,13 @@ type Spec struct {
 	// KubernetesVersion is served as /kubernetes-version; empty picks the
 	// highest version the image offers, none when it offers none.
 	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
-	CPUs              int    `json:"cpus"`
-	MemoryMiB         int    `json:"memoryMiB"`
-	DiskGiB           int    `json:"diskGiB"`
+	// CNIVersion is served as /cni-version, the CNI sysext ("<cni>-<release>")
+	// merged next to the Kubernetes one; empty picks the image's default CNI
+	// when the VM has a Kubernetes version, none otherwise.
+	CNIVersion string `json:"cniVersion,omitempty"`
+	CPUs       int    `json:"cpus"`
+	MemoryMiB  int    `json:"memoryMiB"`
+	DiskGiB    int    `json:"diskGiB"`
 	// Network names the network the VM attaches to.
 	Network string `json:"network"`
 	// UserData is the CAPI bootstrap data (Ignition JSON) served as /user-data

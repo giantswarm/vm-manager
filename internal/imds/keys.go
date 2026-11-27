@@ -72,6 +72,8 @@ var Keys = []Key{
 		Description: "vm-manager's VM ID"},
 	{Path: "/kubernetes-version", Method: http.MethodGet,
 		Description: "version the guest passes to systemd-sysupdate --component=kubernetes update"},
+	{Path: "/cni-version", Method: http.MethodGet,
+		Description: "CNI sysext version (<cni>-<release>) the guest passes to systemd-sysupdate --component=cni update"},
 	{Path: "/public-keys/", Pattern: "/public-keys/{$}", Method: http.MethodGet,
 		Description: "index of authorized keys, one line per key: 0, 1, ..."},
 	{Path: "/metadata/", Pattern: "/metadata/{key}", Method: http.MethodGet,

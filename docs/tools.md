@@ -68,6 +68,10 @@ It allocates a disk on the storage provider, a vTPM, a network lease and a vsock
 ```json
 {
   "properties": {
+    "cni_version": {
+      "description": "CNI sysext \"<cni>-<release>\" served as /cni-version, the only CNI plugins besides the reference ones; default: the newest flannel. See get_image",
+      "type": "string"
+    },
     "cpus": {
       "description": "Virtual CPUs, default 2",
       "type": "number"
@@ -265,7 +269,7 @@ Also the hostname, kernel, CPUs and memory; access to /dev/kvm and /dev/vhost-vs
 ## `get_image`
 
 ```text
-Describe one VM image: its artifacts, the Kubernetes versions it offers as a sysext and its PCR policy.
+Describe one VM image: its artifacts, the Kubernetes and CNI versions it offers as sysexts and its PCR policy.
 
 list_images has the references.
 ```
