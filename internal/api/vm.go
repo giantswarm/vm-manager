@@ -58,6 +58,7 @@ type CreateVMRequest struct {
 	Hostname           string            `json:"hostname,omitempty"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	RequireAttestation *bool             `json:"require_attestation,omitempty"`
+	LayerCertificates  []string          `json:"layer_certificates,omitempty"`
 	WaitFor            string            `json:"wait_for,omitempty"`
 }
 
@@ -75,6 +76,7 @@ func (r CreateVMRequest) spec(defaultNetwork string) vm.Spec {
 		SSHAuthorizedKeys:  r.SSHAuthorizedKeys,
 		Hostname:           r.Hostname,
 		Metadata:           r.Metadata,
+		LayerCertificates:  r.LayerCertificates,
 		RequireAttestation: true,
 		WaitFor:            vm.WaitFor(r.WaitFor),
 	}

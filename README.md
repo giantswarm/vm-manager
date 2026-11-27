@@ -82,7 +82,7 @@ Design decisions and their reasons are in [docs/design.md](docs/design.md), the 
 | The current boot's attestation verdicts | `GET /api/v1/vms/{id}/attestation` | `get_vm_attestation` | no |
 | Create a network (`name`, `cidr`, `dns_search_domain`); IMDS always on | `POST /api/v1/networks` | `create_network` | yes |
 | Delete a network; `conflict` while a VM is attached | `DELETE /api/v1/networks/{name}` | `delete_network` | yes, destructive |
-| Create a VM (`name`, `image`, `kubernetes_version`, `cpus` 2, `memory_mib` 2048, `disk_gib` 20, `network` default, `user_data`, `ssh_authorized_keys`, `hostname`, `metadata`, `require_attestation` true, `wait_for` ready) | `POST /api/v1/vms` | `create_vm` | yes |
+| Create a VM (`name`, `image`, `kubernetes_version`, `cpus` 2, `memory_mib` 2048, `disk_gib` 20, `network` default, `user_data`, `ssh_authorized_keys`, `hostname`, `metadata`, `require_attestation` true, `layer_certificates`, `wait_for` ready) | `POST /api/v1/vms` | `create_vm` | yes |
 | Boot a stopped or failed VM from its disk | `POST /api/v1/vms/{id}/start` | `start_vm` | yes |
 | Power a VM down (ACPI, then SIGTERM/SIGKILL after `--stop-timeout`) | `POST /api/v1/vms/{id}/stop` | `stop_vm` | yes |
 | Stop, then start | `POST /api/v1/vms/{id}/reboot` | `reboot_vm` | yes |
@@ -157,7 +157,7 @@ does the following in order:
    waits for containerd. A VM without a Kubernetes version skips it.
 9. **User-data's units.** CAPI's kubeadm unit, ordered `After=vm-kubernetes.service`, runs
    `kubeadm init|join`.
-10. **Attestation, ready stage.** `vm-agent attest --stage=ready` quotes PCRs 0-7, 11 and 13
+10. **Attestation, ready stage.** `vm-agent attest --stage=ready` quotes PCRs 0-7, 11, 13 and 15
     once the phase path is `enter-initrd:leave-initrd:sysinit:ready`; recorded for
     `get_vm_attestation`.
 11. **READY.** PID 1 sends `READY=1` over vsock when the boot transaction is complete, so
@@ -229,6 +229,7 @@ PCR digest matches the PCR values sent, and then the values:
 | 11 | `policy.json` `pcr11[<phase path>]` | the exact UKI (kernel, initrd, command line) and its boot phase |
 | 0, 2, 3, 4, 6, 7 | `policy.json` `golden.sha256` | firmware code, option ROMs, boot loader and UKI, Secure Boot policy |
 | 13 (ready stage) | `policy.json` `pcr13[<kubernetes version>]`, golden 13 for a VM without one | the exact Kubernetes sysext, or none |
+| 15 (ready stage) | replay of `userspace_log`; its `layer-certificate:<sha256>` words against the VM's `layer_certificates`, in order | the installation layer certificates the initrd enrolled, exactly those served |
 | 1, 5 | recorded, not compared | SMBIOS tables with per-VM credentials, the boot entry, the GPT with per-install UUIDs |
 
 The attestation key is pinned per VM on the first verified initrd quote (trust on first

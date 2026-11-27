@@ -22,6 +22,7 @@
 //	/user-data                     GET     CAPI bootstrap data (Ignition JSON), gated, see below
 //	/instance-id                   GET     vm-manager's VM ID
 //	/kubernetes-version            GET     version to pass to systemd-sysupdate, see below
+//	/layer-certificates            GET     installation layer certificates, see below
 //	/metadata/<k>                  GET     free-form per-VM values
 //	/attest/nonce                  GET     fresh nonce for the TPM quote
 //	/attest/quote                  POST    QuoteRequest JSON -> QuoteResult JSON
@@ -53,6 +54,20 @@
 // (giantswarm-vm-base_@v_@u.root.raw etc. under /sysupdate/base/,
 // kubernetes_@v.raw under /sysupdate/kubernetes/); the ArtifactSource is only
 // asked for what the guest requests, directory listings are never produced.
+//
+// # Layer certificates
+//
+// /layer-certificates is the installation's layer certificates of create_vm,
+// concatenated PEM CERTIFICATE blocks (each ending in a newline) in the
+// caller's order; 404 when the VM has none. The initrd enrolls each into the
+// .dm-verity keyring and, in the same order and before sealing the keyring,
+// extends PCR 15 with
+//
+//	systemd-pcrextend --pcr=15 layer-certificate:<lowercase hex sha256 of the DER>
+//
+// The ready-stage quote covers PCR 15 and carries systemd's userspace
+// measurement log; the verifier replays it and requires exactly the served
+// certificates in order (internal/attest).
 //
 // # Keeping the image in sync
 //

@@ -23,6 +23,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/layercert/layercerttest"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/server"
 	"github.com/giantswarm/vm-manager/internal/vm"
@@ -270,10 +271,12 @@ func TestMCPContract(t *testing.T) {
 	// VM lifecycle with wait_for none: the installer is started and the
 	// call returns at once.
 	var v vm.VM
+	cert := layercerttest.New(t, "installation")
 	s.call(api.ToolCreateVM, map[string]any{
 		"name": "node-1", "network": testNetwork, "wait_for": "none",
 		"user_data": `{"ignition":{"version":"3.4.0"}}`, "metadata": map[string]any{"role": "control-plane"},
 		"ssh_authorized_keys": []string{"ssh-ed25519 AAAA user@laptop"},
+		"layer_certificates":  []string{cert.PEM},
 	}, &v)
 	assert.NotEmpty(t, v.ID)
 	assert.Equal(t, vm.StateInstalling, v.State)
@@ -286,6 +289,9 @@ func TestMCPContract(t *testing.T) {
 	assert.True(t, v.RequireAttestation)
 	assert.Equal(t, "10.10.0.2", v.IP)
 	assert.Equal(t, map[string]string{"role": "control-plane"}, v.Metadata)
+	assert.Equal(t, []string{cert.PEM}, v.LayerCertificates)
+	assert.Regexp(t, `^invalid_request: .*layer certificate 0: block 0 is a "EC PRIVATE KEY" block`,
+		s.errText(api.ToolCreateVM, map[string]any{"name": "node-2", "network": testNetwork, "wait_for": "none", "layer_certificates": []string{cert.KeyPEM}}))
 
 	var got, restGot vm.VM
 	s.call(api.ToolGetVM, map[string]any{"id": v.ID}, &got)

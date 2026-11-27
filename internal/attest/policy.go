@@ -101,6 +101,11 @@ type Policy struct {
 	// KubernetesVersion selects the PCR13 entry for the VM whose quote is
 	// verified. The PolicyProvider sets it; policy.json does not carry it.
 	KubernetesVersion string `json:"-"`
+	// LayerCertificates are the sha256 digests (layercert.Digests) of the
+	// installation layer certificates the IMDS serves the VM, in order; the
+	// ready quote's PCR 15 must measure exactly these. The PolicyProvider
+	// sets it; policy.json does not carry it.
+	LayerCertificates []string `json:"-"`
 }
 
 // Firmware identifies a build of the firmware code image VMs boot with, as
@@ -235,11 +240,11 @@ func PhaseFor(stage imds.Stage) string {
 }
 
 // RequiredPCRs are the indexes a stage's quote must cover: 0-7 and 11, plus
-// 13 at the ready stage.
+// 13 and 15 at the ready stage.
 func RequiredPCRs(stage imds.Stage) []int {
 	pcrs := append(append([]int(nil), firmwarePCRs...), PCRUKI)
 	if stage == imds.StageReady {
-		pcrs = append(pcrs, PCRSysext)
+		pcrs = append(pcrs, PCRSysext, PCRSystemIdentity)
 	}
 	return pcrs
 }

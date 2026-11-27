@@ -2,6 +2,7 @@ package vm_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/giantswarm/vm-manager/internal/apierr"
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/layercert/layercerttest"
+	"github.com/giantswarm/vm-manager/internal/vm"
 	"github.com/giantswarm/vm-manager/internal/vm/vmtest"
 )
 
@@ -133,4 +136,60 @@ func TestQuoteDetailsRecordedAndForgotten(t *testing.T) {
 
 	require.NoError(t, h.svc.Delete(h.ctx, v.ID))
 	assert.Equal(t, []string{v.ID}, att.forgot)
+}
+
+func TestLayerCertificatesServedAndRequired(t *testing.T) {
+	h := newHarness(t)
+	a, b := layercerttest.New(t, "a"), layercerttest.New(t, "b")
+	s := h.spec("certs")
+	s.LayerCertificates = []string{strings.ReplaceAll(b.PEM, "\n", "\r\n"), "\n" + a.PEM}
+	v, err := h.svc.Create(h.ctx, s)
+	require.NoError(t, err)
+	assert.Equal(t, []string{b.PEM, a.PEM}, v.LayerCertificates, "canonical PEM in the caller's order")
+
+	check := func() {
+		t.Helper()
+		got, err := h.svc.Get(v.ID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{b.PEM, a.PEM}, got.LayerCertificates)
+		inst, ok := h.svc.LookupByIP(h.ctx, netip.MustParseAddr(got.IP))
+		require.True(t, ok)
+		assert.Equal(t, []string{b.PEM, a.PEM}, inst.LayerCertificates, "served to the guest in order")
+	}
+	check()
+
+	h.restartWithPolicy(`{"pcr11":{"enter-initrd":"` + strings.Repeat("a", 64) + `","enter-initrd:leave-initrd:sysinit:ready":"` + strings.Repeat("b", 64) + `"}}`)
+	check()
+	p, err := h.svc.PolicyFor(h.ctx, v.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{b.Digest, a.Digest}, p.LayerCertificates, "what pcr 15 must measure")
+
+	plain := h.create("plain")
+	p, err = h.svc.PolicyFor(h.ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Empty(t, p.LayerCertificates, "none served, none measured")
+
+	_, err = h.svc.Create(h.ctx, func() vm.Spec { s := h.spec("dup"); s.LayerCertificates = []string{a.PEM, a.PEM}; return s }())
+	assert.ErrorIs(t, err, apierr.ErrInvalid)
+	assert.ErrorContains(t, err, "repeats certificate 0")
+}
+
+func TestReadyQuoteRecordsLayerCertificates(t *testing.T) {
+	h := newHarness(t)
+	att := &detailedAttestor{results: map[string]attest.Result{}}
+	h.attestor = att
+	h.restart()
+	v := h.create("ready")
+
+	a := h.svc.IMDSDeps().Attestor
+	nonce, err := a.Nonce(h.ctx, v.ID)
+	require.NoError(t, err)
+	att.results[v.ID+"/ready"] = attest.Result{LayerCertificates: []string{"aa", "bb"}}
+	_, err = a.SubmitQuote(h.ctx, v.ID, imds.QuoteRequest{Stage: imds.StageReady, Nonce: nonce})
+	require.NoError(t, err)
+
+	got, err := h.svc.Attestation(v.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Ready)
+	assert.Equal(t, []string{"aa", "bb"}, got.Ready.LayerCertificates)
 }

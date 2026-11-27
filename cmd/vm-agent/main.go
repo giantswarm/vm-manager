@@ -30,7 +30,9 @@
 // (images/mkosi.images/base) After=vm-kubernetes.service and
 // systemd-pcrphase.service, Before=multi-user.target, running `vm-agent
 // attest --stage=ready`, so the quote covers the Kubernetes sysext
-// measurement (PCR 13) and the full PCR 11 phase path and precedes READY=1.
+// measurement (PCR 13), the layer certificates the initrd enrolled (PCR 15,
+// whose words the verifier reads from systemd's userspace measurement log)
+// and the full PCR 11 phase path and precedes READY=1.
 // Both units are Type=oneshot without Restart= or OnFailure=: a rejection
 // (exit 2) is a policy decision the host has logged and re-quoting the same
 // PCRs cannot change it; the unit fails visibly and the boot goes on (with
@@ -135,8 +137,8 @@ func newAttestCmd(build buildFunc) *cobra.Command {
 		Use:   "attest --stage=initrd|ready",
 		Short: "Quote the stage's PCRs and post the quote to the IMDS",
 		Long: `attest fetches a nonce from the IMDS, quotes PCRs 0-7 and 11 (stage initrd)
-or 0-7, 11 and 13 (stage ready) with the persistent attestation key and posts
-the quote. Exit 0: verified; 2: rejected by the verifier; 1: any other error.`,
+or 0-7, 11, 13 and 15 (stage ready) with the persistent attestation key and
+posts the quote with the firmware and systemd measurement logs. Exit 0: verified; 2: rejected by the verifier; 1: any other error.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := quote.Options{Device: tpmDev}

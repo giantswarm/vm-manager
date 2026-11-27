@@ -88,6 +88,13 @@ It allocates a disk on the storage provider, a vTPM, a network lease and a vsock
       "description": "Kubernetes sysext version served as /kubernetes-version; default: the newest the image offers. See get_image",
       "type": "string"
     },
+    "layer_certificates": {
+      "description": "Installation layer certificates, PEM X.509, at most 16; served in order as /layer-certificates, which the ready attestation must measure exactly",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "memory_mib": {
       "description": "Memory in MiB, default 2048, at least 256",
       "type": "number"

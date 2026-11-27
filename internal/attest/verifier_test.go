@@ -1,7 +1,9 @@
 package attest_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/agent/quote"
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/layercert"
 	"github.com/giantswarm/vm-manager/internal/tpmquote"
 	"github.com/giantswarm/vm-manager/internal/tpmquote/quotetest"
 )
@@ -38,6 +41,9 @@ type env struct {
 	policyErr error
 	now       time.Time
 	v         *attest.Verifier
+	// records is systemd's userspace measurement log, one record per
+	// element, posted with every quote.
+	records [][]byte
 }
 
 func newEnv(t *testing.T, learn bool) *env {
@@ -114,7 +120,24 @@ func (e *env) request(ak *quotetest.AK, stage imds.Stage, pcrs ...int) imds.Quot
 		bank[fmt.Sprint(i)] = hex.EncodeToString(v)
 	}
 	return imds.QuoteRequest{Stage: stage, Nonce: nonce, AKPub: ak.PubBytes, Quote: quote, Signature: sig,
-		PCRs: map[string]map[string]string{attest.Bank: bank}}
+		PCRs: map[string]map[string]string{attest.Bank: bank}, UserspaceLog: bytes.Join(e.records, nil)}
+}
+
+// measure extends PCR 15 with each word the way systemd-pcrextend does and
+// logs it like systemd.
+func (e *env) measure(words ...string) {
+	for _, w := range words {
+		e.sim.Extend(attest.PCRSystemIdentity, w)
+		e.records = append(e.records, logRecord(w, w))
+	}
+}
+
+// logRecord is a record of systemd's userspace measurement log claiming
+// word, with the sha256 digest of extended.
+func logRecord(word, extended string) []byte {
+	sum := sha256.Sum256([]byte(extended))
+	return fmt.Appendf(nil, "\x1e{\"pcr\":%d,\"digests\":[{\"hashAlg\":\"sha256\",\"digest\":%q}],\"content_type\":\"systemd\",\"content\":{\"string\":%q,\"eventType\":\"phase\"}}\n",
+		attest.PCRSystemIdentity, hex.EncodeToString(sum[:]), word)
 }
 
 func (e *env) submit(req imds.QuoteRequest) imds.QuoteResult {
@@ -149,7 +172,8 @@ func TestVerifierAcceptsInitrdAndReady(t *testing.T) {
 	r, ok = e.v.Result(vmID, imds.StageReady)
 	require.True(t, ok)
 	assert.Equal(t, []int{13}, r.Learned)
-	assert.Len(t, r.PCRs, 10)
+	assert.Len(t, r.PCRs, 11)
+	assert.Empty(t, r.LayerCertificates, "none served, none measured")
 	assert.Equal(t, e.policy.PCR11[attest.PhaseReady], r.PCRs[11], "software-predicted phase path matches the TPM")
 
 	// Once golden has PCR 13 it is compared.
@@ -488,4 +512,98 @@ func TestVerifierAcceptsAgentQuotes(t *testing.T) {
 func TestNewRequiresPolicies(t *testing.T) {
 	_, err := attest.New(attest.Options{})
 	assert.ErrorContains(t, err, "Policies")
+}
+
+func TestVerifierComparesLayerCertificates(t *testing.T) {
+	digest := func(s string) string {
+		sum := sha256.Sum256([]byte(s))
+		return hex.EncodeToString(sum[:])
+	}
+	a, b := digest("certificate a"), digest("certificate b")
+	wa, wb := layercert.Word(a), layercert.Word(b)
+	const machineID = "machine-id:0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name   string
+		served []string
+		words  []string
+		// log rewrites the records posted, nil posts them as measured.
+		log  func(records [][]byte) [][]byte
+		want string // "" verifies
+		// recorded is what the result shows the node measured.
+		recorded []string
+	}{
+		{name: "matching set", served: []string{a, b}, words: []string{machineID, wa, wb}, recorded: []string{a, b}},
+		{name: "none served, none measured", words: []string{machineID}},
+		{name: "nothing in pcr 15", served: nil},
+		{name: "missing", served: []string{a, b}, words: []string{wa}, want: "missing " + b, recorded: []string{a}},
+		{name: "extra", served: []string{a}, words: []string{wa, wb}, want: "not served " + b, recorded: []string{a, b}},
+		{name: "measured though none served", words: []string{machineID, wa}, want: "not served " + a, recorded: []string{a}},
+		{name: "none measured though served", served: []string{a}, words: []string{machineID}, want: "missing " + a},
+		{name: "reordered", served: []string{a, b}, words: []string{wb, wa}, want: "measured in the order " + b + ", " + a, recorded: []string{b, a}},
+		{
+			name: "log lacks a record", served: []string{a}, words: []string{machineID, wa},
+			log:  func(r [][]byte) [][]byte { return r[:1] },
+			want: "pcr 15: the 1 pcr 15 records of the userspace log replay to",
+		},
+		{
+			name: "no log", served: []string{a}, words: []string{wa},
+			log:  func([][]byte) [][]byte { return nil },
+			want: "pcr 15: the 0 pcr 15 records",
+		},
+		{
+			name: "record claims another word", served: []string{b}, words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{logRecord(wb, wa)} },
+			want: "its sha256 digest is not the digest of",
+		},
+		{
+			name: "records after the quote", served: []string{a}, words: []string{wa},
+			log:      func(r [][]byte) [][]byte { return append(r, logRecord(wb, wb)) },
+			recorded: []string{a},
+		},
+		{
+			name: "malformed digest", words: []string{layercert.WordPrefix + strings.ToUpper(a)},
+			want: "is not layer-certificate:<lowercase hex sha256>",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, false)
+			e.policy.LayerCertificates = tc.served
+			require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+			e.toReady()
+			e.measure(tc.words...)
+			if tc.log != nil {
+				e.records = tc.log(e.records)
+			}
+
+			res := e.submit(e.request(e.ak, imds.StageReady))
+			r, ok := e.v.Result(vmID, imds.StageReady)
+			require.True(t, ok)
+			assert.Equal(t, tc.recorded, nilIfEmpty(r.LayerCertificates))
+			if tc.want == "" {
+				assert.True(t, res.Verified, res.Message)
+				if len(tc.recorded) > 0 {
+					assert.Contains(t, res.Message, fmt.Sprintf("pcr 15 %d layer certificates", len(tc.recorded)))
+				}
+				return
+			}
+			assert.False(t, res.Verified)
+			assert.Contains(t, res.Message, tc.want)
+		})
+	}
+}
+
+func TestVerifierRequiresPCR15AtReady(t *testing.T) {
+	e := newEnv(t, false)
+	require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+	e.toReady()
+	res := e.submit(e.request(e.ak, imds.StageReady, 0, 1, 2, 3, 4, 5, 6, 7, 11, 13))
+	assert.False(t, res.Verified)
+	assert.Contains(t, res.Message, "also needs 15")
+}
+
+func nilIfEmpty(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/giantswarm/vm-manager/internal/apierr"
+	"github.com/giantswarm/vm-manager/internal/layercert"
 	"github.com/giantswarm/vm-manager/internal/network"
 	"github.com/giantswarm/vm-manager/internal/runtime/proc"
 	"github.com/giantswarm/vm-manager/internal/runtime/qemu"
@@ -109,6 +110,11 @@ type Spec struct {
 	Zone   string `json:"zone,omitempty"`
 	// RequireAttestation gates /user-data behind a verified initrd quote.
 	RequireAttestation bool `json:"requireAttestation"`
+	// LayerCertificates are the installation's layer certificates, one
+	// canonical PEM certificate per element in the caller's order
+	// (layercert.Normalize), served as /layer-certificates; the ready quote
+	// must measure exactly these into PCR 15.
+	LayerCertificates []string `json:"layerCertificates,omitempty"`
 	// WaitFor makes Create block until the milestone is reached.
 	WaitFor WaitFor `json:"-"`
 }
@@ -116,8 +122,8 @@ type Spec struct {
 // Quote is the recorded outcome of one attestation stage. AKFingerprint,
 // PCRs and Learned are filled when the configured Attestor is the verifier
 // (internal/attest): the sha256 fingerprint of the key that signed the
-// quote, the quoted sha256 PCR values by index, and the PCRs accepted
-// without a golden value in the image policy.
+// quote, the quoted sha256 PCR values by index, the PCRs accepted without a
+// golden value in the image policy, and the layer certificates measured.
 type Quote struct {
 	Verified      bool           `json:"verified"`
 	Message       string         `json:"message,omitempty"`
@@ -125,6 +131,9 @@ type Quote struct {
 	AKFingerprint string         `json:"akFingerprint,omitempty"`
 	PCRs          map[int]string `json:"pcrs,omitempty"`
 	Learned       []int          `json:"learned,omitempty"`
+	// LayerCertificates are the sha256 digests of the layer certificates
+	// the ready quote measured into PCR 15, in order.
+	LayerCertificates []string `json:"layerCertificates,omitempty"`
 }
 
 // Attestation summarizes the current boot's attestation; it is reset on every
@@ -211,6 +220,7 @@ type VM struct {
 func (v *VM) clone() *VM {
 	c := *v
 	c.SSHAuthorizedKeys = append([]string(nil), v.SSHAuthorizedKeys...)
+	c.LayerCertificates = append([]string(nil), v.LayerCertificates...)
 	if v.Metadata != nil {
 		c.Metadata = make(map[string]string, len(v.Metadata))
 		for k, val := range v.Metadata {
@@ -250,6 +260,7 @@ const (
 var labelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // validate checks the caller-controlled fields; defaults are applied first.
+// Layer certificates are kept in their canonical form (layercert.Normalize).
 func (s *Spec) validate() error {
 	var problems []string
 	if len(s.Name) > MaxNameLen || !labelRE.MatchString(s.Name) {
@@ -283,6 +294,11 @@ func (s *Spec) validate() error {
 			problems = append(problems, "ssh authorized keys must be single lines")
 			break
 		}
+	}
+	if certs, err := layercert.Normalize(s.LayerCertificates); err != nil {
+		problems = append(problems, err.Error())
+	} else {
+		s.LayerCertificates = certs
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("%w: %s", apierr.ErrInvalid, strings.Join(problems, "; "))
