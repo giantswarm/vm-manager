@@ -135,9 +135,15 @@ func (e *env) measure(words ...string) {
 // logRecord is a record of systemd's userspace measurement log claiming
 // word, with the sha256 digest of extended.
 func logRecord(word, extended string) []byte {
+	return rawRecord("systemd", fmt.Sprintf(`{"string":%q,"eventType":"phase"}`, word), extended)
+}
+
+// rawRecord is a PCR 15 record of the userspace log with the given content
+// type and content (JSON), with the sha256 digest of extended.
+func rawRecord(contentType, content, extended string) []byte {
 	sum := sha256.Sum256([]byte(extended))
-	return fmt.Appendf(nil, "\x1e{\"pcr\":%d,\"digests\":[{\"hashAlg\":\"sha256\",\"digest\":%q}],\"content_type\":\"systemd\",\"content\":{\"string\":%q,\"eventType\":\"phase\"}}\n",
-		attest.PCRSystemIdentity, hex.EncodeToString(sum[:]), word)
+	return fmt.Appendf(nil, "\x1e{\"pcr\":%d,\"digests\":[{\"hashAlg\":\"sha256\",\"digest\":%q}],\"content_type\":%q,\"content\":%s}\n",
+		attest.PCRSystemIdentity, hex.EncodeToString(sum[:]), contentType, content)
 }
 
 func (e *env) submit(req imds.QuoteRequest) imds.QuoteResult {
@@ -563,6 +569,25 @@ func TestVerifierComparesLayerCertificates(t *testing.T) {
 		{
 			name: "malformed digest", words: []string{layercert.WordPrefix + strings.ToUpper(a)},
 			want: "is not layer-certificate:<lowercase hex sha256>",
+		},
+		{
+			name: "extra certificate relabelled", served: []string{a}, words: []string{wa, wb},
+			log:  func(r [][]byte) [][]byte { return [][]byte{r[0], logRecord(machineID, wb)} },
+			want: `userspace log record 2: its sha256 digest is not the digest of "machine-id:`,
+		},
+		{
+			name: "not a systemd record", words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{rawRecord("pcrlock", fmt.Sprintf(`{"string":%q}`, wa), wa)} },
+			want: "not a systemd record with a string content",
+		},
+		{
+			name: "record without a string", words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{rawRecord("systemd", `{"eventType":"phase"}`, wa)} },
+			want: "not a systemd record with a string content",
+		},
+		{
+			name: "unknown measurement", words: []string{machineID, "cryptsetup:root:00000000-0000-0000-0000-000000000001"},
+			want: `userspace log record 2: "cryptsetup:root:00000000-0000-0000-0000-000000000001" is not a pcr 15 measurement of the image (machine-id:, file-system:, layer-certificate:)`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

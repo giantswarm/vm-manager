@@ -353,8 +353,12 @@ and recorded, not compared: see the open point below), and at `ready` PCR 13 equ
 policy's `pcr13` entry for the VM's Kubernetes version (written by
 `images/scripts/verify-kubernetes`; golden 13 when the VM has none). At `ready` the
 verifier also replays the PCR 15 records of `userspace_log` (systemd's
-`/run/log/systemd/tpm2-measure.log`) to the quoted PCR 15 and requires the
-`layer-certificate:<sha256 of the DER>` words among them to name exactly the certificates
+`/run/log/systemd/tpm2-measure.log`) to the quoted PCR 15. Every PCR 15 record is bound to
+its content before it is replayed: a systemd string record whose sha256 digest is the
+sha256 of its word, the word a `machine-id:`, `file-system:` or `layer-certificate:`
+measurement; any other record (another content type, a digest that is not its word's, an
+unknown word such as systemd-cryptsetup's HMAC of a volume key) rejects the quote. The
+`layer-certificate:<sha256 of the DER>` words must name exactly the certificates
 `/layer-certificates` serves, in order (none served, none measured); the initrd extends
 PCR 15 with one such word per certificate before it seals the `.dm-verity` keyring, and
 `get_vm_attestation` shows the digests the node measured (`ready.layerCertificates`). Only the

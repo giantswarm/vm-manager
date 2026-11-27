@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/giantswarm/vm-manager/internal/layercert"
@@ -26,7 +28,7 @@ const PCRSystemIdentity = 15
 //	{"pcr":15,"digests":[{"hashAlg":"sha256","digest":"<hex>"},...],
 //	 "content_type":"systemd","content":{"string":"<word>",...}}
 //
-// Records without "pcr" (NvPCR extensions) are skipped.
+// Records of other PCRs and without "pcr" (NvPCR extensions) are skipped.
 type logRecord struct {
 	PCR     *int `json:"pcr"`
 	Digests []struct {
@@ -40,13 +42,31 @@ type logRecord struct {
 // recordSeparator starts every JSON-SEQ record (RFC 7464).
 const recordSeparator = 0x1e
 
+// pcr15Words are the prefixes of the words a guest of the image measures
+// into PCR 15: systemd-pcrmachine.service's machine ID, systemd-pcrfs's file
+// systems and the initrd's layer certificates (systemd's
+// docs/TPM2_PCR_MEASUREMENTS.md). Any other word rejects the log, so a new
+// kind of measurement fails loudly instead of being trusted; among them is
+// systemd-cryptsetup's volume key measurement, whose digest is an HMAC the
+// verifier cannot recompute (the image has no LUKS volume).
+var pcr15Words = []string{"machine-id:", "file-system:", layercert.WordPrefix}
+
+// maxWordInMessage bounds a guest-supplied word quoted in a verdict.
+const maxWordInMessage = 128
+
 // measuredLayerCertificates replays the PCR 15 records of the userspace log
 // in the sha256 bank from zero and returns the layer certificate digests the
-// records up to the quoted value carry, in order. Every record extends the
-// replay; only layer certificate words are collected, and their digest must
-// be the sha256 of the word. The replay stops at the first record that
-// reproduces the quoted value (records appended after the quote was taken
-// are not covered by it); none reproducing it is an error.
+// records up to the quoted value carry, in order.
+//
+// Every PCR 15 record is bound to its content before its digest is
+// replayed: it must be a systemd string record whose sha256 digest is the
+// sha256 of its word, and the word must start with one of pcr15Words; a
+// layer certificate word must name a well-formed digest. Any other record
+// rejects the whole log, so no digest whose content the verifier cannot
+// check reaches the replay (a record relabelled as another word cannot hide
+// a certificate). The replay stops at the first record that reproduces the
+// quoted value (records appended after the quote was taken are not covered
+// by it); none reproducing it is an error.
 func measuredLayerCertificates(log, quoted []byte) ([]string, error) {
 	pcr := make([]byte, sha256.Size)
 	if bytes.Equal(pcr, quoted) {
@@ -67,18 +87,11 @@ func measuredLayerCertificates(log, quoted []byte) ([]string, error) {
 			continue
 		}
 		n++
-		digest, err := rec.sha256()
+		digest, cert, err := rec.bound()
 		if err != nil {
 			return nil, fmt.Errorf("userspace log record %d: %v", i, err)
 		}
-		if word, ok := rec.word(); ok && strings.HasPrefix(word, layercert.WordPrefix) {
-			cert, ok := layercert.DigestFromWord(word)
-			if !ok {
-				return nil, fmt.Errorf("userspace log record %d: %q is not %s<lowercase hex sha256>", i, word, layercert.WordPrefix)
-			}
-			if sum := sha256.Sum256([]byte(word)); !bytes.Equal(sum[:], digest) {
-				return nil, fmt.Errorf("userspace log record %d: its sha256 digest is not the digest of %q", i, word)
-			}
+		if cert != "" {
 			digests = append(digests, cert)
 		}
 		h := sha256.New()
@@ -90,6 +103,39 @@ func measuredLayerCertificates(log, quoted []byte) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("the %d pcr 15 records of the userspace log replay to %x, the quote has %x", n, pcr, quoted)
+}
+
+// bound checks a PCR 15 record against its content and returns its sha256
+// digest and, for a layer certificate word, the certificate digest it names.
+func (r logRecord) bound() (digest []byte, cert string, err error) {
+	word, ok := r.word()
+	if !ok {
+		return nil, "", errors.New("not a systemd record with a string content, which pcr 15 does not accept")
+	}
+	if digest, err = r.sha256(); err != nil {
+		return nil, "", err
+	}
+	if sum := sha256.Sum256([]byte(word)); !bytes.Equal(sum[:], digest) {
+		return nil, "", fmt.Errorf("its sha256 digest is not the digest of %s", quoteWord(word))
+	}
+	if !slices.ContainsFunc(pcr15Words, func(prefix string) bool { return strings.HasPrefix(word, prefix) }) {
+		return nil, "", fmt.Errorf("%s is not a pcr 15 measurement of the image (%s)", quoteWord(word), strings.Join(pcr15Words, ", "))
+	}
+	if strings.HasPrefix(word, layercert.WordPrefix) {
+		if cert, ok = layercert.DigestFromWord(word); !ok {
+			return nil, "", fmt.Errorf("%s is not %s<lowercase hex sha256>", quoteWord(word), layercert.WordPrefix)
+		}
+	}
+	return digest, cert, nil
+}
+
+// quoteWord quotes a guest-supplied word for a verdict, cut to
+// maxWordInMessage bytes.
+func quoteWord(word string) string {
+	if len(word) > maxWordInMessage {
+		return strconv.Quote(word[:maxWordInMessage]) + "..."
+	}
+	return strconv.Quote(word)
 }
 
 // sha256 is the record's digest in the sha256 bank.

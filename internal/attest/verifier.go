@@ -31,11 +31,14 @@
 //     server boots (Policy.GoldenFirmware, Options.Firmware), which tells a
 //     firmware change apart from a boot that differs on the same firmware;
 //  8. at the ready stage, the PCR 15 records of the userspace log
-//     (QuoteRequest.UserspaceLog) replay to the quoted PCR 15, and the layer
-//     certificate words among them name exactly the certificates the IMDS
-//     serves the VM (Policy.LayerCertificates), in that order; none served
-//     means none measured. Result.LayerCertificates records what the node
-//     measured, also when the comparison fails.
+//     (QuoteRequest.UserspaceLog) replay to the quoted PCR 15, every one of
+//     them bound to its content (a systemd string record whose sha256 digest
+//     is the sha256 of its word, the word a machine-id:, file-system: or
+//     layer-certificate: measurement; anything else rejects the log), and
+//     the layer certificate words among them name exactly the certificates
+//     the IMDS serves the VM (Policy.LayerCertificates), in that order; none
+//     served means none measured. Result.LayerCertificates records what the
+//     node measured, also when the comparison fails.
 //
 // Every verdict is kept per VM and stage (Results) for get_vm_attestation
 // and `vm-manager image golden`.

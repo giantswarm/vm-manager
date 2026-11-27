@@ -67,7 +67,10 @@
 //
 // The ready-stage quote covers PCR 15 and carries systemd's userspace
 // measurement log; the verifier replays it and requires exactly the served
-// certificates in order (internal/attest).
+// certificates in order (internal/attest). Every PCR 15 record must be a
+// systemd string record whose sha256 digest is that of its word, and the
+// word a machine-id:, file-system: or layer-certificate: measurement: the
+// guest extends PCR 15 with nothing else.
 //
 // # Keeping the image in sync
 //
