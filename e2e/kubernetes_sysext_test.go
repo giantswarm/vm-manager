@@ -307,6 +307,9 @@ func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, sx syse
 	tables := g.sh(ctx, "dmsetup table --target verity")
 	t.Logf("verity devices:\n%s", tables)
 	assert.Equal(t, "3", g.sh(ctx, "dmsetup table --target verity | grep -c root_hash_sig_key_desc || true"), "the root and both extensions verified by the kernel")
+	// Each merged image sits on one loop device: a second device backing the
+	// same file is the leftover of an earlier merge (images/README.md).
+	assert.ElementsMatch(t, []string{extensionsDir + "/" + sx.kubernetes.file, extensionsDir + "/" + sx.cni.file}, strings.Fields(g.sh(ctx, "losetup --list --noheadings --output BACK-FILE")), "the loop devices back exactly the merged extensions, each once")
 }
 
 // assertKubernetesRunning checks that the node stack of the extension is

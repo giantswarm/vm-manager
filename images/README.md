@@ -560,8 +560,12 @@ address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
 3. `systemd-sysupdate --component=kubernetes update <kv>` (the transfer is
    `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`, `Verify=yes` against
    `/etc/systemd/import-pubring.pgp`, target `/var/lib/extensions/kubernetes_@v.raw`);
-   a present file is a no-op, so a reboot downloads nothing.
-4. `systemd-sysext refresh` merges it (the verity signature is checked against
+   a present file is a no-op, so a reboot downloads nothing. The image disables
+   `systemd-sysupdate-notify-sysext.socket`: through it every installed update would
+   make systemd-sysext refresh on its own, merging the Kubernetes extension alone before
+   the CNI one is pulled, and the processes `Upholds=` starts from that first merge
+   would keep its loop and verity device after the second.
+4. `systemd-sysext refresh` merges it, once (the verity signature is checked against
    `/usr/lib/verity.d/verity.crt`; the kernel's "Required key not available" lines in the
    journal are the keyring attempt before that). `EXTENSION_RELOAD_MANAGER=1` makes the
    refresh a daemon-reload, after which `Upholds=` of `multi-user.target` starts

@@ -18,6 +18,13 @@ enable run-initramfs-usr.mount
 # vm-manager triggers OS and kubernetes updates itself.
 disable systemd-sysupdate.timer
 disable systemd-sysupdate-reboot.timer
+# vm-kubernetes merges the Kubernetes and CNI sysexts once, after it pulled
+# both. systemd-sysupdate notifies this socket after every update it installs,
+# and systemd-sysext would then refresh after each pull: the Kubernetes
+# extension alone first, whose manager reload lets Upholds= start containerd
+# and kubelet from a /usr without the CNI extension, then both, leaving the
+# first merge's loop and verity device to whatever was started from it.
+disable systemd-sysupdate-notify-sysext.socket
 # Not part of a single-purpose VM image.
 disable systemd-homed.service
 disable systemd-homed-activate.service

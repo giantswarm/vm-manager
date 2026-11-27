@@ -19,9 +19,11 @@
 #     systemd-imds and systemd-pcrextend: systemd 262 no longer installs it in
 #     /usr/bin (updatectl is the command there), and images/scripts/verify
 #     checks every tool these scripts run is in the image.
-#  4. systemd-sysext refresh merges them (a no-op when systemd-sysext.service
-#     already merged these very files early in the boot). What systemd-sysext
-#     reports as merged and as present must be exactly these two images, and
+#  4. systemd-sysext refresh merges them, once: the image disables
+#     systemd-sysupdate-notify-sysext.socket, so no pull triggers a merge of
+#     its own (a no-op when systemd-sysext.service already merged these very
+#     files early in the boot). What systemd-sysext reports as merged and
+#     as present must be exactly these two images, and
 #     no extension-release file may name another; anything else fails the unit. The Kubernetes
 #     extension carries EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the
 #     manager and the Upholds= of multi-user.target starts containerd and
