@@ -3,7 +3,10 @@
 package e2e
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,6 +47,15 @@ const (
 	// containerdWithin: the merge's daemon-reload makes multi-user.target's
 	// Upholds= start containerd; READY=1 does not wait for that.
 	containerdWithin = 60 * time.Second
+)
+
+// The test-only sysext images/scripts/build-e2e-sysext builds next to the
+// image: firmware the base root lacks, in a DDI signed with the image's verity
+// key, merged from /run/extensions.
+const (
+	e2eSysextFile  = "e2e/ipe-e2e.raw"
+	e2eSysextGuest = "/run/extensions/ipe-e2e.raw"
+	e2eFirmware    = "regulatory.db"
 )
 
 // pulledLine is what /usr/lib/vm-manager/kubernetes logs after the download;
@@ -106,6 +118,11 @@ func TestKubernetesSysext(t *testing.T) {
 	assertKubernetesRunning(ctx, t, g, version)
 	assertCNIPlugins(ctx, t, g, sx, image.Certificate != "")
 	assertPCR13(ctx, t, g, sx)
+	if image.Certificate != "" {
+		// Before the stray extension: it merges and drops the test's own
+		// sysext, which neither that check nor vm-kubernetes may see.
+		assertSysextOnlyExecutes(ctx, t, g, image.Dir)
+	}
 	// Last: every run of the unit extends PCR 13 again.
 	assertStrayExtensionRefused(ctx, t, g, sx)
 
@@ -115,6 +132,83 @@ func TestKubernetesSysext(t *testing.T) {
 	m.call(ctx, api.ToolDeleteNetwork, map[string]any{"name": kubernetesNetwork}, &deleted)
 	assert.True(t, deleted.Deleted)
 	srv.stop()
+}
+
+// assertSysextOnlyExecutes proves the IPE policy's split (images/README.md,
+// IPE) with signed dm-verity devices that are not the base root: a file of the
+// Kubernetes sysext executes, but the kernel refuses it as a kernel module and
+// as a kexec image, and the firmware a second signed sysext of the test brings
+// (e2eSysextFile) as firmware (IPE_ACCESS records with ipe_op=KMODULE,
+// KEXEC_IMAGE, FIRMWARE and action=DENY), while the base root's own modules
+// still load. IPE judges the file before the module loader, the firmware
+// loader or kexec look at its content, so a sysext binary stands in for a .ko
+// and a kernel, and a placeholder for the firmware: the same call with a file
+// of the base root passes IPE and fails only at the format check. The audit
+// record names the path the kernel opened: the sysext's own for the module
+// and the firmware, a bind mount of it on the ESP for kexec.
+func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest, imageDir string) {
+	t.Helper()
+	const sysextFile = "/usr/bin/kubelet"
+	require.Contains(t, g.sh(ctx, "findmnt -n -o FSTYPE /usr"), "overlay", "the sysext is merged into /usr")
+	assert.Contains(t, g.sh(ctx, sysextFile+" --version"), "Kubernetes v", "a sysext binary executes")
+	denials := func(op string) string {
+		return g.sh(ctx, "journalctl -b -o cat --no-pager | grep -F 'ipe_op="+op+"' | grep -F 'action=DENY' || true")
+	}
+
+	// Kernel modules: the base root's load, the sysext's file is refused by
+	// IPE (EACCES) where a base root file fails as a module (ENOEXEC).
+	assert.Equal(t, "loaded", g.sh(ctx, "modprobe dummy && grep -q '^dummy ' /proc/modules && echo loaded"), "a base root module loads")
+	g.sh(ctx, "modprobe -r dummy")
+	assert.NotContains(t, g.sh(ctx, "insmod /usr/bin/true 2>&1 || true"), "Permission denied", "a base root file passes IPE as a module, failing only as one")
+	assert.Contains(t, g.sh(ctx, "insmod "+sysextFile+" 2>&1 || true"), "Permission denied", "a sysext file as a kernel module")
+	assert.Contains(t, denials("KMODULE"), "kubelet", "IPE refused the sysext file as a kernel module")
+
+	// Firmware: the test's sysext carries /usr/lib/firmware/regulatory.db,
+	// which the base root lacks; merged next to the Kubernetes sysext, it is
+	// what the firmware loader's default search finds when cfg80211 asks for
+	// it on load. cfg80211 asks once per load, and systemd-networkd's nl80211
+	// lookup loaded it at boot, before the merge: load it again.
+	raw, err := os.ReadFile(filepath.Join(imageDir, e2eSysextFile)) // #nosec G304 -- build artifact under the configured image dir
+	require.NoError(t, err, "the e2e sysext; run `make -C images e2e-sysext`")
+	g.put(ctx, e2eSysextGuest, raw)
+	g.sh(ctx, "systemd-sysext refresh")
+	require.Contains(t, g.sh(ctx, "systemd-sysext status --no-legend --no-pager"), "ipe-e2e", "the e2e sysext merged next to the Kubernetes and CNI sysexts")
+	t.Logf("cfg80211 before the reload: %s", g.sh(ctx, "{ grep '^cfg80211 ' /proc/modules || echo 'not loaded'; } && "+
+		"{ ! grep -q '^cfg80211 ' /proc/modules || modprobe -r cfg80211; } && modprobe cfg80211"))
+	assert.Eventually(t, func() bool { return strings.Contains(denials("FIRMWARE"), e2eFirmware) }, 30*time.Second, time.Second,
+		"IPE refused the e2e sysext's firmware\n%s", g.sh(ctx, "journalctl -b -k -o short-monotonic --no-pager | grep -iE 'regulatory|firmware|cfg80211|ipe|VFS' | tail -n 20 || true"))
+	// Unmerge the test's sysext again: the merged set is the Kubernetes and
+	// the CNI sysext alone for what follows (vm-kubernetes checks it).
+	g.sh(ctx, "rm -f "+e2eSysextGuest+" && systemd-sysext refresh")
+	require.NotContains(t, g.sh(ctx, "systemd-sysext status --no-legend --no-pager"), "ipe-e2e", "the e2e sysext unmerged")
+
+	// kexec: systemctl kexec loads the default boot entry's kernel with
+	// kexec_file_load(); a one-shot type 1 entry whose kernel is the sysext's
+	// file. The refused load leaves systemctl without a kernel to boot, so it
+	// does not reboot.
+	out := g.sh(ctx, `esp=$(bootctl --print-esp-path) && mkdir -p "$esp/loader/entries" && `+
+		`printf 'title ipe-e2e
+linux /ipe-e2e-kernel
+' > "$esp/loader/entries/ipe-e2e.conf" && touch "$esp/ipe-e2e-kernel" && `+
+		`mount --bind `+sysextFile+` "$esp/ipe-e2e-kernel" && bootctl set-oneshot ipe-e2e.conf; `+
+		`{ systemctl kexec 2>&1 || true; }; bootctl set-oneshot ''; umount "$esp/ipe-e2e-kernel"; rm -f "$esp/ipe-e2e-kernel" "$esp/loader/entries/ipe-e2e.conf"`)
+	assert.Contains(t, denials("KEXEC_IMAGE"), "ipe-e2e-kernel", "IPE refused the sysext file (bind-mounted on the ESP) as a kexec image\nsystemctl kexec: %s", out)
+	t.Logf("IPE denials of the sysexts:\n%s\n%s\n%s", denials("KMODULE"), denials("FIRMWARE"), denials("KEXEC_IMAGE"))
+}
+
+// put writes data to path in the guest in one exec_vm call: gzip, base64 on
+// the command line (exec_vm runs `sh -c <command>`, whose one argument the
+// kernel caps at 128 KiB), and the image's zstd, which reads gzip too.
+func (g *guest) put(ctx context.Context, path string, data []byte) {
+	g.m.t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(data)
+	require.NoError(g.m.t, err)
+	require.NoError(g.m.t, zw.Close())
+	enc := base64.StdEncoding.EncodeToString(buf.Bytes())
+	require.Less(g.m.t, len(enc), 96<<10, "%s compresses to %d bytes of base64, too long for one command", path, len(enc))
+	g.sh(ctx, "mkdir -p "+filepath.Dir(path)+" && printf %s "+enc+" | base64 -d | zstd -dcq > "+path)
 }
 
 // sysext is one published sysext file and the SHA256SUMS line

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Build the test-only sysext that e2e/kubernetes_sysext_test.go merges next to
+# the Kubernetes sysext, to prove that IPE refuses firmware from a signed
+# dm-verity device other than the base root (README.md, IPE):
+#
+#   build-e2e-sysext <build> <keys>
+#     build/e2e/ipe-e2e.raw    /usr/lib/firmware/regulatory.db, which the base
+#                              root lacks and cfg80211 requests when it loads
+#
+# A DDI as `systemd-repart --make-ddi=sysext` lays it out (erofs, dm-verity,
+# the root hash signed with the image's verity key), so the guest verifies and
+# merges it like the Kubernetes sysext. The firmware is a placeholder: IPE
+# judges the file before the firmware loader reads it. Nothing serves or
+# publishes build/e2e/ (the IMDS serves build/sysupdate/, `vm-manager image
+# push` takes the named image files); the e2e artifact of
+# .github/workflows/image.yml carries it.
+set -euo pipefail
+
+build="${1:?build dir}" keys="${2:?keys dir}"
+name=ipe-e2e
+out="$build/e2e/$name.raw"
+osrelease="$build/base/usr/lib/os-release"
+[[ -s "$osrelease" ]] || { echo "build-e2e-sysext: $osrelease missing; build the base tree first" >&2; exit 1; }
+
+tree="$(mktemp -d)"
+trap 'rm -rf "$tree"' EXIT
+install -d "$tree/usr/lib/firmware" "$tree/usr/lib/extension-release.d"
+echo "placeholder firmware of the vm-manager e2e tests" >"$tree/usr/lib/firmware/regulatory.db"
+# systemd-sysext merges an extension whose ID, and SYSEXT_LEVEL or VERSION_ID
+# when the host has them, match the host's os-release.
+{
+        grep -E '^(ID|VERSION_ID|SYSEXT_LEVEL)=' "$osrelease"
+        echo SYSEXT_SCOPE=system
+} >"$tree/usr/lib/extension-release.d/extension-release.$name"
+
+mkdir -p "$build/e2e"
+rm -f "$out"
+systemd-repart --offline=yes --make-ddi=sysext --copy-source="$tree" \
+        --private-key="$keys/verity.key" --certificate="$keys/verity.crt" \
+        --empty=create --size=auto --json=off "$out"
+echo "build-e2e-sysext: $out ($(stat -c %s "$out") bytes)"
