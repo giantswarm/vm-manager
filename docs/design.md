@@ -119,8 +119,9 @@ sysext; [images/README.md](../images/README.md) is the reference):
     directory on var, `/root` and `/opt` bind mounts, before `initrd-root-fs.target`; an
     exitrd so that `systemd-shutdown` can release the overlays and unmount var cleanly.
   - IPE: `lsm=…,ipe` and `systemd.verity_root_options=root-hash-signature=auto` on the UKI
-    command line, the signed policy `/etc/ipe/giantswarm-vm.p7b` (run only from
-    kernel-verified dm-verity), a manager drop-in that drops `CAP_MAC_ADMIN` once PID 1
+    command line, the signed policy in the initrd (run only from kernel-verified
+    dm-verity; kernel modules, firmware and kexec only from the base root, by its root
+    hash), handed to the real root through `/run/ipe`, a manager drop-in that drops `CAP_MAC_ADMIN` once PID 1
     loaded it, and `persistent-etc` keeping both out of the `/etc` overlay's reach.
   - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
     Ignition with its `ignition-*` units ported from upstream's `dracut/30ignition`
@@ -195,7 +196,8 @@ Phase B, installed boot (every boot from now on):
    stages, which write CAPI's files and systemd units (kubeadm config, the kubeadm unit)
    into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
    the stages run with an empty config.
-7. Real system: PID 1 first loads and activates the signed IPE policy from `/etc/ipe`
+7. Real system: PID 1 first loads and activates the signed IPE policy the initrd left in
+   `/run/ipe`
    and then drops `CAP_MAC_ADMIN` from every process's bounding set (the usermode
    helpers lost it on the kernel command line); from here on only code from
    kernel-verified dm-verity volumes runs (images/README.md, IPE). A reboot of the guest

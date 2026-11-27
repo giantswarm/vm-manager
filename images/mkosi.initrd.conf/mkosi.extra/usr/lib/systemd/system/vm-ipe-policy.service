@@ -1,0 +1,27 @@
+# Hands the IPE policy this initrd carries to the real root's PID 1: right
+# before the switch root it becomes the only policy in /run/ipe/ (which the
+# switch root moves to the real root), and nothing in /sysroot/etc/ipe/ can
+# mask or replace it. systemd loads and activates every policy in /etc/ipe,
+# /run/ipe and /usr/lib/ipe when it starts on the real root, before it starts
+# anything there. The initrd's own PID 1 found /run/ipe/ empty when it
+# started, so the initrd keeps running without a policy. See
+# images/README.md, IPE.
+[Unit]
+Description=IPE policy for the real root
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/images/README.md
+DefaultDependencies=no
+AssertPathExists=/etc/initrd-release
+# Last writer of /sysroot/etc before the switch root: after the persistent
+# /etc overlay and Ignition's files stage.
+After=initrd-fs.target persistent-etc.service ignition-complete.target ignition-files.service
+Before=initrd.target
+Conflicts=shutdown.target
+Before=shutdown.target
+# Without the policy the real root would run without IPE: fail closed.
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vm-manager/ipe-policy

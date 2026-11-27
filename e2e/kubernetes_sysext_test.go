@@ -106,6 +106,9 @@ func TestKubernetesSysext(t *testing.T) {
 	assertKubernetesPulled(ctx, t, g, version, file, line)
 	assertKubernetesRunning(ctx, t, g, version)
 	assertPCR13(ctx, t, g, wantPCR13)
+	if image.Certificate != "" {
+		assertSysextOnlyExecutes(ctx, t, g)
+	}
 
 	var deleted api.DeletedResponse
 	m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)
@@ -113,6 +116,55 @@ func TestKubernetesSysext(t *testing.T) {
 	m.call(ctx, api.ToolDeleteNetwork, map[string]any{"name": kubernetesNetwork}, &deleted)
 	assert.True(t, deleted.Deleted)
 	srv.stop()
+}
+
+// assertSysextOnlyExecutes proves the IPE policy's split (images/README.md,
+// IPE) with the Kubernetes sysext as the signed dm-verity device that is not
+// the base root: its files execute, but the kernel refuses them as a kernel
+// module, as firmware and as a kexec image (IPE_ACCESS records with ipe_op=
+// KMODULE, FIRMWARE, KEXEC_IMAGE and action=DENY), while the base root's own
+// modules still load. IPE judges the file before the module loader, the
+// firmware loader or kexec look at its content, so a sysext binary stands in
+// for a .ko, a firmware blob and a kernel: the same call with a file of the
+// base root passes IPE and fails only at the format check. The audit record
+// names the path the kernel opened: the sysext's own for the module and the
+// firmware (a symlink resolves to it), the bind mount on the ESP for kexec.
+func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest) {
+	t.Helper()
+	const sysextFile = "/usr/bin/kubelet"
+	require.Contains(t, g.sh(ctx, "findmnt -n -o FSTYPE /usr"), "overlay", "the sysext is merged into /usr")
+	assert.Contains(t, g.sh(ctx, sysextFile+" --version"), "Kubernetes v", "a sysext binary executes")
+	denials := func(op string) string {
+		return g.sh(ctx, "journalctl -b -o cat --no-pager | grep -F 'ipe_op="+op+"' | grep -F 'action=DENY' || true")
+	}
+
+	// Kernel modules: the base root's load, the sysext's file is refused by
+	// IPE (EACCES) where a base root file fails as a module (ENOEXEC).
+	assert.Equal(t, "loaded", g.sh(ctx, "modprobe dummy && grep -q '^dummy ' /proc/modules && echo loaded"), "a base root module loads")
+	g.sh(ctx, "modprobe -r dummy")
+	assert.NotContains(t, g.sh(ctx, "insmod /usr/bin/true 2>&1 || true"), "Permission denied", "a base root file passes IPE as a module, failing only as one")
+	assert.Contains(t, g.sh(ctx, "insmod "+sysextFile+" 2>&1 || true"), "Permission denied", "a sysext file as a kernel module")
+	assert.Contains(t, denials("KMODULE"), "kubelet", "IPE refused the sysext file as a kernel module")
+
+	// Firmware: cfg80211 asks for regulatory.db when it loads, from
+	// firmware_class.path first; the file there is the sysext's.
+	g.sh(ctx, "mkdir -p /run/ipe-e2e-fw && ln -sfn "+sysextFile+" /run/ipe-e2e-fw/regulatory.db && "+
+		"printf /run/ipe-e2e-fw > /sys/module/firmware_class/parameters/path && modprobe cfg80211")
+	assert.Eventually(t, func() bool { return strings.Contains(denials("FIRMWARE"), "kubelet") }, 30*time.Second, time.Second,
+		"IPE refused the sysext file as firmware\n%s", g.sh(ctx, "journalctl -b -k -o cat --no-pager | grep -iE 'regulatory|firmware|ipe' | tail -n 20 || true"))
+
+	// kexec: systemctl kexec loads the default boot entry's kernel with
+	// kexec_file_load(); a one-shot type 1 entry whose kernel is the sysext's
+	// file. The refused load leaves systemctl without a kernel to boot, so it
+	// does not reboot.
+	out := g.sh(ctx, `esp=$(bootctl --print-esp-path) && mkdir -p "$esp/loader/entries" && `+
+		`printf 'title ipe-e2e
+linux /ipe-e2e-kernel
+' > "$esp/loader/entries/ipe-e2e.conf" && touch "$esp/ipe-e2e-kernel" && `+
+		`mount --bind `+sysextFile+` "$esp/ipe-e2e-kernel" && bootctl set-oneshot ipe-e2e.conf; `+
+		`{ systemctl kexec 2>&1 || true; }; bootctl set-oneshot ''; umount "$esp/ipe-e2e-kernel"; rm -f "$esp/ipe-e2e-kernel" "$esp/loader/entries/ipe-e2e.conf"`)
+	assert.Contains(t, denials("KEXEC_IMAGE"), "ipe-e2e-kernel", "IPE refused the sysext file (bind-mounted on the ESP) as a kexec image\nsystemctl kexec: %s", out)
+	t.Logf("IPE denials of the sysext:\n%s\n%s\n%s", denials("KMODULE"), denials("FIRMWARE"), denials("KEXEC_IMAGE"))
 }
 
 // assertKubernetesPulled checks the pull unit and the file lifecycle: the
