@@ -221,8 +221,8 @@ Phase B, installed boot (every boot from now on):
    `/run/cluster-api/bootstrap-success.complete`. `vm-agent-attest.service` of the root
    (implemented: `images/mkosi.images/base`, `After=vm-kubernetes.service
    systemd-pcrphase.service`, `Before=multi-user.target`) runs `vm-agent attest
-   --stage=ready` and posts a second quote covering PCR 13 and the full phase path for
-   `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
+   --stage=ready` and posts a second quote covering PCRs 13 and 15 and the full phase path
+   for `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
    quote; the e2e measures 14 s from the installed boot to ready with a 2 s download.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
    Measured: 11 to 15 s from the installed boot to `READY=1` for the bare image, 11 s for a
@@ -342,6 +342,7 @@ table is the single source of truth and generates the hwdb record at image build
 | `/public-keys/0` | `IMDS_KEY_SSH_KEY` | first authorized key |
 | `/user-data` | none (Ignition's `ignition.config.url`) | CAPI bootstrap data as Ignition JSON; 503 + `Retry-After` while gated by attestation, 204 when the VM has none |
 | `/instance-id`, `/kubernetes-version`, `/cni-version`, `/metadata/<k>` | extra | plain values |
+| `/layer-certificates` | extra | the installation's layer certificates of `create_vm` as concatenated PEM in the caller's order; 404 when none |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |
 | `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` and `/cni-version` |
@@ -356,7 +357,23 @@ for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
 image policy's golden values recorded by `vm-manager image golden` (PCR 1 and 5 are quoted
 and recorded, not compared: see the open point below), and at `ready` PCR 13 equals the
 value computed from the policy's `sysexts` entries of the VM's Kubernetes and CNI
-versions (written by `images/scripts/verify-sysext`; golden 13 when the VM has none). Only the
+versions (written by `images/scripts/verify-sysext`; golden 13 when the VM has none). The image's
+`policy.json` declares `"pcr15": "layer-certificates"` when its initrd measures layer
+certificates (`images/scripts/verify` writes it): the `ready` quote of such an image must
+cover PCR 15 whether or not the VM is served certificates, since the guest picks the PCRs
+it quotes and "none served" is proven as "none measured". An image whose policy lacks it
+predates layer certificates: it may leave PCR 15 out (the verdict says so) and is rejected
+when the VM is served certificates, which it cannot enroll. A quoted PCR 15 is always
+verified: the verifier replays the PCR 15 records of `userspace_log` (systemd's
+`/run/log/systemd/tpm2-measure.log`) to the quoted PCR 15. Every PCR 15 record is bound to
+its content before it is replayed: a systemd string record whose sha256 digest is the
+sha256 of its word, the word a `machine-id:`, `file-system:` or `layer-certificate:`
+measurement; any other record (another content type, a digest that is not its word's, an
+unknown word such as systemd-cryptsetup's HMAC of a volume key) rejects the quote. The
+`layer-certificate:<sha256 of the DER>` words must name exactly the certificates
+`/layer-certificates` serves, in order (none served, none measured); the initrd extends
+PCR 15 with one such word per certificate before it seals the `.dm-verity` keyring, and
+`get_vm_attestation` shows the digests the node measured (`ready.layerCertificates`). Only the
 `initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
 

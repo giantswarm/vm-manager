@@ -1,7 +1,9 @@
 package attest_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/agent/quote"
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/layercert"
 	"github.com/giantswarm/vm-manager/internal/tpmquote"
 	"github.com/giantswarm/vm-manager/internal/tpmquote/quotetest"
 )
@@ -38,6 +41,9 @@ type env struct {
 	policyErr error
 	now       time.Time
 	v         *attest.Verifier
+	// records is systemd's userspace measurement log, one record per
+	// element, posted with every quote.
+	records [][]byte
 }
 
 func newEnv(t *testing.T, learn bool) *env {
@@ -57,6 +63,7 @@ func newEnv(t *testing.T, learn bool) *env {
 	}
 	e.policy = attest.Policy{
 		PCR11:  map[string]string{attest.PhaseInitrd: hex.EncodeToString(values[11]), attest.PhaseReady: hex.EncodeToString(ready)},
+		PCR15:  attest.PCR15LayerCertificates,
 		Golden: map[string]map[int]string{attest.Bank: {}},
 	}
 	for i := 0; i <= 7; i++ {
@@ -98,11 +105,16 @@ func (e *env) toReady() {
 }
 
 // request builds what the agent posts: a fresh nonce, a quote over the
-// stage's PCRs with ak and the PCR values read from the TPM.
+// stage's PCRs (by default those the agent quotes, quote.Selection) with ak
+// and the PCR values read from the TPM.
 func (e *env) request(ak *quotetest.AK, stage imds.Stage, pcrs ...int) imds.QuoteRequest {
 	e.t.Helper()
 	if len(pcrs) == 0 {
-		pcrs = attest.RequiredPCRs(stage)
+		sel, err := quote.Selection(stage)
+		require.NoError(e.t, err)
+		for _, i := range sel {
+			pcrs = append(pcrs, int(i)) // #nosec G115 -- PCR indexes are small.
+		}
 	}
 	nonce, err := e.v.Nonce(e.ctx, vmID)
 	require.NoError(e.t, err)
@@ -114,7 +126,30 @@ func (e *env) request(ak *quotetest.AK, stage imds.Stage, pcrs ...int) imds.Quot
 		bank[fmt.Sprint(i)] = hex.EncodeToString(v)
 	}
 	return imds.QuoteRequest{Stage: stage, Nonce: nonce, AKPub: ak.PubBytes, Quote: quote, Signature: sig,
-		PCRs: map[string]map[string]string{attest.Bank: bank}}
+		PCRs: map[string]map[string]string{attest.Bank: bank}, UserspaceLog: bytes.Join(e.records, nil)}
+}
+
+// measure extends PCR 15 with each word the way systemd-pcrextend does and
+// logs it like systemd.
+func (e *env) measure(words ...string) {
+	for _, w := range words {
+		e.sim.Extend(attest.PCRSystemIdentity, w)
+		e.records = append(e.records, logRecord(w, w))
+	}
+}
+
+// logRecord is a record of systemd's userspace measurement log claiming
+// word, with the sha256 digest of extended.
+func logRecord(word, extended string) []byte {
+	return rawRecord("systemd", fmt.Sprintf(`{"string":%q,"eventType":"phase"}`, word), extended)
+}
+
+// rawRecord is a PCR 15 record of the userspace log with the given content
+// type and content (JSON), with the sha256 digest of extended.
+func rawRecord(contentType, content, extended string) []byte {
+	sum := sha256.Sum256([]byte(extended))
+	return fmt.Appendf(nil, "\x1e{\"pcr\":%d,\"digests\":[{\"hashAlg\":\"sha256\",\"digest\":%q}],\"content_type\":%q,\"content\":%s}\n",
+		attest.PCRSystemIdentity, hex.EncodeToString(sum[:]), contentType, content)
 }
 
 func (e *env) submit(req imds.QuoteRequest) imds.QuoteResult {
@@ -149,7 +184,8 @@ func TestVerifierAcceptsInitrdAndReady(t *testing.T) {
 	r, ok = e.v.Result(vmID, imds.StageReady)
 	require.True(t, ok)
 	assert.Equal(t, []int{13}, r.Learned)
-	assert.Len(t, r.PCRs, 10)
+	assert.Len(t, r.PCRs, 11)
+	assert.Empty(t, r.LayerCertificates, "none served, none measured")
 	assert.Equal(t, e.policy.PCR11[attest.PhaseReady], r.PCRs[11], "software-predicted phase path matches the TPM")
 
 	// Once golden has PCR 13 it is compared.
@@ -488,4 +524,164 @@ func TestVerifierAcceptsAgentQuotes(t *testing.T) {
 func TestNewRequiresPolicies(t *testing.T) {
 	_, err := attest.New(attest.Options{})
 	assert.ErrorContains(t, err, "Policies")
+}
+
+func TestVerifierComparesLayerCertificates(t *testing.T) {
+	digest := func(s string) string {
+		sum := sha256.Sum256([]byte(s))
+		return hex.EncodeToString(sum[:])
+	}
+	a, b := digest("certificate a"), digest("certificate b")
+	wa, wb := layercert.Word(a), layercert.Word(b)
+	const machineID = "machine-id:0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name   string
+		served []string
+		words  []string
+		// log rewrites the records posted, nil posts them as measured.
+		log  func(records [][]byte) [][]byte
+		want string // "" verifies
+		// recorded is what the result shows the node measured.
+		recorded []string
+	}{
+		{name: "matching set", served: []string{a, b}, words: []string{machineID, wa, wb}, recorded: []string{a, b}},
+		{name: "none served, none measured", words: []string{machineID}},
+		{name: "nothing in pcr 15", served: nil},
+		{name: "missing", served: []string{a, b}, words: []string{wa}, want: "missing " + b, recorded: []string{a}},
+		{name: "extra", served: []string{a}, words: []string{wa, wb}, want: "not served " + b, recorded: []string{a, b}},
+		{name: "measured though none served", words: []string{machineID, wa}, want: "not served " + a, recorded: []string{a}},
+		{name: "none measured though served", served: []string{a}, words: []string{machineID}, want: "missing " + a},
+		{name: "reordered", served: []string{a, b}, words: []string{wb, wa}, want: "measured in the order " + b + ", " + a, recorded: []string{b, a}},
+		{
+			name: "log lacks a record", served: []string{a}, words: []string{machineID, wa},
+			log:  func(r [][]byte) [][]byte { return r[:1] },
+			want: "pcr 15: the 1 pcr 15 records of the userspace log replay to",
+		},
+		{
+			name: "no log", served: []string{a}, words: []string{wa},
+			log:  func([][]byte) [][]byte { return nil },
+			want: "pcr 15: the 0 pcr 15 records",
+		},
+		{
+			name: "record claims another word", served: []string{b}, words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{logRecord(wb, wa)} },
+			want: "its sha256 digest is not the digest of",
+		},
+		{
+			name: "records after the quote", served: []string{a}, words: []string{wa},
+			log:      func(r [][]byte) [][]byte { return append(r, logRecord(wb, wb)) },
+			recorded: []string{a},
+		},
+		{
+			name: "malformed digest", words: []string{layercert.WordPrefix + strings.ToUpper(a)},
+			want: "is not layer-certificate:<lowercase hex sha256>",
+		},
+		{
+			name: "extra certificate relabelled", served: []string{a}, words: []string{wa, wb},
+			log:  func(r [][]byte) [][]byte { return [][]byte{r[0], logRecord(machineID, wb)} },
+			want: `userspace log record 2: its sha256 digest is not the digest of "machine-id:`,
+		},
+		{
+			name: "not a systemd record", words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{rawRecord("pcrlock", fmt.Sprintf(`{"string":%q}`, wa), wa)} },
+			want: "not a systemd record with a string content",
+		},
+		{
+			name: "record without a string", words: []string{wa},
+			log:  func([][]byte) [][]byte { return [][]byte{rawRecord("systemd", `{"eventType":"phase"}`, wa)} },
+			want: "not a systemd record with a string content",
+		},
+		{
+			name: "unknown measurement", words: []string{machineID, "cryptsetup:root:00000000-0000-0000-0000-000000000001"},
+			want: `userspace log record 2: "cryptsetup:root:00000000-0000-0000-0000-000000000001" is not a pcr 15 measurement of the image (machine-id:, file-system:, layer-certificate:)`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, false)
+			e.policy.LayerCertificates = tc.served
+			require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+			e.toReady()
+			e.measure(tc.words...)
+			if tc.log != nil {
+				e.records = tc.log(e.records)
+			}
+
+			res := e.submit(e.request(e.ak, imds.StageReady))
+			r, ok := e.v.Result(vmID, imds.StageReady)
+			require.True(t, ok)
+			assert.Equal(t, tc.recorded, nilIfEmpty(r.LayerCertificates))
+			if tc.want == "" {
+				assert.True(t, res.Verified, res.Message)
+				if len(tc.recorded) > 0 {
+					assert.Contains(t, res.Message, fmt.Sprintf("pcr 15 %d layer certificates", len(tc.recorded)))
+				}
+				return
+			}
+			assert.False(t, res.Verified)
+			assert.Contains(t, res.Message, tc.want)
+		})
+	}
+}
+
+// TestVerifierPCR15FollowsThePolicy covers the ready quote of an image that
+// measures layer certificates (policy pcr15) and of one that predates them.
+func TestVerifierPCR15FollowsThePolicy(t *testing.T) {
+	withoutPCR15 := append([]int(nil), attest.RequiredPCRs(imds.StageReady)...)
+	require.NotContains(t, withoutPCR15, attest.PCRSystemIdentity)
+	cert := strings.Repeat("a", 64)
+
+	for _, tc := range []struct {
+		name   string
+		legacy bool // the policy lacks pcr15
+		served []string
+		words  []string
+		pcrs   []int // nil quotes what the agent quotes, PCR 15 included
+		want   string
+		// verified is part of the message of an accepted quote.
+		verified string
+	}{
+		{name: "measuring image without pcr 15", pcrs: withoutPCR15, want: `stage ready also needs 15 (pcr 15: the image's policy has pcr15 "layer-certificates")`},
+		{name: "measuring image, none served, none measured", verified: "verified: ak"},
+		{name: "measuring image, none served, one measured", words: []string{layercert.Word(cert)}, want: "not served " + cert},
+		{name: "legacy image without pcr 15", legacy: true, pcrs: withoutPCR15, verified: "pcr 15 not quoted (the image predates layer certificates)"},
+		{name: "legacy image quoting pcr 15", legacy: true, verified: "verified: ak"},
+		{name: "legacy image quoting a measured certificate", legacy: true, words: []string{layercert.Word(cert)}, want: "not served " + cert},
+		{name: "legacy image served certificates", legacy: true, served: []string{cert}, pcrs: withoutPCR15, want: `the vm is served 1 layer certificates, but its image does not measure them (its policy.json lacks pcr15 "layer-certificates")`},
+		{name: "legacy image served certificates it measured", legacy: true, served: []string{cert}, words: []string{layercert.Word(cert)}, want: "its image does not measure them"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, false)
+			if tc.legacy {
+				e.policy.PCR15 = ""
+			}
+			e.policy.LayerCertificates = tc.served
+			require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+			e.toReady()
+			e.measure(tc.words...)
+
+			res := e.submit(e.request(e.ak, imds.StageReady, tc.pcrs...))
+			r, ok := e.v.Result(vmID, imds.StageReady)
+			require.True(t, ok)
+			if tc.want != "" {
+				assert.False(t, res.Verified)
+				assert.Contains(t, res.Message, tc.want)
+				return
+			}
+			assert.True(t, res.Verified, res.Message)
+			assert.Contains(t, res.Message, tc.verified)
+			assert.Empty(t, r.LayerCertificates)
+			_, has15 := r.PCRs[attest.PCRSystemIdentity]
+			assert.Equal(t, tc.pcrs == nil, has15, "the record shows whether pcr 15 was quoted")
+			if tc.pcrs == nil {
+				assert.NotContains(t, res.Message, "pcr 15 not quoted")
+			}
+		})
+	}
+}
+
+func nilIfEmpty(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }

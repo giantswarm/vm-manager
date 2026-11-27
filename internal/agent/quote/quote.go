@@ -22,8 +22,9 @@
 // # Measurements
 //
 // Stage initrd quotes PCRs 0-7 and 11 (phase enter-initrd); stage ready
-// adds PCR 13 for the merged system extensions. Only the sha256 bank is
-// quoted. The firmware event log and systemd's userspace measurement log are
+// adds PCR 13 for the merged system extensions and PCR 15 for the layer
+// certificates the initrd enrolled, whose words the verifier reads from the
+// userspace log. Only the sha256 bank is quoted. The firmware event log and systemd's userspace measurement log are
 // attached when present; the initrd may not have either yet, which is not an
 // error.
 package quote
@@ -79,7 +80,7 @@ func Selection(stage imds.Stage) ([]uint, error) {
 	case imds.StageInitrd:
 		return []uint{0, 1, 2, 3, 4, 5, 6, 7, 11}, nil
 	case imds.StageReady:
-		return []uint{0, 1, 2, 3, 4, 5, 6, 7, 11, 13}, nil
+		return []uint{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, nil
 	default:
 		return nil, fmt.Errorf("unknown stage %q", stage)
 	}

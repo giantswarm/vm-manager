@@ -14,6 +14,7 @@ import (
 	"github.com/giantswarm/vm-manager/internal/buildinfo"
 	"github.com/giantswarm/vm-manager/internal/host"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/layercert"
 	"github.com/giantswarm/vm-manager/internal/metrics"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -63,6 +64,7 @@ const (
 	argHostname           = "hostname"
 	argMetadata           = "metadata"
 	argRequireAttestation = "require_attestation"
+	argLayerCertificates  = "layer_certificates"
 	argWaitFor            = "wait_for"
 	argCommand            = "command"
 	argPort               = "port"
@@ -243,6 +245,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		mcp.WithString(argHostname, mcp.Description("Guest hostname, default: the name")),
 		mcp.WithObject(argMetadata, mcp.Description("String key/value pairs served as /metadata/<key>"), mcp.AdditionalProperties(map[string]any{"type": "string"})),
 		mcp.WithBoolean(argRequireAttestation, mcp.Description("Release user-data only after a verified initrd quote, default true; false releases it as soon as the installed boot starts")),
+		mcp.WithArray(argLayerCertificates, mcp.Description(fmt.Sprintf("Installation layer certificates, PEM X.509, at most %d; served in order as /layer-certificates, which the ready attestation must measure exactly", layercert.MaxCertificates)), mcp.WithStringItems()),
 		mcp.WithString(argWaitFor, mcp.Description("Milestone to block on: none, installed, attested or ready (default)"), mcp.Enum(string(vm.WaitNone), string(vm.WaitInstalled), string(vm.WaitAttested), string(vm.WaitReady))),
 	), t.createVM)
 	s.AddTool(newTool(ToolStartVM,

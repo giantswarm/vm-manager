@@ -90,6 +90,7 @@ func testInstance() Instance {
 		Zone:              "net-1",
 		SSHAuthorizedKeys: []string{"ssh-ed25519 AAAA first", "ssh-ed25519 BBBB second"},
 		KubernetesVersion: "1.33.2",
+		LayerCertificates: []string{"-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----\n", "-----BEGIN CERTIFICATE-----\nAg==\n-----END CERTIFICATE-----\n"},
 		Metadata:          map[string]string{"role": "worker", "empty": ""},
 		UserData:          []byte(ignition),
 	}
@@ -157,6 +158,9 @@ func TestHandlerPlainKeys(t *testing.T) {
 		{name: "instance-id", path: "/instance-id", inst: inst, status: 200, body: vmID},
 		{name: "kubernetes-version", path: "/kubernetes-version", inst: inst, status: 200, body: "1.33.2"},
 		{name: "kubernetes-version unset", path: "/kubernetes-version", inst: Instance{}, status: 404},
+		{name: "layer-certificates", path: "/layer-certificates", inst: inst, status: 200,
+			body: "-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nAg==\n-----END CERTIFICATE-----\n"},
+		{name: "layer-certificates unset", path: "/layer-certificates", inst: Instance{}, status: 404},
 		{name: "public key index", path: "/public-keys/", inst: inst, status: 200, body: "0\n1"},
 		{name: "public key index empty", path: "/public-keys/", inst: Instance{}, status: 200, body: ""},
 		{name: "public key 0", path: "/public-keys/0", inst: inst, status: 200, body: "ssh-ed25519 AAAA first"},

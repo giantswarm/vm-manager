@@ -91,6 +91,7 @@ const OSSeparator = "os-separator"
 //	    "kubernetes": { "1.36.4": "<sha256 of kubernetes_1.36.4.raw>" },
 //	    "cni": { "flannel-1.9.1-flannel3": "<sha256 of cni_flannel-1.9.1-flannel3.raw>" }
 //	  },
+//	  "pcr15": "layer-certificates",
 //	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } },
 //	  "golden_firmware": { "sha256": "<hex>", "package": "ovmf-generic", "version": "2025.11-3ubuntu7.2" }
 //	}
@@ -106,6 +107,11 @@ type Policy struct {
 	// verifies without an entry per pair. A VM whose versions lack an
 	// entry falls back to PCR13, then to Golden.
 	Sysexts map[string]map[string]string `json:"sysexts,omitempty"`
+	// PCR15 names what the image measures into PCR 15 that the verifier
+	// judges: PCR15LayerCertificates, set by images/scripts/verify for
+	// every image whose initrd enrolls and measures layer certificates.
+	// Empty for an image that predates them.
+	PCR15 string `json:"pcr15,omitempty"`
 	// PCR13 maps a Kubernetes version to the PCR 13 value of a guest that
 	// merged that sysext alone, as images built before Sysexts wrote it;
 	// used only for a VM without a CNI version.
@@ -118,6 +124,12 @@ type Policy struct {
 	// KubernetesVersion selects the PCR13 entry for the VM whose quote is
 	// verified. The PolicyProvider sets it; policy.json does not carry it.
 	KubernetesVersion string `json:"-"`
+	// LayerCertificates are the sha256 digests (layercert.Digests) of the
+	// installation layer certificates the IMDS serves the VM, in order; a
+	// quoted PCR 15 must measure exactly these, and an image that does not
+	// measure layer certificates (PCR15) cannot be served any. The
+	// PolicyProvider sets it; policy.json does not carry it.
+	LayerCertificates []string `json:"-"`
 	// CNIVersion selects the Sysexts entry of the VM's CNI sysext; the
 	// PolicyProvider sets it, empty when the VM has none.
 	CNIVersion string `json:"-"`
@@ -203,6 +215,9 @@ func (p Policy) Validate() error {
 		if err := checkDigest(v); err != nil {
 			return fmt.Errorf("policy: pcr13[%q]: %w", version, err)
 		}
+	}
+	if p.PCR15 != "" && p.PCR15 != PCR15LayerCertificates {
+		return fmt.Errorf("policy: pcr15 %q is not %q", p.PCR15, PCR15LayerCertificates)
 	}
 	for component, versions := range p.Sysexts {
 		for version, v := range versions {
@@ -290,12 +305,36 @@ func PhaseFor(stage imds.Stage) string {
 	return PhaseInitrd
 }
 
-// RequiredPCRs are the indexes a stage's quote must cover: 0-7 and 11, plus
-// 13 at the ready stage.
+// PCR15LayerCertificates is Policy.PCR15 of an image whose initrd extends
+// PCR 15 with one layercert.Word per installation layer certificate.
+const PCR15LayerCertificates = "layer-certificates"
+
+// MeasuresLayerCertificates reports whether the image measures layer
+// certificates into PCR 15 (Policy.PCR15).
+func (p Policy) MeasuresLayerCertificates() bool {
+	return p.PCR15 == PCR15LayerCertificates
+}
+
+// RequiredPCRs are the indexes every quote of a stage must cover: 0-7 and
+// 11, plus 13 at the ready stage. The ready quote of an image that measures
+// layer certificates must also cover PCR 15 (Policy.RequiredPCRs).
 func RequiredPCRs(stage imds.Stage) []int {
 	pcrs := append(append([]int(nil), firmwarePCRs...), PCRUKI)
 	if stage == imds.StageReady {
 		pcrs = append(pcrs, PCRSysext)
+	}
+	return pcrs
+}
+
+// RequiredPCRs are the indexes the image's quote of a stage must cover:
+// RequiredPCRs, plus PCR 15 at the ready stage when the image measures layer
+// certificates, whether or not the VM is served any: the guest picks the
+// PCRs it quotes, so "none served" is proven as "none measured". An image
+// that predates layer certificates may leave PCR 15 out.
+func (p Policy) RequiredPCRs(stage imds.Stage) []int {
+	pcrs := RequiredPCRs(stage)
+	if stage == imds.StageReady && p.MeasuresLayerCertificates() {
+		pcrs = append(pcrs, PCRSystemIdentity)
 	}
 	return pcrs
 }

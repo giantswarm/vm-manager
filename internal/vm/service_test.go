@@ -323,6 +323,7 @@ func TestCreateValidation(t *testing.T) {
 		{"bad waitFor", func(s *vm.Spec) { s.WaitFor = "soon" }, apierr.ErrInvalid},
 		{"bad metadata key", func(s *vm.Spec) { s.Metadata = map[string]string{"a/b": "c"} }, apierr.ErrInvalid},
 		{"multiline ssh key", func(s *vm.Spec) { s.SSHAuthorizedKeys = []string{"a\nb"} }, apierr.ErrInvalid},
+		{"layer certificate garbage", func(s *vm.Spec) { s.LayerCertificates = []string{"junk"} }, apierr.ErrInvalid},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
