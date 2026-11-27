@@ -55,6 +55,7 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
 | `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}` for every published version (and drops entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
+| `build/e2e/ipe-e2e.raw` | `make images` or `make e2e-sysext` (`scripts/build-e2e-sysext`): the e2e tests' sysext, `/usr/lib/firmware/regulatory.db` (a placeholder the base root lacks) signed with the verity key, for the IPE firmware proof; neither served nor pushed |
 | `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
 `make kubernetes` (one version, `KUBERNETES_VERSION`), `make kubernetes-all` (every version of
@@ -631,8 +632,10 @@ records in the journal (`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rul
 `e2e/ipe_test.go` proves all of it, including a core_pattern helper refused when it tries to
 switch enforcement off and a reboot after root hid the policy and planted a drop-in that
 restores the capability; `e2e/kubernetes_sysext_test.go` that a file of the Kubernetes sysext
-executes but is refused as a kernel module, firmware and kexec image (`ipe_op=KMODULE`,
-`FIRMWARE`, `KEXEC_IMAGE`) while the base root's modules load; `e2e/persistent_etc_test.go` a reboot from inside the guest coming
+executes but is refused as a kernel module and kexec image (`ipe_op=KMODULE`, `KEXEC_IMAGE`)
+while the base root's modules load, and that firmware a second signed sysext brings
+(`build/e2e/ipe-e2e.raw`, merged next to it) is refused when cfg80211 requests it
+(`ipe_op=FIRMWARE`); `e2e/persistent_etc_test.go` a reboot from inside the guest coming
 back as a new QEMU process.
 
 What the policy means for workloads and what it does not cover:

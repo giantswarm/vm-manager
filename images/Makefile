@@ -8,6 +8,7 @@
 #   make kubernetes-all                      every release of KUBERNETES_VERSIONS
 #   make ignition                            Ignition binary for the initrd (cached)
 #   make agent                               vm-agent binary for base and initrd (make -C .. agent)
+#   make e2e-sysext                          the e2e tests' firmware sysext, base tree is reused
 #   make PROFILE=debug base smoke-boot       root autologin, empty root password
 #   make clean                               drop build/ (keys/ are kept)
 
@@ -75,7 +76,7 @@ CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages verify verify-base verify-kubernetes smoke-boot clean summary
+.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages e2e-sysext verify verify-base verify-kubernetes smoke-boot clean summary
 
 # `images` builds the default Kubernetes version; the other listed releases
 # follow, one `make kubernetes` each.
@@ -138,6 +139,7 @@ images: keys ignition agent kubernetes-packages
 	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
+	$(SCRIPTS)/build-e2e-sysext $(BUILD) $(KEYS)
 	install -m0644 $(KEYS)/verity.crt $(CERT)
 
 # Base tree and disk image only (two mkosi runs, mkosi-ipe).
@@ -154,6 +156,13 @@ kubernetes: keys kubernetes-packages
 	rm -f $(BUILD)/kubernetes_$(KUBERNETES_VERSION) $(BUILD)/kubernetes_$(KUBERNETES_VERSION).*
 	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --format=none --bootable=no --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
+
+# build/e2e/ipe-e2e.raw, the test-only sysext e2e/kubernetes_sysext_test.go
+# merges to prove that IPE refuses firmware from a signed sysext: signed with
+# the verity key, ID and version from the base tree's os-release. `images`
+# builds it too; nothing publishes it.
+e2e-sysext: keys
+	$(SCRIPTS)/build-e2e-sysext $(BUILD) $(KEYS)
 
 # Every release of KUBERNETES_VERSIONS, published side by side:
 #   make kubernetes-all KUBERNETES_VERSIONS="1.36.4 1.35.4"
