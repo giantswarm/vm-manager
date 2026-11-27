@@ -1,8 +1,7 @@
 # containerd configuration of the kubernetes sysext, loaded through
 # containerd.service.d/10-vm-manager.conf. Only deviations from
 # `containerd config default` of the shipped containerd (the Giant Swarm line,
-# 2.4, config version 4) are listed; the default sandbox image
-# (registry.k8s.io/pause:3.10.2) is the one kubeadm 1.36 expects.
+# 2.4, config version 4) are listed.
 version = 4
 
 # Image layers run from signed dm-verity devices only (images/README.md,
@@ -23,6 +22,12 @@ version = 4
   # to /etc at boot.
   [plugins.'io.containerd.cri.v1.images'.registry]
     config_path = '/etc/containerd/certs.d'
+
+  # The sandbox image from gsoci, where Giant Swarm publishes it with signed
+  # layers, instead of the unsigned registry.k8s.io/pause; the release
+  # kubeadm 1.36 expects.
+  [plugins.'io.containerd.cri.v1.images'.pinned_images]
+    sandbox = 'gsoci.azurecr.io/giantswarm/pause:3.10.2'
 
 [plugins.'io.containerd.differ.v1.erofs']
   enable_tar_index = true

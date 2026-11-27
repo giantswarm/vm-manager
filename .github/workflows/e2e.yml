@@ -10,8 +10,9 @@ name: e2e
 #   schedule (nightly)        full suite: also TestIgnition, TestKubernetesVersions
 #                             (one VM per sysext version), TestAttestation (three
 #                             servers, ~2 min) and TestKubernetesCluster (two
-#                             nodes, pulls from registry.k8s.io, ~3 min; skipped
-#                             for an image with IPE, which runs no container)
+#                             IPE nodes with Cilium, pulling gsoci's images
+#                             through a mirror on the runner that holds them
+#                             signed with the build's key)
 #   workflow_dispatch         full by default, `suite: fast` for the subset
 #
 # The image comes from image.yml: built in this run when the PR touches the
@@ -149,7 +150,7 @@ jobs:
     # build is skipped when main's image is reused.
     if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ needs.plan.outputs.suite == 'full' && 60 || 40 }}
+    timeout-minutes: ${{ needs.plan.outputs.suite == 'full' && 80 || 40 }}
     env:
       SUITE: ${{ needs.plan.outputs.suite }}
       # Short (unix socket paths) and on the runner's large data disk: each
@@ -173,15 +174,18 @@ jobs:
           echo "cpus: $(nproc), kvm-capable: $(grep -c -E 'vmx|svm' /proc/cpuinfo)"
           free -h
 
-      - name: Install QEMU, swtpm and OVMF
-        # All three from the Ubuntu archive. internal/tpm passes swtpm's
+      - name: Install QEMU, swtpm, OVMF and erofs-utils
+        # All four from the Ubuntu archive. internal/tpm passes swtpm's
         # `terminate` ctrl option (0.8+) so an emulator ends with the QEMU it
         # served; 26.04 ships swtpm 0.10, so no PPA is needed. Its QEMU 10.2
         # runs with the io_uring main loop off: vm-manager denies the QEMU
         # process io_uring_setup (seccomp), which lost TPM commands (#84).
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf
+          # erofs-utils: TestKubernetesCluster signs the images it mirrors
+          # (pkg/layersign runs mkfs.erofs); it renders Cilium with the
+          # runner's helm.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf erofs-utils
           # Ubuntu confines swtpm with AppArmor (usr.bin.swtpm): sockets and
           # state outside its allowed paths, like the per-test directories
           # under /mnt/e2e, fail with "Could not open UnixIO socket:
@@ -195,7 +199,7 @@ jobs:
           swtpm --version
           systemctl --version | head -1
           ls -l /usr/share/OVMF/
-          if [ "$SUITE" = full ]; then kubectl version --client; fi
+          if [ "$SUITE" = full ]; then kubectl version --client; helm version --short; mkfs.erofs --version; fi
 
       - name: Scratch space on the data disk
         run: |
@@ -243,7 +247,7 @@ jobs:
           VM_MANAGER_E2E_KEEP: "1"
           TMPDIR: ${{ env.E2E_ROOT }}
         run: |
-          args=(-tags e2e -count=1 -timeout 35m -v)
+          args=(-tags e2e -count=1 -timeout 60m -v)
           if [ "$SUITE" = fast ]; then
             args+=(-run 'TestInstallBoot|TestNetworkIMDS|TestPersistentEtc|TestKubernetesSysext|TestIPE')
           fi
