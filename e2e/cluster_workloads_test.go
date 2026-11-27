@@ -76,6 +76,33 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 	assert.Contains(t, refusal, "dm-verity", "the pull of %s fails for the layer's missing signature", w.unsigned)
 	assert.Equal(t, "Pending", cp.sh(ctx, kubectlInGuest+" get pod "+podUnsigned+" -o 'jsonpath={.status.phase}'"), "the pod of %s does not start", w.unsigned)
 	t.Logf("workload images on %s:\n%s", workerName, worker.sh(ctx, "crictl images | grep -E 'IMAGE|vm-manager-e2e'"))
+
+	// The giant-swarm image's config names its user; containerd resolved it
+	// through the image's /etc/passwd, read from the layers' dm-verity
+	// devices.
+	uid := worker.sh(ctx, "cid=$(crictl ps -q --label io.kubernetes.pod.name="+podGiantSwarm+") && "+
+		"pid=$(crictl inspect -o go-template --template '{{.info.pid}}' \"$cid\") && awk '/^Uid:/{print $2}' /proc/$pid/status")
+	assert.Equal(t, workloadUID, uid, "the %s container runs as %s from the image's /etc/passwd", podGiantSwarm, workloadUser)
+	t.Logf("workload %s runs as %s: uid %s", podGiantSwarm, workloadUser, uid)
+	assertLayerDevices(ctx, t, worker)
+}
+
+// assertLayerDevices checks that every containerd-erofs-* dm-verity device
+// on the node backs a running container: its EROFS mount is a lower layer of
+// a container's overlay. Creating a container opens each layer's device to
+// read the image's /etc/passwd and /etc/group, and must close it again.
+func assertLayerDevices(ctx context.Context, t *testing.T, g *guest) {
+	t.Helper()
+	out := g.sh(ctx, `n=0; for d in $(dmsetup ls --target verity | awk '/^containerd-erofs-/{gsub(/[()]/,"",$2); print $1"="$2}'); do `+
+		`n=$((n+1)); name=${d%%=*}; majmin=${d#*=}; `+
+		`m=$(findmnt -rn -t erofs -o MAJ:MIN,TARGET | awk -v d="$majmin" '$1==d{print $2; exit}'); `+
+		`if [ -z "$m" ]; then echo "leftover $name: not mounted"; `+
+		`elif ! findmnt -rn -t overlay -o OPTIONS | grep -qF "$m"; then echo "leftover $name: $m is in no container's overlay"; fi; done; echo "devices=$n"`)
+	lines := strings.Split(out, "\n")
+	devices := lines[len(lines)-1]
+	assert.Empty(t, lines[:len(lines)-1], "containerd-erofs dm-verity devices that back no running container (%s)", devices)
+	assert.NotEqual(t, "devices=0", devices, "the running containers' layers are containerd-erofs dm-verity devices")
+	t.Logf("layer devices on the node: %s, each the lower layer of a running container", devices)
 }
 
 // assertLayerOnlyExecutes takes a file of the running giant-swarm pod's own

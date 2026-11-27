@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +96,10 @@ const (
 	// workloadFirmware is what cfg80211 requests from the firmware loader
 	// when it loads; the base root does not carry it.
 	workloadFirmware = "regulatory.db"
+	// workloadUser is the user of the giant-swarm image's config, a name
+	// containerd resolves through the image's /etc/passwd: workloadUID.
+	workloadUser = "vm-manager-e2e"
+	workloadUID  = "4242"
 )
 
 // layerKey signs layers: a key with the certificate the nodes trust.
@@ -135,9 +140,8 @@ func giantSwarmLayerKey(t *testing.T, image Image) layerKey {
 // it through their network's NAT at the host's address and use it as a
 // mirror of gsoci (hostsTOML); it holds linux/amd64 copies of the images
 // under their gsoci paths, each signed with `vm-manager layers sign`'s
-// library. It serves the referrers through the OCI referrers tag schema
-// (sha256-<digest> tags), which the signer writes and containerd reads when a
-// registry has no referrers API.
+// library. Nodes find the signatures through its referrers API, as they do
+// on gsoci (referrersAPI).
 type layerRegistry struct {
 	host string
 	tmp  string
@@ -155,7 +159,10 @@ func startLayerRegistry(t *testing.T, dir string) *layerRegistry {
 	ln, err := net.Listen("tcp", ":0") // #nosec G102 -- the guests reach it through their NAT at the host's address
 	require.NoError(t, err)
 	srv := &http.Server{
-		Handler:           ggcrregistry.New(ggcrregistry.WithBlobHandler(ggcrregistry.NewDiskBlobHandler(blobs)), ggcrregistry.Logger(log.New(io.Discard, "", 0))),
+		Handler: referrersAPI(ggcrregistry.New(
+			ggcrregistry.WithBlobHandler(ggcrregistry.NewDiskBlobHandler(blobs)),
+			ggcrregistry.WithReferrersSupport(true),
+			ggcrregistry.Logger(log.New(io.Discard, "", 0)))),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() { _ = srv.Serve(ln) }()
@@ -176,18 +183,69 @@ func outboundAddress(t *testing.T) string {
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
-// hostsTOML points containerd's gsoci host at the registry. Neither host
-// has the referrers capability: gsoci's referrers API would answer for the
-// mirrored manifests without their signatures, so containerd reads the
-// referrers through the tag schema, from the first host that resolves.
+// hostsTOML points containerd's gsoci host at the registry, the only host
+// with the referrers capability: gsoci's referrers API would answer for the
+// mirrored manifests without their signatures.
 func (r *layerRegistry) hostsTOML() map[string]any {
 	return ignitionFile("/etc/containerd/certs.d/"+gsoci+"/hosts.toml", 0o644,
 		`server = "https://`+gsoci+`"
 capabilities = ["pull", "resolve"]
 
 [host."http://`+r.host+`"]
-  capabilities = ["pull", "resolve"]
+  capabilities = ["pull", "resolve", "referrers"]
 `)
+}
+
+// referrersPath matches the OCI referrers API.
+var referrersPath = regexp.MustCompile(`^/v2/(.+)/referrers/(sha256:[0-9a-f]{64})$`)
+
+// referrersAPI completes go-containerregistry's referrers API as the OCI
+// distribution spec has it: a descriptor's artifactType is the referrer
+// manifest's artifactType (go-containerregistry gives its config media
+// type, the empty descriptor's for an artifact), and the artifactType query
+// filters the list (OCI-Filters-Applied).
+func referrersAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m := referrersPath.FindStringSubmatch(req.URL.Path)
+		if req.Method != http.MethodGet || m == nil {
+			next.ServeHTTP(w, req)
+			return
+		}
+		rec := httptest.NewRecorder()
+		next.ServeHTTP(rec, req)
+		var index ocispec.Index
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &index) != nil {
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(rec.Body.Bytes())
+			return
+		}
+		filter := req.URL.Query()["artifactType"]
+		manifests := []ocispec.Descriptor{}
+		for _, d := range index.Manifests {
+			get := httptest.NewRequestWithContext(req.Context(), http.MethodGet, "/v2/"+m[1]+"/manifests/"+d.Digest.String(), nil)
+			get.Header.Set("Accept", d.MediaType)
+			body := httptest.NewRecorder()
+			next.ServeHTTP(body, get)
+			var referrer ocispec.Manifest
+			if json.Unmarshal(body.Body.Bytes(), &referrer) == nil && referrer.ArtifactType != "" {
+				d.ArtifactType = referrer.ArtifactType
+			}
+			if len(filter) == 0 || slices.Contains(filter, d.ArtifactType) {
+				manifests = append(manifests, d)
+			}
+		}
+		index.Manifests = manifests
+		out, err := json.Marshal(index)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", ocispec.MediaTypeImageIndex)
+		if len(filter) > 0 {
+			w.Header().Set("OCI-Filters-Applied", "artifactType")
+		}
+		_, _ = w.Write(out)
+	})
 }
 
 // repository opens path (<repository>[:<tag>]) in the registry.
@@ -260,12 +318,12 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantS
 		unsigned:     gsociRepository + "/vm-manager-e2e:unsigned-layer",
 	}
 
-	gsImage := r.pushWorkload(ctx, t, base, "giant-swarm")
+	gsImage := r.pushWorkload(ctx, t, base, "giant-swarm", workloadUser)
 	gsSigned := r.sign(ctx, t, workloadRepository+":giant-swarm", giantSwarm)
-	r.pushWorkload(ctx, t, base, "installation")
+	r.pushWorkload(ctx, t, base, "installation", "")
 	r.sign(ctx, t, workloadRepository+":installation", installation)
 
-	unsigned := r.pushWorkload(ctx, t, gsImage, "unsigned-layer")
+	unsigned := r.pushWorkload(ctx, t, gsImage, "unsigned-layer", "")
 	layers, err := unsigned.Layers()
 	require.NoError(t, err)
 	top, err := layers[len(layers)-1].Digest()
@@ -288,14 +346,23 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantS
 	return w
 }
 
-// pushWorkload pushes base with a layer of its own as workloadRepository:tag.
-func (r *layerRegistry) pushWorkload(ctx context.Context, t *testing.T, base v1.Image, tag string) v1.Image {
+// pushWorkload pushes base with a layer of its own as workloadRepository:tag,
+// running as user when it is not empty.
+func (r *layerRegistry) pushWorkload(ctx context.Context, t *testing.T, base v1.Image, tag, user string) v1.Image {
 	t.Helper()
 	layerTar := workloadLayer(t, tag)
 	layer, err := tarballLayer(layerTar)
 	require.NoError(t, err)
 	img, err := mutate.AppendLayers(base, layer)
 	require.NoError(t, err)
+	if user != "" {
+		cfg, err := img.ConfigFile()
+		require.NoError(t, err)
+		c := cfg.Config.DeepCopy()
+		c.User = user
+		img, err = mutate.Config(img, *c)
+		require.NoError(t, err)
+	}
 	ref, err := name.ParseReference(r.host+"/"+workloadRepository+":"+tag, name.Insecure)
 	require.NoError(t, err)
 	require.NoError(t, remote.Write(ref, img, remote.WithContext(ctx)), "push %s", ref)
@@ -303,18 +370,24 @@ func (r *layerRegistry) pushWorkload(ctx context.Context, t *testing.T, base v1.
 }
 
 // workloadLayer is a tar of workloadDir with workloadFirmware and a file
-// named after the image, so that every workload image has a layer of its own.
+// named after the image, so that every workload image has a layer of its own,
+// and the /etc/passwd and /etc/group that name workloadUser.
 func workloadLayer(t *testing.T, tag string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	modTime := time.Unix(0, 0)
-	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: workloadDir + "/", Mode: 0o755, ModTime: modTime}))
-	for file, body := range map[string]string{
-		workloadFirmware: "vm-manager e2e: a file of a signed container layer, not a regulatory database\n",
-		tag:              "vm-manager e2e workload " + tag + "\n",
+	for _, dir := range []string{"etc/", workloadDir + "/"} {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: dir, Mode: 0o755, ModTime: modTime}))
+	}
+	for _, f := range []struct{ name, body string }{
+		{"etc/passwd", "root:x:0:0:root:/:/pause\n" + workloadUser + ":x:" + workloadUID + ":" + workloadUID + ":vm-manager e2e:/:/pause\n"},
+		{"etc/group", "root:x:0:\n" + workloadUser + ":x:" + workloadUID + ":\n"},
+		{workloadDir + "/" + workloadFirmware, "vm-manager e2e: a file of a signed container layer, not a regulatory database\n"},
+		{workloadDir + "/" + tag, "vm-manager e2e workload " + tag + "\n"},
 	} {
-		require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: workloadDir + "/" + file, Mode: 0o644, Size: int64(len(body)), ModTime: modTime}))
+		file, body := f.name, f.body
+		require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: file, Mode: 0o644, Size: int64(len(body)), ModTime: modTime}))
 		_, err := tw.Write([]byte(body))
 		require.NoError(t, err)
 	}

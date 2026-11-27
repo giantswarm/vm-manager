@@ -527,8 +527,8 @@ plain-HTTP registry) are configured through `hosts.toml` files under
 `/etc/containerd/certs.d/<host>/`, the `config_path` of the CRI and the transfer service.
 `e2e/kubernetes_sysext_test.go` checks the version, the plugins, the effective
 configuration and the refusal of an unsigned image; `e2e/kubernetes_cluster_test.go`
-runs a cluster from signed copies of gsoci's images in a mirror (referrers through the
-OCI tag schema), signed workloads and the refusal of a layer outside its signatures.
+runs a cluster from signed copies of gsoci's images in a mirror (signatures through its
+referrers API), signed workloads and the refusal of a layer outside its signatures.
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
