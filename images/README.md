@@ -510,8 +510,12 @@ address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
    `/usr/lib/verity.d/verity.crt`; the kernel's "Required key not available" lines in the
    journal are the keyring attempt before that). `EXTENSION_RELOAD_MANAGER=1` makes the
    refresh a daemon-reload, after which `Upholds=` of `multi-user.target` starts
-   `containerd.service` and `kubelet.service`. The unit checks that
-   `systemd-sysext status` lists exactly `kubernetes_<kv>` on `/usr`.
+   `containerd.service` and `kubelet.service`. The unit fails unless what systemd-sysext
+   reports is exactly the VM's images: `systemd-sysext status --json=short` merged
+   `kubernetes_<kv>` and `cni_<cni>-<release>` (when `/cni-version` is set) on `/usr` and
+   nothing else, `systemd-sysext list --json=short` finds no other image in any extension
+   directory, and every `/usr/lib/extension-release.d/extension-release.*` belongs to a
+   merged image (`jq`, an explicit base package, reads the JSON).
 5. PCR 13 is extended, see below.
 6. The node stack is made usable: `systemd-modules-load.service` and
    `systemd-sysctl.service` are restarted, because on a boot that downloaded the

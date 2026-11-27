@@ -20,7 +20,9 @@
 #     /usr/bin (updatectl is the command there), and images/scripts/verify
 #     checks every tool these scripts run is in the image.
 #  4. systemd-sysext refresh merges them (a no-op when systemd-sysext.service
-#     already merged these very files early in the boot). The Kubernetes
+#     already merged these very files early in the boot). What systemd-sysext
+#     reports as merged and as present must be exactly these two images, and
+#     no extension-release file may name another; anything else fails the unit. The Kubernetes
 #     extension carries EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the
 #     manager and the Upholds= of multi-user.target starts containerd and
 #     kubelet. The CNI extension adds its plugins to /usr/lib/cni, the one
@@ -116,14 +118,21 @@ else
 fi
 
 systemd-sysext refresh
-# Each merged extension brings /usr/lib/extension-release.d/extension-release.<name>;
-# exactly ours may be there. (`systemd-sysext status` prints the extensions of
-# a hierarchy one per line, which is no simpler to read.)
-merged=(/usr/lib/extension-release.d/extension-release.*)
-merged=("${merged[@]##*/extension-release.}")
+# Exactly our images may be merged on /usr and present in any extension
+# directory, as systemd-sysext itself reports them (status: what it merged per
+# hierarchy; list: every image it finds in /etc/extensions, /run/extensions,
+# /var/lib/extensions, /usr/lib/extensions, ...). Every extension-release file
+# in the merged /usr must belong to a merged image: a file another image
+# carries cannot make an extension look merged.
 want="$(printf '%s\n' "${measured[@]}" | sort | paste -sd,)"
-got="$(printf '%s\n' "${merged[@]}" | sort | paste -sd,)"
-[[ "$got" == "$want" ]] || fail "expected $want merged on /usr, the merged extension-release files name '${got:-nothing}'"
+merged="$(systemd-sysext status --json=short --no-pager \
+        | jq -r '.[] | select(.hierarchy == "/usr") | .extensions | if type == "array" then .[] else empty end' | sort | paste -sd,)"
+[[ "$merged" == "$want" ]] || fail "systemd-sysext merged '${merged:-nothing}' on /usr, want '$want'"
+present="$(systemd-sysext list --json=short --no-pager | jq -r '.[].name' | sort | paste -sd,)"
+[[ "$present" == "$want" ]] || fail "the extension directories hold '${present:-nothing}', want only '$want'"
+for f in /usr/lib/extension-release.d/extension-release.*; do
+        [[ ",$merged," == *",${f##*/extension-release.},"* ]] || fail "$f names no merged image (merged: $merged)"
+done
 
 for name in "${measured[@]}"; do
         line="$(cd "$extensions" && sha256sum "$name.raw")"

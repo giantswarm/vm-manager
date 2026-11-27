@@ -106,6 +106,8 @@ func TestKubernetesSysext(t *testing.T) {
 	assertKubernetesRunning(ctx, t, g, version)
 	assertCNIPlugins(ctx, t, g, sx, image.Certificate != "")
 	assertPCR13(ctx, t, g, sx)
+	// Last: every run of the unit extends PCR 13 again.
+	assertStrayExtensionRefused(ctx, t, g, sx)
 
 	var deleted api.DeletedResponse
 	m.call(ctx, api.ToolDeleteVM, map[string]any{"id": v.ID}, &deleted)
@@ -180,9 +182,9 @@ func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, sx syse
 
 	status := g.sh(ctx, "systemd-sysext status --no-legend --no-pager")
 	t.Logf("systemd-sysext status:\n%s", status)
-	// The extensions of a hierarchy are one per line in that table; the
-	// extension-release files of the merged /usr name them plainly.
-	merged := strings.Join(strings.Fields(g.sh(ctx, "ls /usr/lib/extension-release.d/ | sed -n 's/^extension-release\\.//p'")), ",")
+	// The extensions of a hierarchy are one per line in that table; its
+	// JSON form names them as a list.
+	merged := strings.Join(strings.Fields(g.sh(ctx, `systemd-sysext status --json=short --no-pager | jq -r '.[] | select(.hierarchy == "/usr") | .extensions | if type == "array" then .[] else empty end'`)), ",")
 	assert.ElementsMatch(t, []string{"kubernetes_" + sx.kubernetes.version, "cni_" + sx.cni.version}, strings.Split(merged, ","), "exactly these extensions merged on /usr")
 	assert.ElementsMatch(t, []string{sx.kubernetes.file, sx.cni.file}, strings.Fields(g.sh(ctx, "ls "+extensionsDir)), "exactly one file per component in %s", extensionsDir)
 	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.kubernetes_"), "one kubernetes extension-release")
@@ -260,6 +262,27 @@ func assertCNIPlugins(ctx context.Context, t *testing.T, g *guest, sx sysexts, i
 	assert.NotZero(t, res.ExitCode, "IPE refuses the plugin copied into /opt/cni/bin")
 	assert.Contains(t, res.Stderr, "Permission denied")
 	g.sh(ctx, "rm -f /opt/cni/bin/"+name)
+}
+
+// assertStrayExtensionRefused adds an extension the VM was not created with
+// (a directory extension in /run/extensions, which systemd-sysext merges like
+// any other) and runs the unit again: it must fail, naming the stray image
+// in the set systemd-sysext merged, and succeed again once the image is gone.
+func assertStrayExtensionRefused(ctx context.Context, t *testing.T, g *guest, sx sysexts) {
+	t.Helper()
+	const stray = "/run/extensions/stray"
+	g.sh(ctx, "mkdir -p "+stray+"/usr/lib/extension-release.d && echo ID=_any > "+stray+"/usr/lib/extension-release.d/extension-release.stray")
+	res, err := g.run(ctx, "systemctl restart "+kubernetesUnit)
+	require.NoError(t, err)
+	journal := g.sh(ctx, "journalctl -b -o cat -u "+kubernetesUnit+" --no-pager | tail -n 5")
+	t.Logf("%s with a stray extension: exit %d\n%s", kubernetesUnit, res.ExitCode, journal)
+	assert.NotZero(t, res.ExitCode, "the unit refuses a merged extension the VM was not created with")
+	assert.Contains(t, journal, "systemd-sysext merged '"+"cni_"+sx.cni.version+",kubernetes_"+sx.kubernetes.version+",stray' on /usr")
+
+	g.sh(ctx, "rm -r "+stray+" && systemctl reset-failed "+kubernetesUnit)
+	res, err = g.run(ctx, "systemctl restart "+kubernetesUnit)
+	require.NoError(t, err)
+	assert.Zero(t, res.ExitCode, "the unit passes again without the stray extension: %s%s", res.Stdout, res.Stderr)
 }
 
 // assertPCR13 compares the TPM's PCR 13 with the host-computed value and
