@@ -23,6 +23,7 @@
 //	/instance-id                   GET     vm-manager's VM ID
 //	/kubernetes-version            GET     version to pass to systemd-sysupdate, see below
 //	/cni-version                   GET     CNI sysext version, the same way
+//	/layer-certificates            GET     installation layer certificates, see below
 //	/metadata/<k>                  GET     free-form per-VM values
 //	/attest/nonce                  GET     fresh nonce for the TPM quote
 //	/attest/quote                  POST    QuoteRequest JSON -> QuoteResult JSON
@@ -56,6 +57,23 @@
 // kubernetes_@v.raw under /sysupdate/kubernetes/, cni_@v.raw under
 // /sysupdate/cni/); the ArtifactSource is only
 // asked for what the guest requests, directory listings are never produced.
+//
+// # Layer certificates
+//
+// /layer-certificates is the installation's layer certificates of create_vm,
+// concatenated PEM CERTIFICATE blocks (each ending in a newline) in the
+// caller's order; 404 when the VM has none. The initrd enrolls each into the
+// .dm-verity keyring and, in the same order and before sealing the keyring,
+// extends PCR 15 with
+//
+//	systemd-pcrextend --pcr=15 layer-certificate:<lowercase hex sha256 of the DER>
+//
+// The ready-stage quote covers PCR 15 and carries systemd's userspace
+// measurement log; the verifier replays it and requires exactly the served
+// certificates in order (internal/attest). Every PCR 15 record must be a
+// systemd string record whose sha256 digest is that of its word, and the
+// word a machine-id:, file-system: or layer-certificate: measurement: the
+// guest extends PCR 15 with nothing else.
 //
 // # Keeping the image in sync
 //

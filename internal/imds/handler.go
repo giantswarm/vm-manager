@@ -66,6 +66,7 @@ var routes = map[string]handlerFunc{
 	"/instance-id":        plain(func(i Instance) string { return i.ID }),
 	"/kubernetes-version": plain(func(i Instance) string { return i.KubernetesVersion }),
 	"/cni-version":        plain(func(i Instance) string { return i.CNIVersion }),
+	"/layer-certificates": plain(func(i Instance) string { return strings.Join(i.LayerCertificates, "") }),
 	"/public-keys/":       (*server).publicKeyIndex,
 	"/public-keys/0":      (*server).publicKey,
 	"/metadata/":          (*server).metadata,

@@ -105,14 +105,31 @@ func TestBuildQuoteVerifiesLocally(t *testing.T) {
 		})
 	}
 
-	// The two selections differ only in PCR 13, and the AK does not change
-	// between stages.
-	_, initrdHas13 := seen[imds.StageInitrd].PCRs[Bank]["13"]
-	_, readyHas13 := seen[imds.StageReady].PCRs[Bank]["13"]
-	assert.False(t, initrdHas13)
-	assert.True(t, readyHas13)
+	// The two selections differ only in PCRs 13 and 15, and the AK does not
+	// change between stages.
+	for _, idx := range []string{"13", "15"} {
+		_, initrdHas := seen[imds.StageInitrd].PCRs[Bank][idx]
+		_, readyHas := seen[imds.StageReady].PCRs[Bank][idx]
+		assert.False(t, initrdHas, "initrd quotes pcr %s", idx)
+		assert.True(t, readyHas, "ready quotes pcr %s", idx)
+	}
 	assert.Equal(t, seen[imds.StageInitrd].AKPub, seen[imds.StageReady].AKPub)
 	assert.Equal(t, seen[imds.StageInitrd].EKPub, seen[imds.StageReady].EKPub)
+}
+
+// TestBuildAttachesUserspaceLog posts systemd's measurement log as read:
+// the verifier replays its PCR 15 records against the ready quote.
+func TestBuildAttachesUserspaceLog(t *testing.T) {
+	tpm := transport.FromReadWriter(newSimulator(t))
+	dir := t.TempDir()
+	log := filepath.Join(dir, "tpm2-measure.log")
+	record := "\x1e{\"pcr\":15,\"content_type\":\"systemd\",\"content\":{\"string\":\"layer-certificate:00\"}}\n"
+	require.NoError(t, os.WriteFile(log, []byte(record), 0o600))
+
+	req, err := Build(Options{TPM: tpm, FirmwareLog: filepath.Join(dir, "missing"), UserspaceLog: log}, imds.StageReady, nonce)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(record), req.UserspaceLog)
+	assert.Contains(t, req.PCRs[Bank], "15")
 }
 
 // verifyQuote does what the host verifier will do with the wire fields:
@@ -232,7 +249,7 @@ func TestSelectionAndBank(t *testing.T) {
 	assert.Equal(t, []uint{0, 1, 2, 3, 4, 5, 6, 7, 11}, initrd)
 	ready, err := Selection(imds.StageReady)
 	require.NoError(t, err)
-	assert.Equal(t, []uint{0, 1, 2, 3, 4, 5, 6, 7, 11, 13}, ready)
+	assert.Equal(t, []uint{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, ready)
 	_, err = Selection("boot")
 	assert.Error(t, err)
 

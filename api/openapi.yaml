@@ -623,6 +623,15 @@ components:
         require_attestation:
           type: boolean
           default: true
+        layer_certificates:
+          type: array
+          maxItems: 16
+          description: >-
+            Installation layer certificates, PEM X.509, one or more CERTIFICATE blocks per item and at most 16 certificates
+            in all; private keys, other PEM types, text outside the blocks and duplicates are rejected. Served in this order
+            as the IMDS key /layer-certificates; the ready attestation must measure exactly these into PCR 15.
+          items:
+            type: string
         wait_for:
           type: string
           enum: [none, installed, attested, ready]
@@ -651,6 +660,13 @@ components:
           description: PCR indexes accepted without a golden value in the image policy.
           items:
             type: integer
+        layerCertificates:
+          type: array
+          description: >-
+            sha256 digests of the layer certificates the ready quote measured into PCR 15, in order; set once the
+            userspace measurement log replayed to the quoted value, also when they differ from those served.
+          items:
+            type: string
     Attestation:
       type: object
       required: [required, userDataReleased]
@@ -727,6 +743,11 @@ components:
           type: string
         requireAttestation:
           type: boolean
+        layerCertificates:
+          type: array
+          description: The installation layer certificates in canonical PEM, one certificate per item, in the order served.
+          items:
+            type: string
         state:
           type: string
           enum: [creating, installing, booting, attesting, ready, running, stopping, stopped, failed, deleting]
