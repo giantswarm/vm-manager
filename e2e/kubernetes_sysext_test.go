@@ -116,6 +116,7 @@ func TestKubernetesSysext(t *testing.T) {
 	g.waitSSH(ctx)
 	assertKubernetesPulled(ctx, t, g, sx)
 	assertKubernetesRunning(ctx, t, g, version)
+	assertContainerdSignedLayers(ctx, t, g)
 	assertCNIPlugins(ctx, t, g, sx, image.Certificate != "")
 	assertPCR13(ctx, t, g, sx)
 	if image.Certificate != "" {
@@ -323,6 +324,85 @@ func assertKubernetesRunning(ctx context.Context, t *testing.T, g *guest, versio
 
 	assert.Empty(t, g.sh(ctx, "systemctl --failed --no-legend --plain"), "failed units after the pull")
 	assert.Equal(t, "running", g.sh(ctx, "systemctl is-system-running || true"), "system state")
+}
+
+// The image the CRI refuses for want of signed layers: the default sandbox
+// image, public and unsigned, pinned by its index; its linux/amd64 manifest
+// has one layer. The pause release is immutable, so are the digests.
+const (
+	unsignedImage    = "registry.k8s.io/pause@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+	unsignedManifest = "sha256:412c4a7219cb8a299a37337f3d87810c5340095322e15594a1637785adad0f17"
+	unsignedLayer    = "sha256:81ede36234b06d9a16771d804ef81ea888e29f8c425a5269e3d55d34a1b128a8"
+)
+
+// containerdImageLine is the pin of the sysext's containerd in images/Makefile.
+var containerdImageLine = regexp.MustCompile(`(?m)^CONTAINERD_IMAGE\s*:=\s*[^:\s]+:([^@\s]+)@sha256:[0-9a-f]{64}$`)
+
+// assertContainerdSignedLayers checks the sysext's containerd (images/README.md,
+// "containerd"): the Giant Swarm line's release pinned in images/Makefile, the
+// EROFS snapshotter and differ loaded, the effective configuration requiring
+// signed dm-verity layers on both pull paths, and a pull of an unsigned image
+// refused, naming its layer. A signed pull needs a registry with signed
+// referrers, which the cluster tests bring.
+func assertContainerdSignedLayers(ctx context.Context, t *testing.T, g *guest) {
+	t.Helper()
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "images", "Makefile"))
+	require.NoError(t, err)
+	pin := containerdImageLine.FindSubmatch(makefile)
+	require.NotNil(t, pin, "CONTAINERD_IMAGE in images/Makefile")
+	want := string(pin[1])
+	got := g.sh(ctx, "containerd --version")
+	t.Logf("containerd --version: %s", got)
+	assert.Contains(t, " "+got+" ", " "+want+" ", "containerd is the release CONTAINERD_IMAGE pins")
+
+	plugins := g.sh(ctx, "ctr plugins ls")
+	t.Logf("ctr plugins ls (erofs):\n%s", g.sh(ctx, "ctr plugins ls | grep -F erofs || true"))
+	for _, p := range []string{"io.containerd.snapshotter.v1", "io.containerd.differ.v1"} {
+		assert.Regexp(t, `(?m)^`+regexp.QuoteMeta(p)+`\s+erofs\s+\S+\s+ok\s*$`, plugins, "%s erofs loads", p)
+	}
+
+	dump := g.sh(ctx, "containerd --config /usr/lib/vm-manager/containerd.toml config dump")
+	for header, keys := range map[string][]string{
+		"[plugins.'io.containerd.cri.v1.images']":                     {"snapshotter = 'erofs'"},
+		"[plugins.'io.containerd.differ.v1.erofs']":                   {"enable_tar_index = true", "enable_dmverity = true", "enable_dmverity_referrers = true"},
+		"[plugins.'io.containerd.snapshotter.v1.erofs']":              {"dmverity_mode = 'on'", "enable_dmverity_referrers = true"},
+		"[plugins.'io.containerd.service.v1.diff-service']":           {"default = ['erofs', 'walking']"},
+		"[[plugins.'io.containerd.transfer.v1.local'.unpack_config]]": {"platform = 'linux/amd64'", "snapshotter = 'erofs'", "differ = 'erofs'"},
+	} {
+		section := tomlSection(dump, header)
+		for _, k := range keys {
+			assert.Contains(t, section, k, "effective containerd configuration, %s", header)
+		}
+	}
+	assert.Equal(t, 1, strings.Count(dump, "[[plugins.'io.containerd.transfer.v1.local'.unpack_config]]"), "the transfer service unpacks into erofs only")
+
+	res, err := g.run(ctx, "timeout 120 crictl --runtime-endpoint "+containerdSocket+" pull "+unsignedImage)
+	require.NoError(t, err)
+	t.Logf("crictl pull %s: exit %d\n%s%s", unsignedImage, res.ExitCode, res.Stdout, res.Stderr)
+	assert.NotZero(t, res.ExitCode, "an image without signed dm-verity layers is refused")
+	assert.Contains(t, res.Stderr, "layer "+unsignedLayer+" has no signed dm-verity root hash: image manifest "+unsignedManifest+
+		" has no application/vnd.containerd.erofs.dmverity.v1 referrer", "the refusal names the layer")
+}
+
+// tomlSection returns the keys of one table of a `containerd config dump`:
+// the lines after its header up to the next header.
+func tomlSection(dump, header string) string {
+	var out []string
+	in := false
+	for _, line := range strings.Split(dump, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			if in {
+				break
+			}
+			in = trimmed == header
+			continue
+		}
+		if in && trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // assertCNIPlugins checks where containerd finds CNI plugins: its effective
