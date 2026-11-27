@@ -584,6 +584,11 @@ Nothing on the var partition, in the upper layer of the `/etc` overlay, on `/run
 IMA policy or X.509 certificate comes from there either. Root is no exception, and cannot
 switch it off.
 
+Container images reach that boundary as signed dm-verity layers: containerd opens each layer
+as an EROFS tar index under dm-verity, with a root hash signature that
+`vm-manager layers sign` publishes next to the image
+([docs/layer-signing.md](../docs/layer-signing.md)).
+
 The policy, [`ipe/giantswarm-vm.policy`](ipe/giantswarm-vm.policy):
 
     policy_name=giantswarm-vm policy_version=<image version>
