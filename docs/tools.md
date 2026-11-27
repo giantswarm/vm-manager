@@ -69,7 +69,7 @@ It allocates a disk on the storage provider, a vTPM, a network lease and a vsock
 {
   "properties": {
     "cni_version": {
-      "description": "CNI sysext \"<cni>-<release>\" served as /cni-version, the only CNI plugins besides the reference ones: \"cilium-<release>\" (\"cilium-1.20.5\"); default: the newest cilium-* the image offers. See get_image",
+      "description": "CNI sysext \"cilium-<release>\" served as /cni-version, the only CNI plugins besides the reference ones; default: the newest cilium. See get_image",
       "type": "string"
     },
     "cpus": {
