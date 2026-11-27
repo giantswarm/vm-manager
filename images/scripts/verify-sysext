@@ -113,7 +113,7 @@ content_kubernetes() {
         [[ "$("$ext/usr/bin/kubectl" version --client -o json | python3 -c 'import json, sys; print(json.load(sys.stdin)["clientVersion"]["gitVersion"])')" == "v$version" ]] \
                 || fail "kubectl reports $("$ext/usr/bin/kubectl" version --client 2>&1 | head -1), image says $version"
         [[ -x "$ext/usr/lib/cni/bridge" ]] || fail "/usr/lib/cni/bridge missing"
-        # containerd prints "containerd github.com/containerd/containerd/v2 v2.3.5 <commit>";
+        # containerd prints "containerd github.com/containerd/containerd/v2 v2.4.2-gs.2 <commit>";
         # Arch builds crictl without its version string.
         ok "kubeadm/kubelet/kubectl v$version; containerd $("$ext/usr/bin/containerd" --version | /usr/bin/grep -oE ' v[0-9][^ ]*' | head -1 | tr -d ' '), $("$ext/usr/bin/runc" --version | head -1), CNI plugins in /usr/lib/cni, crictl, preflight tools"
 
@@ -122,19 +122,27 @@ content_kubernetes() {
                  usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf usr/lib/systemd/system/kubelet.service.d/20-vm-manager.conf \
                  usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf \
                  usr/lib/systemd/system-preset/50-kubernetes.preset usr/lib/vm-manager/containerd.toml \
-                 usr/lib/sysctl.d/90-kubernetes.conf usr/lib/sysctl.d/50-kubelet.conf usr/lib/modules-load.d/kubelet.conf usr/lib/tmpfiles.d/kubernetes.conf; do
+                 usr/lib/sysctl.d/90-kubernetes.conf usr/lib/sysctl.d/50-kubelet.conf usr/lib/modules-load.d/kubelet.conf usr/lib/modules-load.d/containerd.conf usr/lib/tmpfiles.d/kubernetes.conf; do
                 [[ -s "$ext/$f" ]] || fail "$f missing"
         done
         python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); r = c["plugins"]["io.containerd.cri.v1.runtime"]
 assert r["containerd"]["runtimes"]["runc"]["options"]["SystemdCgroup"] is True, "SystemdCgroup"
-assert r["cni"]["bin_dirs"] == ["/usr/lib/cni"], r["cni"]["bin_dirs"]' "$ext/usr/lib/vm-manager/containerd.toml" \
-                || fail "containerd.toml does not parse or lacks SystemdCgroup/bin_dirs"
+assert r["cni"]["bin_dirs"] == ["/usr/lib/cni"], r["cni"]["bin_dirs"]
+p = c["plugins"]
+assert p["io.containerd.cri.v1.images"]["snapshotter"] == "erofs", "CRI snapshotter"
+d = p["io.containerd.differ.v1.erofs"]
+assert d["enable_tar_index"] is True and d["enable_dmverity"] is True and d["enable_dmverity_referrers"] is True, d
+s = p["io.containerd.snapshotter.v1.erofs"]
+assert s["dmverity_mode"] == "on" and s["enable_dmverity_referrers"] is True, s
+u = p["io.containerd.transfer.v1.local"]["unpack_config"]
+assert [(x["platform"], x["snapshotter"], x["differ"]) for x in u] == [("linux/amd64", "erofs", "erofs")], u' "$ext/usr/lib/vm-manager/containerd.toml" \
+                || fail "containerd.toml does not parse or lacks SystemdCgroup/bin_dirs/signed EROFS layers"
         /usr/bin/grep -q 'containerd.toml' "$ext/usr/lib/systemd/system/containerd.service.d/10-vm-manager.conf" || fail "containerd drop-in does not point at containerd.toml"
         /usr/bin/grep -q '^Upholds=containerd.service kubelet.service' "$ext/usr/lib/systemd/system/multi-user.target.d/10-kubernetes.conf" || fail "multi-user.target drop-in lacks Upholds="
         for u in systemd-modules-load.service systemd-sysctl.service; do
                 /usr/bin/grep -qx 'After=systemd-sysext.service' "$base/usr/lib/systemd/system/$u.d/vm-manager.conf" 2>/dev/null || fail "base tree does not order $u after systemd-sysext.service"
         done
-        ok "units: kubelet + containerd with vm-manager drop-ins, Upholds= from multi-user.target, containerd.toml (SystemdCgroup, bin_dirs only /usr/lib/cni), base orders modules-load/sysctl after sysext"
+        ok "units: kubelet + containerd with vm-manager drop-ins, Upholds= from multi-user.target, containerd.toml (SystemdCgroup, bin_dirs only /usr/lib/cni, EROFS with signed dm-verity layers), base orders modules-load/sysctl after sysext"
 
         # 8. Merge onto the base tree with systemd-sysext, in an unprivileged user
         #    namespace (private mount namespace: nothing on the host or in build/
