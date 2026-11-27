@@ -12,7 +12,7 @@ set -euo pipefail
 pacman-key --init
 pacman -Syu --noconfirm --needed \
   base-devel git go mkosi systemd systemd-ukify erofs-utils dosfstools mtools cpio \
-  zstd openssl gnupg python-pefile python-cryptography util-linux file crane
+  zstd openssl gnupg jq python-pefile python-cryptography util-linux file crane
 mkosi --version
 systemctl --version | head -1
 go version

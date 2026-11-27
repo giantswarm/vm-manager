@@ -8,6 +8,7 @@
 #   make kubernetes-all                      every release of KUBERNETES_VERSIONS
 #   make cni verify-cni                      one CNI sysext (CNI_VERSION), base tree is reused
 #   make cni-all                             every release of CNI_VERSIONS
+#   make containerd                          containerd of the kubernetes sysext (cached)
 #   make ignition                            Ignition binary for the initrd (cached)
 #   make agent                               vm-agent binary for base and initrd (make -C .. agent)
 #   make e2e-sysext                          the e2e tests' firmware sysext, base tree is reused
@@ -54,6 +55,19 @@ CNI_TREE     := $(BUILD)/cni/tree
 # manifest, so switching versions leaves the cached base tree alone (the base
 # installs nothing from it; the sysext's pinned package list changes anyway).
 KUBERNETES_MKOSI_ARGS := --volatile-package-directory=$(KUBERNETES_PKGS)
+# containerd of the kubernetes sysext: the Giant Swarm line's static build
+# (https://github.com/giantswarm/containerd, FORK.md), an OCI artifact pinned
+# by tag and digest; Renovate bumps both together (renovate-custom.json5).
+# scripts/fetch-containerd verifies it and stages its binaries and upstream's
+# unit into $(CONTAINERD_TREE), ExtraTrees= of mkosi.images/kubernetes/
+# mkosi.conf; the sysext's mkosi.postinst refuses a build whose containerd
+# does not report CONTAINERD_VERSION (passed through Environment=).
+# renovate: datasource=docker depName=gsoci.azurecr.io/giantswarm/containerd
+CONTAINERD_IMAGE   := gsoci.azurecr.io/giantswarm/containerd:v2.4.2-gs.2@sha256:6c5b09085900001992644b033f6d2122df902cb8f60cb733803c6aa5c6238982
+CONTAINERD_VERSION := $(lastword $(subst :, ,$(firstword $(subst @, ,$(CONTAINERD_IMAGE)))))
+export CONTAINERD_VERSION
+CONTAINERD_CACHE   := $(BUILD)/containerd/$(CONTAINERD_VERSION)
+CONTAINERD_TREE    := $(BUILD)/containerd/tree
 # Ignition for the initrd, built from the upstream tag (Arch has no package)
 # into $(IGNITION_DIR)/tree and copied in through ExtraTrees= of
 # mkosi.initrd.conf/mkosi.conf. See scripts/build-ignition.
@@ -92,7 +106,7 @@ CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
+.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages containerd cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
 
 # `images` builds the default Kubernetes version and CNI release; the other
 # listed releases follow, one `make kubernetes` or `make cni` each.
@@ -148,6 +162,11 @@ $(KUBERNETES_PKGS)/.verified: $(SCRIPTS)/fetch-kubernetes-packages
 	$(SCRIPTS)/fetch-kubernetes-packages $(KUBERNETES_VERSION) $(KUBERNETES_PKGS)
 	touch $@
 
+# The containerd release of the kubernetes sysext, staged as its tree. Always
+# restaged (the download is cached and re-verified in $(CONTAINERD_CACHE)).
+containerd:
+	$(SCRIPTS)/fetch-containerd $(CONTAINERD_IMAGE) $(CONTAINERD_CACHE) $(CONTAINERD_TREE)
+
 # The plugins of $(CNI_VERSION), staged as the cni sysext's tree. Always
 # restaged: the tree is shared by every release (the files exported from the
 # image are cached per digest in $(CNI_CACHE)).
@@ -159,7 +178,7 @@ cni-plugins:
 # and the disk image with the IPE policy for the first one's root, then it
 # lays out the sysupdate directories (renamed artifacts, SHA256SUMS,
 # SHA256SUMS.gpg) and the e2e tests' sysext.
-images: keys ignition agent kubernetes-packages cni-plugins
+images: keys ignition agent kubernetes-packages containerd cni-plugins
 	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
@@ -177,7 +196,7 @@ base: keys ignition agent
 # base tree is reused. Without --force, which would also delete the disk image
 # outputs of the skipped main image; the previous build of this version is
 # removed by hand, other versions stay.
-kubernetes: keys kubernetes-packages
+kubernetes: keys kubernetes-packages containerd
 	rm -f $(BUILD)/kubernetes_$(KUBERNETES_VERSION) $(BUILD)/kubernetes_$(KUBERNETES_VERSION).*
 	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --format=none --bootable=no --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
@@ -230,7 +249,7 @@ smoke-boot:
 	$(SCRIPTS)/smoke-boot $(BUILD) $(IMAGE_ID) $(VERSION) "$(PROFILE)"
 
 # All images, the sysexts for $(KUBERNETES_VERSION) and $(CNI_VERSION).
-summary: kubernetes-packages
+summary: kubernetes-packages containerd
 	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni summary
 
 clean:
