@@ -180,12 +180,9 @@ func assertKubernetesPulled(ctx context.Context, t *testing.T, g *guest, sx syse
 
 	status := g.sh(ctx, "systemd-sysext status --no-legend --no-pager")
 	t.Logf("systemd-sysext status:\n%s", status)
-	merged := ""
-	for _, row := range strings.Split(status, "\n") {
-		if fields := strings.Fields(row); len(fields) >= 2 && fields[0] == "/usr" {
-			merged = fields[1]
-		}
-	}
+	// The extensions of a hierarchy are one per line in that table; the
+	// extension-release files of the merged /usr name them plainly.
+	merged := strings.Join(strings.Fields(g.sh(ctx, "ls /usr/lib/extension-release.d/ | sed -n 's/^extension-release\\.//p'")), ",")
 	assert.ElementsMatch(t, []string{"kubernetes_" + sx.kubernetes.version, "cni_" + sx.cni.version}, strings.Split(merged, ","), "exactly these extensions merged on /usr")
 	assert.ElementsMatch(t, []string{sx.kubernetes.file, sx.cni.file}, strings.Fields(g.sh(ctx, "ls "+extensionsDir)), "exactly one file per component in %s", extensionsDir)
 	assert.Equal(t, "1", g.sh(ctx, "ls /usr/lib/extension-release.d/ | grep -c ^extension-release.kubernetes_"), "one kubernetes extension-release")
