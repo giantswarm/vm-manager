@@ -312,13 +312,19 @@ func (c *cluster) bootstrapped(ctx context.Context, v vm.VM) *guest {
 }
 
 // kubeadmDiagnostics is what a stuck or failed bootstrap should show: the
-// unit's state, the pending jobs and the end of the kubeadm journal, which
-// holds the preflight output.
+// unit's state, the pending jobs, the end of the kubeadm journal, which holds
+// the preflight output, the static pods' sandboxes and containers, and what
+// containerd, the kubelet, dm-verity and IPE said about them.
 var kubeadmDiagnostics = []string{
 	"systemctl show -p ActiveState -p SubState -p Result -p ExecMainStatus " + kubeadmUnit,
 	"systemctl list-jobs --no-pager --no-legend",
 	"systemctl is-active vm-kubernetes.service containerd.service kubelet.service",
 	"journalctl -b -o cat -u " + kubeadmUnit + " --no-pager",
+	"crictl pods; crictl ps -a",
+	"journalctl -b -o cat -u containerd.service --no-pager | grep -iE 'error|fail|verity|denied' | tail -n 25",
+	"journalctl -b -o cat -u kubelet.service --no-pager | grep -iE 'error|fail' | tail -n 25",
+	"journalctl -b -k -o cat --no-pager | grep -iE 'verity|erofs|ipe|denied|keyring' | tail -n 25",
+	"journalctl -b -o cat --no-pager | grep -F 'ipe_op=' | grep -F 'action=DENY' | tail -n 10",
 }
 
 // clusterDiagnostics is what a cluster that does not settle should show, from
