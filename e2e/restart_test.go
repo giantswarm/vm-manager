@@ -56,6 +56,7 @@ func TestRestart(t *testing.T) {
 	g.waitSSH(ctx)
 	bootID := g.sh(ctx, "cat /proc/sys/kernel/random/boot_id")
 	g.sh(ctx, "echo "+restartMarker+" > /run/restart-marker")
+	waitConsole(ctx, t, m, v.ID, consoleWithin, consoleMultiUser)
 	var before api.ConsoleResponse
 	m.call(ctx, api.ToolGetVMConsole, map[string]any{"id": v.ID, "lines": 10000}, &before)
 	require.Contains(t, before.Console, consoleMultiUser)
