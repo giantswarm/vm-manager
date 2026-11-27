@@ -127,7 +127,7 @@ func TestKubernetesSysext(t *testing.T) {
 // firmware loader or kexec look at its content, so a sysext binary stands in
 // for a .ko, a firmware blob and a kernel: the same call with a file of the
 // base root passes IPE and fails only at the format check. The audit record
-// names the path the kernel opened: the sysext's own for the module and the
+// names the path the kernel opened: the sysext's own for the module,
 // firmware (a symlink resolves to it), the bind mount on the ESP for kexec.
 func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest) {
 	t.Helper()
@@ -147,10 +147,12 @@ func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest) {
 	assert.Contains(t, denials("KMODULE"), "kubelet", "IPE refused the sysext file as a kernel module")
 
 	// Firmware: cfg80211 asks for regulatory.db when it loads, from
-	// firmware_class.path first; the file there is the sysext's.
-	g.sh(ctx, "mkdir -p /run/ipe-e2e-fw && ln -sfn "+sysextFile+" /run/ipe-e2e-fw/regulatory.db && "+
+	// firmware_class.path first, which the kernel resolves in PID 1's mount
+	// namespace; the file there is the sysext's, bind-mounted.
+	g.sh(ctx, "nsenter -t 1 -m -- sh -c 'mkdir -p /run/ipe-e2e-fw && touch /run/ipe-e2e-fw/regulatory.db && "+
+		"mount --bind "+sysextFile+" /run/ipe-e2e-fw/regulatory.db' && "+
 		"printf /run/ipe-e2e-fw > /sys/module/firmware_class/parameters/path && modprobe cfg80211")
-	assert.Eventually(t, func() bool { return strings.Contains(denials("FIRMWARE"), "kubelet") }, 30*time.Second, time.Second,
+	assert.Eventually(t, func() bool { return strings.Contains(denials("FIRMWARE"), "ipe-e2e-fw") }, 30*time.Second, time.Second,
 		"IPE refused the sysext file as firmware\n%s", g.sh(ctx, "journalctl -b -k -o cat --no-pager | grep -iE 'regulatory|firmware|ipe' | tail -n 20 || true"))
 
 	// kexec: systemctl kexec loads the default boot entry's kernel with
