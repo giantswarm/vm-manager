@@ -10,7 +10,7 @@
 #   make cni-all                             every release of CNI_VERSIONS
 #   make ignition                            Ignition binary for the initrd (cached)
 #   make agent                               vm-agent binary for base and initrd (make -C .. agent)
-#   make ipe                                 sign the IPE policy for the base tree
+#   make e2e-sysext                          the e2e tests' firmware sysext, base tree is reused
 #   make PROFILE=debug base smoke-boot       root autologin, empty root password
 #   make clean                               drop build/ (keys/ are kept)
 
@@ -67,13 +67,24 @@ IGNITION_STAMP   := $(IGNITION_DIR)/stamp-$(IGNITION_VERSION)
 AGENT_DIR  := $(BUILD)/agent
 AGENT_TREE := $(AGENT_DIR)/tree
 AGENT_BIN  := $(AGENT_TREE)/usr/bin/vm-agent
-# The IPE policy (ipe/giantswarm-vm.policy), signed with the verity key into
-# $(IPE_TREE)/etc/ipe/giantswarm-vm.p7b, which ExtraTrees= of
-# mkosi.images/base/mkosi.conf copies into the root file system. See
-# scripts/sign-ipe-policy and README.md, IPE.
+# The IPE policy (ipe/giantswarm-vm.policy) names the root's verity root hash,
+# so the disk image is built twice (mkosi-ipe below): the first run yields the
+# root hash, scripts/sign-ipe-policy writes the signed policy to $(IPE_P7B),
+# which ExtraTrees= of mkosi.initrd.conf/mkosi.conf copies into the initrd, and
+# the second run builds the same root and the UKI with that initrd. See
+# README.md, IPE.
 IPE_POLICY := ipe/giantswarm-vm.policy
-IPE_TREE   := $(BUILD)/ipe/tree
-IPE_P7B    := $(IPE_TREE)/etc/ipe/giantswarm-vm.p7b
+IPE_DIR    := $(BUILD)/ipe
+IPE_TREE   := $(IPE_DIR)/tree
+IPE_P7B    := $(IPE_TREE)/usr/lib/vm-manager/ipe/giantswarm-vm.p7b
+ROOTHASH   := $(BUILD)/$(IMAGE_ID)_$(VERSION).roothash
+# One timestamp for every file of the image, so that both runs of mkosi-ipe
+# produce the root byte for byte: mkosi clamps the tree's mtimes to it and
+# hands it to systemd-repart and mkfs.erofs (Seed= of mkosi.conf fixes the
+# UUIDs and the verity salt). The last commit's time keeps it stable across
+# rebuilds of one checkout.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || date +%s)
+export SOURCE_DATE_EPOCH
 # The certificate the image's verity root hash, its sysexts and its IPE policy
 # are signed with, published next to the UKI for vm-manager to enroll into
 # each VM's UEFI db (internal/uefivars).
@@ -81,7 +92,7 @@ CERT := $(BUILD)/$(IMAGE_ID)_$(VERSION).crt
 
 MKOSI_ARGS := $(if $(PROFILE),--profile=$(PROFILE))
 
-.PHONY: all keys ignition agent ipe images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
+.PHONY: all keys ignition agent images base kubernetes kubernetes-all kubernetes-packages cni cni-all cni-plugins e2e-sysext verify verify-base verify-kubernetes verify-cni smoke-boot clean summary
 
 # `images` builds the default Kubernetes version and CNI release; the other
 # listed releases follow, one `make kubernetes` or `make cni` each.
@@ -112,10 +123,21 @@ $(AGENT_BIN): FORCE
 
 FORCE:
 
-ipe: $(IPE_P7B)
-
-$(IPE_P7B): $(IPE_POLICY) mkosi.version $(KEYS)/import-pubring.pgp $(SCRIPTS)/sign-ipe-policy
-	$(SCRIPTS)/sign-ipe-policy $(IPE_POLICY) $(VERSION) $(KEYS) $(IPE_TREE)
+# $(call mkosi-ipe,<arguments of the second mkosi run>): the disk image with
+# the IPE policy in its initrd. The first run builds the base tree and the disk
+# image without a policy, for the root hash only; the second rebuilds both (and
+# whatever the arguments add, the kubernetes sysext) with the policy signed for
+# that root in the initrd, and must arrive at the same root hash: a root that
+# differs from the one the policy names would load no kernel module.
+define mkosi-ipe
+	rm -f $(IPE_P7B) $(IPE_DIR)/roothash
+	mkdir -p $(IPE_TREE)
+	$(MKOSI) $(MKOSI_ARGS) --force build
+	$(SCRIPTS)/sign-ipe-policy $(IPE_POLICY) $(VERSION) $(ROOTHASH) $(KEYS) $(IPE_DIR)
+	$(MKOSI) $(MKOSI_ARGS) $(1) --force build
+	test "$$(tr -d '\n' <$(IPE_DIR)/roothash)" = "$$(tr -d '\n' <$(ROOTHASH))" || \
+		{ echo "mkosi-ipe: the second run built root $$(cat $(ROOTHASH)), the IPE policy names $$(cat $(IPE_DIR)/roothash): the root is not reproducible" >&2; exit 1; }
+endef
 
 # The node packages of $(KUBERNETES_VERSION) from the Arch Linux Archive; the
 # stamp records a complete, verified set (the script re-verifies what is
@@ -132,20 +154,22 @@ $(KUBERNETES_PKGS)/.verified: $(SCRIPTS)/fetch-kubernetes-packages
 cni-plugins:
 	$(SCRIPTS)/fetch-cni-plugins $(CNI_VERSION) $(CNI_CACHE) $(CNI_TREE)
 
-# One mkosi run builds the base tree, the kubernetes and cni sysexts
-# (--dependency= appends to Dependencies=base of mkosi.conf) and the disk
-# image, then lays out the sysupdate directories (renamed artifacts,
-# SHA256SUMS, SHA256SUMS.gpg).
-images: keys ignition agent ipe kubernetes-packages cni-plugins
-	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --force --dependency=kubernetes --dependency=cni build
+# Two mkosi runs (mkosi-ipe): the second builds the base tree, the kubernetes
+# and cni sysexts (--dependency= appends to Dependencies=base of mkosi.conf)
+# and the disk image with the IPE policy for the first one's root, then it
+# lays out the sysupdate directories (renamed artifacts, SHA256SUMS,
+# SHA256SUMS.gpg) and the e2e tests' sysext.
+images: keys ignition agent kubernetes-packages cni-plugins
+	$(call mkosi-ipe,$(KUBERNETES_MKOSI_ARGS) --dependency=kubernetes --dependency=cni)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
 	$(SCRIPTS)/publish-sysupdate cni $(BUILD) cni $(CNI_VERSION) $(KEYS)
+	$(SCRIPTS)/build-e2e-sysext $(BUILD) $(KEYS)
 	install -m0644 $(KEYS)/verity.crt $(CERT)
 
-# Base tree and disk image only.
-base: keys ignition agent ipe
-	$(MKOSI) $(MKOSI_ARGS) --force build
+# Base tree and disk image only (two mkosi runs, mkosi-ipe).
+base: keys ignition agent
+	$(call mkosi-ipe,)
 	$(SCRIPTS)/publish-sysupdate base $(BUILD) $(IMAGE_ID) $(VERSION) $(KEYS)
 	install -m0644 $(KEYS)/verity.crt $(CERT)
 
@@ -157,6 +181,13 @@ kubernetes: keys kubernetes-packages
 	rm -f $(BUILD)/kubernetes_$(KUBERNETES_VERSION) $(BUILD)/kubernetes_$(KUBERNETES_VERSION).*
 	$(MKOSI) $(MKOSI_ARGS) $(KUBERNETES_MKOSI_ARGS) --format=none --bootable=no --dependency=kubernetes build
 	$(SCRIPTS)/publish-sysupdate kubernetes $(BUILD) kubernetes $(KUBERNETES_VERSION) $(KEYS)
+
+# build/e2e/ipe-e2e.raw, the test-only sysext e2e/kubernetes_sysext_test.go
+# merges to prove that IPE refuses firmware from a signed sysext: signed with
+# the verity key, ID and version from the base tree's os-release. `images`
+# builds it too; nothing publishes it.
+e2e-sysext: keys
+	$(SCRIPTS)/build-e2e-sysext $(BUILD) $(KEYS)
 
 # Every release of KUBERNETES_VERSIONS, published side by side:
 #   make kubernetes-all KUBERNETES_VERSIONS="1.36.4 1.35.4"

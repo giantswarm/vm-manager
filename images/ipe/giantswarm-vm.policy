@@ -1,27 +1,32 @@
 policy_name=giantswarm-vm policy_version=@VERSION@
-# IPE policy of giantswarm-vm-base, signed at build time with the image's
-# verity key (scripts/sign-ipe-policy) and installed as
-# /etc/ipe/giantswarm-vm.p7b, which systemd (PID 1) loads and activates right
-# after the switch to the real root, before it starts anything there.
+# IPE policy of giantswarm-vm-base. It names the root's verity root hash, so
+# it is generated after the root (@ROOTHASH@ is the image's .roothash), signed
+# with the image's verity key (scripts/sign-ipe-policy) and shipped in the
+# initrd as /usr/lib/vm-manager/ipe/giantswarm-vm.p7b. The initrd's
+# vm-ipe-policy.service puts it into /run/ipe/ right before the switch to the
+# real root, where systemd (PID 1) loads and activates it before it starts
+# anything there. The initrd itself runs without a policy: it is part of the
+# measured UKI and executes nothing it does not carry.
 #
-# The kernel executes, maps executable and loads code only from a dm-verity
-# device whose root hash signature it verified itself: the base image's root
-# and the Kubernetes sysext (through the /usr overlay, IPE judges the file's
-# real inode). Nothing on the var partition, the /etc overlay's upper layer,
-# /run, /tmp or anonymous executable memory runs, and no kernel module,
-# firmware, kexec image, IMA policy or X.509 certificate comes from there.
-# vm-manager enrolls the verity certificate into the VM's UEFI db, which puts
-# it on the kernel's platform keyring: that is what makes the signatures
-# kernel-verified and this policy loadable. The initrd runs without a policy:
-# it is part of the measured UKI and executes nothing it does not carry.
+# The kernel executes and maps executable only what comes from a dm-verity
+# device whose root hash signature it verified itself: the base image's root,
+# the Kubernetes sysext (through the /usr overlay, IPE judges the file's real
+# inode) and, later, signed container layers. Nothing on the var partition,
+# the /etc overlay's upper layer, /run, /tmp or anonymous executable memory
+# runs. Every other operation (kernel modules, firmware, kexec images and
+# initramfs, IMA policies, X.509 certificates) trusts the base root alone, by
+# its root hash: a key that signs a sysext or a layer earns that device the
+# right to execute, nothing more. The A and B root partitions hold the same
+# image, one root hash; a sysupdate brings a new UKI, and with it a new
+# policy, together with its root.
 #
 # The global default is DENY, so an operation a newer kernel adds is denied
 # until this policy allows it.
 DEFAULT action=DENY
 op=EXECUTE dmverity_signature=TRUE action=ALLOW
-op=FIRMWARE dmverity_signature=TRUE action=ALLOW
-op=KMODULE dmverity_signature=TRUE action=ALLOW
-op=KEXEC_IMAGE dmverity_signature=TRUE action=ALLOW
-op=KEXEC_INITRAMFS dmverity_signature=TRUE action=ALLOW
-op=POLICY dmverity_signature=TRUE action=ALLOW
-op=X509_CERT dmverity_signature=TRUE action=ALLOW
+op=FIRMWARE dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW
+op=KMODULE dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW
+op=KEXEC_IMAGE dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW
+op=KEXEC_INITRAMFS dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW
+op=POLICY dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW
+op=X509_CERT dmverity_roothash=sha256:@ROOTHASH@ action=ALLOW

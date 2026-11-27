@@ -67,9 +67,11 @@ jobs:
         run: images/scripts/install-build-deps
 
       - name: Build keys, base image and every kubernetes sysext version; verify
-        # `make -C images` (all): keys, one mkosi run for base tree, disk
-        # image and the default sysext, the other KUBERNETES_VERSIONS, then
-        # verify-base, verify-kubernetes and verify-cni (which cover every published
+        # `make -C images` (all): keys, two mkosi runs (the IPE policy names
+        # the first one's root) for base tree, disk image and the default
+        # kubernetes and cni sysexts, the e2e tests' sysext, the other
+        # KUBERNETES_VERSIONS and CNI_VERSIONS, then verify-base,
+        # verify-kubernetes and verify-cni (which cover every published
         # version). The bind-mounted checkout belongs to the runner user, the
         # container runs as root: without safe.directory, git (Make's
         # rev-parse, Go's VCS stamping of vm-agent) refuses it with "dubious
@@ -102,8 +104,9 @@ jobs:
         # The build tree (base/), Ignition sources and the .initrd (inside the
         # UKI) stay out; the rest is what vm-manager serve and the e2e tests
         # read, the .crt included: without it in the VM's UEFI db the image's
-        # IPE policy does not load and the guest stops. Already compressed
-        # (erofs zstd), so no zip compression.
+        # IPE policy does not load and the guest stops; e2e/ is the tests'
+        # own sysext (scripts/build-e2e-sysext). Already compressed (erofs
+        # zstd), so no zip compression.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ARTIFACT }}
@@ -115,6 +118,7 @@ jobs:
             images/build/*.repart.d/
             images/build/policy.json
             images/build/sysupdate/
+            images/build/e2e/
           if-no-files-found: error
           compression-level: 0
           # Long enough for e2e.yml to reuse main's image between merges.
