@@ -63,6 +63,7 @@ func newEnv(t *testing.T, learn bool) *env {
 	}
 	e.policy = attest.Policy{
 		PCR11:  map[string]string{attest.PhaseInitrd: hex.EncodeToString(values[11]), attest.PhaseReady: hex.EncodeToString(ready)},
+		PCR15:  attest.PCR15LayerCertificates,
 		Golden: map[string]map[int]string{attest.Bank: {}},
 	}
 	for i := 0; i <= 7; i++ {
@@ -622,36 +623,45 @@ func TestVerifierComparesLayerCertificates(t *testing.T) {
 	}
 }
 
-// TestVerifierPCR15OnlyRequiredWithCertificates covers the ready quote of an
-// image whose agent does not quote PCR 15 next to one that does.
-func TestVerifierPCR15OnlyRequiredWithCertificates(t *testing.T) {
+// TestVerifierPCR15FollowsThePolicy covers the ready quote of an image that
+// measures layer certificates (policy pcr15) and of one that predates them.
+func TestVerifierPCR15FollowsThePolicy(t *testing.T) {
 	withoutPCR15 := append([]int(nil), attest.RequiredPCRs(imds.StageReady)...)
 	require.NotContains(t, withoutPCR15, attest.PCRSystemIdentity)
-	served := []string{strings.Repeat("a", 64)}
+	cert := strings.Repeat("a", 64)
 
 	for _, tc := range []struct {
 		name   string
+		legacy bool // the policy lacks pcr15
 		served []string
+		words  []string
 		pcrs   []int // nil quotes what the agent quotes, PCR 15 included
 		want   string
-		// verified is the message of an accepted quote.
+		// verified is part of the message of an accepted quote.
 		verified string
 	}{
-		{name: "served, quoted", served: served, want: "missing " + served[0]},
-		{name: "served, not quoted", served: served, pcrs: withoutPCR15, want: "stage ready also needs 15 (pcr 15: the vm is served 1 layer certificates)"},
-		{name: "none served, quoted", verified: "verified: ak"},
-		{name: "none served, not quoted", pcrs: withoutPCR15, verified: "pcr 15 not quoted (no layer certificates served)"},
+		{name: "measuring image without pcr 15", pcrs: withoutPCR15, want: `stage ready also needs 15 (pcr 15: the image's policy has pcr15 "layer-certificates")`},
+		{name: "measuring image, none served, none measured", verified: "verified: ak"},
+		{name: "measuring image, none served, one measured", words: []string{layercert.Word(cert)}, want: "not served " + cert},
+		{name: "legacy image without pcr 15", legacy: true, pcrs: withoutPCR15, verified: "pcr 15 not quoted (the image predates layer certificates)"},
+		{name: "legacy image quoting pcr 15", legacy: true, verified: "verified: ak"},
+		{name: "legacy image quoting a measured certificate", legacy: true, words: []string{layercert.Word(cert)}, want: "not served " + cert},
+		{name: "legacy image served certificates", legacy: true, served: []string{cert}, pcrs: withoutPCR15, want: `the vm is served 1 layer certificates, but its image does not measure them (its policy.json lacks pcr15 "layer-certificates")`},
+		{name: "legacy image served certificates it measured", legacy: true, served: []string{cert}, words: []string{layercert.Word(cert)}, want: "its image does not measure them"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, false)
+			if tc.legacy {
+				e.policy.PCR15 = ""
+			}
 			e.policy.LayerCertificates = tc.served
 			require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
 			e.toReady()
+			e.measure(tc.words...)
 
 			res := e.submit(e.request(e.ak, imds.StageReady, tc.pcrs...))
 			r, ok := e.v.Result(vmID, imds.StageReady)
 			require.True(t, ok)
-			assert.Empty(t, r.LayerCertificates)
 			if tc.want != "" {
 				assert.False(t, res.Verified)
 				assert.Contains(t, res.Message, tc.want)
@@ -659,6 +669,7 @@ func TestVerifierPCR15OnlyRequiredWithCertificates(t *testing.T) {
 			}
 			assert.True(t, res.Verified, res.Message)
 			assert.Contains(t, res.Message, tc.verified)
+			assert.Empty(t, r.LayerCertificates)
 			_, has15 := r.PCRs[attest.PCRSystemIdentity]
 			assert.Equal(t, tc.pcrs == nil, has15, "the record shows whether pcr 15 was quoted")
 			if tc.pcrs == nil {
@@ -666,16 +677,6 @@ func TestVerifierPCR15OnlyRequiredWithCertificates(t *testing.T) {
 			}
 		})
 	}
-
-	// A quoted PCR 15 without certificates served is still verified: a
-	// layer certificate word in it is one not served.
-	e := newEnv(t, false)
-	require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
-	e.toReady()
-	e.measure(layercert.Word(served[0]))
-	res := e.submit(e.request(e.ak, imds.StageReady))
-	assert.False(t, res.Verified)
-	assert.Contains(t, res.Message, "not served "+served[0])
 }
 
 func nilIfEmpty(s []string) []string {

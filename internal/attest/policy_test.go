@@ -20,7 +20,7 @@ const (
 func TestParsePolicy(t *testing.T) {
 	valid := `{"image_id":"giantswarm-vm-base","image_version":"0.1.0","uki":"x.efi","roothash":"r","partitions":{"esp":"u"},
 		"pcr11":{"enter-initrd":"` + hexA + `","enter-initrd:leave-initrd:sysinit:ready":"` + hexB + `"},
-		"pcr13":{"1.36.4":"` + hexB + `"},
+		"pcr13":{"1.36.4":"` + hexB + `"},"pcr15":"layer-certificates",
 		"golden":{"sha256":{"0":"` + hexA + `","7":"` + hexB + `","13":"` + hexA + `"}}}`
 	tests := []struct {
 		name    string
@@ -41,6 +41,8 @@ func TestParsePolicy(t *testing.T) {
 		{name: "golden firmware", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"`+hexB+`","package":"ovmf-generic","version":"2025.11-3ubuntu7.2"},"golden":`, 1)},
 		{name: "golden firmware digest", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"abcd"},"golden":`, 1), wantErr: "golden_firmware.sha256: 2 bytes, want 32"},
 		{name: "pcr13 version", raw: strings.Replace(valid, `"1.36.4":`, `"":`, 1), wantErr: "pcr13 has an entry without a kubernetes version"},
+		{name: "pcr15 unknown", raw: strings.Replace(valid, `"pcr15":"layer-certificates"`, `"pcr15":"machine-id"`, 1), wantErr: `pcr15 "machine-id" is not "layer-certificates"`},
+		{name: "image predating pcr15", raw: strings.Replace(valid, `"pcr15":"layer-certificates",`, ``, 1)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,6 +60,7 @@ func TestParsePolicy(t *testing.T) {
 	p, err := ParsePolicy([]byte(valid))
 	require.NoError(t, err)
 	assert.Equal(t, "giantswarm-vm-base", p.ImageID)
+	assert.True(t, p.MeasuresLayerCertificates())
 	assert.Equal(t, map[int]string{0: hexA, 7: hexB, 13: hexA}, p.Golden[Bank])
 	v, ok := p.golden(7)
 	assert.True(t, ok)
@@ -132,10 +135,11 @@ func TestPolicyHelpers(t *testing.T) {
 	assert.Equal(t, PhaseReady, PhaseFor(imds.StageReady))
 	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11}, RequiredPCRs(imds.StageInitrd))
 	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13}, RequiredPCRs(imds.StageReady))
-	assert.Equal(t, RequiredPCRs(imds.StageReady), Policy{}.RequiredPCRs(imds.StageReady), "no layer certificates, no pcr 15")
-	certs := Policy{LayerCertificates: []string{hexA}}
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, certs.RequiredPCRs(imds.StageReady))
-	assert.Equal(t, RequiredPCRs(imds.StageInitrd), certs.RequiredPCRs(imds.StageInitrd), "pcr 15 is a ready-stage measurement")
+	assert.Equal(t, RequiredPCRs(imds.StageReady), Policy{LayerCertificates: []string{hexA}}.RequiredPCRs(imds.StageReady), "an image without pcr15 need not quote it")
+	measuring := Policy{PCR15: PCR15LayerCertificates}
+	assert.True(t, measuring.MeasuresLayerCertificates())
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, measuring.RequiredPCRs(imds.StageReady), "required with or without certificates served")
+	assert.Equal(t, RequiredPCRs(imds.StageInitrd), measuring.RequiredPCRs(imds.StageInitrd), "pcr 15 is a ready-stage measurement")
 	assert.Equal(t, []int{0, 2, 3, 4, 6, 7, 13}, GoldenIndexes, "pcr 1 (smbios, boot entry) and 5 (gpt) differ per vm and are not golden")
 
 	pcrs := map[int]string{}

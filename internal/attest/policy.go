@@ -81,6 +81,7 @@ const OSSeparator = "os-separator"
 //	    "enter-initrd:leave-initrd:sysinit:ready": "<hex>"
 //	  },
 //	  "pcr13": { "1.36.4": "<hex>" },
+//	  "pcr15": "layer-certificates",
 //	  "golden": { "sha256": { "0": "<hex>", ..., "7": "<hex>", "13": "<hex>" } },
 //	  "golden_firmware": { "sha256": "<hex>", "package": "ovmf-generic", "version": "2025.11-3ubuntu7.2" }
 //	}
@@ -93,6 +94,11 @@ type Policy struct {
 	// that sysext quotes at the ready stage (SysextPCR of the published
 	// artifact). A version without an entry falls back to Golden.
 	PCR13 map[string]string `json:"pcr13,omitempty"`
+	// PCR15 names what the image measures into PCR 15 that the verifier
+	// judges: PCR15LayerCertificates, set by images/scripts/verify for
+	// every image whose initrd enrolls and measures layer certificates.
+	// Empty for an image that predates them.
+	PCR15 string `json:"pcr15,omitempty"`
 	// Golden maps bank -> PCR index -> value recorded on a known-good boot.
 	Golden map[string]map[int]string `json:"golden,omitempty"`
 	// GoldenFirmware is the firmware build the golden values were recorded
@@ -102,10 +108,10 @@ type Policy struct {
 	// verified. The PolicyProvider sets it; policy.json does not carry it.
 	KubernetesVersion string `json:"-"`
 	// LayerCertificates are the sha256 digests (layercert.Digests) of the
-	// installation layer certificates the IMDS serves the VM, in order; the
-	// ready quote must cover PCR 15 when there are any, and a quoted PCR 15
-	// must measure exactly these. The PolicyProvider sets it; policy.json
-	// does not carry it.
+	// installation layer certificates the IMDS serves the VM, in order; a
+	// quoted PCR 15 must measure exactly these, and an image that does not
+	// measure layer certificates (PCR15) cannot be served any. The
+	// PolicyProvider sets it; policy.json does not carry it.
 	LayerCertificates []string `json:"-"`
 }
 
@@ -191,6 +197,9 @@ func (p Policy) Validate() error {
 			return fmt.Errorf("policy: pcr13[%q]: %w", version, err)
 		}
 	}
+	if p.PCR15 != "" && p.PCR15 != PCR15LayerCertificates {
+		return fmt.Errorf("policy: pcr15 %q is not %q", p.PCR15, PCR15LayerCertificates)
+	}
 	if p.GoldenFirmware != nil {
 		if err := checkDigest(p.GoldenFirmware.SHA256); err != nil {
 			return fmt.Errorf("policy: golden_firmware.sha256: %w", err)
@@ -240,9 +249,19 @@ func PhaseFor(stage imds.Stage) string {
 	return PhaseInitrd
 }
 
+// PCR15LayerCertificates is Policy.PCR15 of an image whose initrd extends
+// PCR 15 with one layercert.Word per installation layer certificate.
+const PCR15LayerCertificates = "layer-certificates"
+
+// MeasuresLayerCertificates reports whether the image measures layer
+// certificates into PCR 15 (Policy.PCR15).
+func (p Policy) MeasuresLayerCertificates() bool {
+	return p.PCR15 == PCR15LayerCertificates
+}
+
 // RequiredPCRs are the indexes every quote of a stage must cover: 0-7 and
-// 11, plus 13 at the ready stage. The ready quote of a VM served layer
-// certificates must also cover PCR 15 (Policy.RequiredPCRs).
+// 11, plus 13 at the ready stage. The ready quote of an image that measures
+// layer certificates must also cover PCR 15 (Policy.RequiredPCRs).
 func RequiredPCRs(stage imds.Stage) []int {
 	pcrs := append(append([]int(nil), firmwarePCRs...), PCRUKI)
 	if stage == imds.StageReady {
@@ -251,13 +270,14 @@ func RequiredPCRs(stage imds.Stage) []int {
 	return pcrs
 }
 
-// RequiredPCRs are the indexes the VM's quote of a stage must cover:
-// RequiredPCRs, plus PCR 15 at the ready stage when the VM is served layer
-// certificates. Without certificates there is nothing PCR 15 must prove, so
-// the ready quote of an image whose agent does not quote it still verifies.
+// RequiredPCRs are the indexes the image's quote of a stage must cover:
+// RequiredPCRs, plus PCR 15 at the ready stage when the image measures layer
+// certificates, whether or not the VM is served any: the guest picks the
+// PCRs it quotes, so "none served" is proven as "none measured". An image
+// that predates layer certificates may leave PCR 15 out.
 func (p Policy) RequiredPCRs(stage imds.Stage) []int {
 	pcrs := RequiredPCRs(stage)
-	if stage == imds.StageReady && len(p.LayerCertificates) > 0 {
+	if stage == imds.StageReady && p.MeasuresLayerCertificates() {
 		pcrs = append(pcrs, PCRSystemIdentity)
 	}
 	return pcrs

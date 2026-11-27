@@ -158,10 +158,11 @@ func TestLayerCertificatesServedAndRequired(t *testing.T) {
 	}
 	check()
 
-	h.restartWithPolicy(`{"pcr11":{"enter-initrd":"` + strings.Repeat("a", 64) + `","enter-initrd:leave-initrd:sysinit:ready":"` + strings.Repeat("b", 64) + `"}}`)
+	h.restartWithPolicy(`{"pcr11":{"enter-initrd":"` + strings.Repeat("a", 64) + `","enter-initrd:leave-initrd:sysinit:ready":"` + strings.Repeat("b", 64) + `"},"pcr15":"layer-certificates"}`)
 	check()
 	p, err := h.svc.PolicyFor(h.ctx, v.ID)
 	require.NoError(t, err)
+	assert.True(t, p.MeasuresLayerCertificates(), "pcr15 comes from the image's policy.json")
 	assert.Equal(t, []string{b.Digest, a.Digest}, p.LayerCertificates, "what pcr 15 must measure")
 
 	plain := h.create("plain")

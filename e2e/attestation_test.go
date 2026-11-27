@@ -277,6 +277,8 @@ func assertVerified(t *testing.T, att vm.Attestation) {
 	for _, index := range attest.GoldenIndexes {
 		assert.Len(t, att.Ready.PCRs[index], 64, "ready quote carries PCR %d", index)
 	}
+	assert.Len(t, att.Ready.PCRs[attest.PCRSystemIdentity], 64, "the image measures layer certificates (policy pcr15): the ready quote carries PCR 15")
+	assert.Empty(t, att.Ready.LayerCertificates, "no layer certificates served, none measured")
 }
 
 // assertAttestUnits checks the guest's side: the ready-stage unit succeeded
