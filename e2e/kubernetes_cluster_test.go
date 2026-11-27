@@ -170,6 +170,7 @@ func TestKubernetesCluster(t *testing.T) {
 	_, testKey := generateSSHKey(t, dir)
 	giantSwarmKey := giantSwarmLayerKey(t, image)
 	installationCert := layercerttest.New(t, "vm-manager e2e installation layers")
+	installationKey := newLayerKey(t, []byte(installationCert.KeyPEM), []byte(installationCert.PEM))
 
 	t.Setenv("VM_MANAGER_BOOT_TIMEOUT", clusterBootTimeout.String())
 	// Attestation verifies by default; the shared image dir carries no golden
@@ -186,10 +187,7 @@ func TestKubernetesCluster(t *testing.T) {
 	cilium := renderCilium(ctx, t, helm, version)
 	reg := startLayerRegistry(t, dir)
 	reg.mirrorSigned(ctx, t, clusterImages(t, version, cilium), giantSwarmKey)
-	// The installation's workload is signed with installationCert's key once
-	// the initrd enrolls layer_certificates into the .dm-verity keyring;
-	// until then dm-verity trusts the platform keyring only.
-	loads := reg.buildWorkloads(ctx, t, giantSwarmKey, giantSwarmKey)
+	loads := reg.buildWorkloads(ctx, t, giantSwarmKey, installationKey)
 
 	c := &cluster{t: t, m: m, key: testKey, version: version, layerCertificates: []string{installationCert.PEM}, files: []map[string]any{reg.hostsTOML()}}
 	t.Cleanup(c.teardown)

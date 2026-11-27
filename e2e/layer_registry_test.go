@@ -117,17 +117,16 @@ func newLayerKey(t *testing.T, keyPEM, certPEM []byte) layerKey {
 	return layerKey{signer: signer, cert: cert}
 }
 
-// giantSwarmLayerKey is the image's own verity key, whose certificate is in
-// the VM's UEFI db (the image's .crt): dm-verity trusts it through the
-// platform keyring. The key stays in the build's keys/ directory next to
-// build/ (scripts/gen-keys; e2e.yml downloads both).
+// giantSwarmLayerKey is the build's test Giant Swarm layer key, whose
+// certificate the initrd enrolls into the .dm-verity keyring (images/README.md,
+// Layer certificates). It stays in the build's keys/ directory next to build/
+// (scripts/gen-keys; e2e.yml downloads it there).
 func giantSwarmLayerKey(t *testing.T, image Image) layerKey {
 	t.Helper()
-	require.NotEmpty(t, image.Certificate, "the image has no certificate; the cluster runs on an IPE image")
-	keyPath := filepath.Join(image.Dir, "..", "keys", "verity.key")
-	keyPEM, err := os.ReadFile(keyPath) // #nosec G304 -- build key next to the configured image dir
-	require.NoError(t, err, "the image's verity key; build with `make -C images`")
-	certPEM, err := os.ReadFile(image.Certificate)
+	keys := filepath.Join(image.Dir, "..", "keys")
+	keyPEM, err := os.ReadFile(filepath.Join(keys, "layer.key")) // #nosec G304 -- build key next to the configured image dir
+	require.NoError(t, err, "the build's layer key; build with `make -C images`")
+	certPEM, err := os.ReadFile(filepath.Join(keys, "layer.crt")) // #nosec G304 -- build certificate next to the configured image dir
 	require.NoError(t, err)
 	return newLayerKey(t, keyPEM, certPEM)
 }

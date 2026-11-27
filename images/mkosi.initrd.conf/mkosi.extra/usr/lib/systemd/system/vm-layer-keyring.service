@@ -1,0 +1,31 @@
+# Fills the kernel's .dm-verity keyring with the Giant Swarm layer
+# certificate of this initrd and the installation's certificates from the
+# IMDS, measures the latter into PCR 15 for the ready attestation, and seals
+# the keyring; see /usr/lib/vm-manager/layer-keyring and images/README.md,
+# Layer certificates. On every boot, also without an IMDS: an unsealed
+# keyring would let the real root add keys of its own.
+[Unit]
+Description=Enroll and seal the dm-verity layer certificates
+Documentation=https://github.com/giantswarm/vm-manager/blob/main/images/README.md
+DefaultDependencies=no
+AssertPathExists=/etc/initrd-release
+# The IMDS (the script reads it under vm-agent-attest.service's conditions)
+# and the TPM for PCR 15, as for vm-agent-attest.service.
+Wants=network-online.target
+After=basic.target network-online.target systemd-imds-early-network.service systemd-imds-import.service
+After=tpm2.target systemd-tpm2-setup-early.service
+# Sealed before user-data reaches the initrd (Ignition runs from
+# ignition-fetch on) and before the switch root (initrd.target).
+Before=ignition-fetch.service ignition-complete.target initrd.target
+Conflicts=shutdown.target
+Before=shutdown.target
+# An unsealed keyring or a node without its installation's certificates must
+# not boot: fail closed, as vm-ipe-policy.service does.
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+ExecStart=/usr/lib/vm-manager/layer-keyring

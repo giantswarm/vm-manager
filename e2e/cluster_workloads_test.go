@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -32,10 +31,6 @@ spec:
 	podInstallation = "installation"
 	podUnsigned     = "unsigned-layer"
 )
-
-// layerKexecEPERM is systemctl's debug line for a kexec_file_load() the
-// kernel refused with EPERM.
-var layerKexecEPERM = regexp.MustCompile(`kexec_file_load\(\) failed, falling back to \S+ binary: Operation not permitted`)
 
 // assertWorkloads runs the workload images on the worker: the pods of the
 // images signed with the Giant Swarm and the installation key run, the pod of
@@ -135,8 +130,8 @@ linux /vm-manager-e2e-kernel
 	switch {
 	case kexecDenial != "":
 		t.Logf("kexec of the layer file: refused by IPE: %s", kexecDenial)
-	case g.sh(ctx, "cat /proc/sys/kernel/kexec_load_disabled") == "1" && layerKexecEPERM.MatchString(out):
-		t.Logf("kexec of the layer file: refused by the kernel with EPERM (kexec_load_disabled=1), before IPE: %s", layerKexecEPERM.FindString(out))
+	case g.sh(ctx, "cat /proc/sys/kernel/kexec_load_disabled") == "1" && kexecEPERM.MatchString(out):
+		t.Logf("kexec of the layer file: refused by the kernel with EPERM (kexec_load_disabled=1), before IPE: %s", kexecEPERM.FindString(out))
 	default:
 		t.Errorf("kexec of the layer file (bind-mounted on the ESP) was refused neither by IPE nor by kexec_load_disabled\nsystemctl kexec: %s", out)
 	}
