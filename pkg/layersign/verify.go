@@ -36,6 +36,9 @@ type Verified struct {
 	Manifest ocispec.Descriptor
 	Referrer ocispec.Descriptor
 	Layers   []VerifiedLayer
+	// Skipped says why the manifest was not checked (an index entry for the
+	// platform unknown/unknown); empty for a checked one.
+	Skipped string
 }
 
 // VerifiedLayer is one layer whose signature, tree and data check out.
@@ -88,13 +91,16 @@ func Verify(ctx context.Context, target Target, reference string, opts VerifyOpt
 
 	var out []Verified
 	for _, pm := range manifests {
+		if pm.skipped != "" {
+			logger.Warn("skipped manifest", "manifest", pm.desc.Digest, "reason", pm.skipped)
+			out = append(out, Verified{Manifest: pm.desc, Skipped: pm.skipped})
+			continue
+		}
 		v, err := verifyManifest(ctx, target, pm, opts.Certificates, work, logger)
 		if err != nil {
 			return out, err
 		}
-		if len(v.Layers) > 0 {
-			out = append(out, v)
-		}
+		out = append(out, v)
 	}
 	return out, nil
 }
@@ -108,6 +114,9 @@ func verifyManifest(ctx context.Context, target Target, pm platformManifest, cer
 	referrer, err := newestReferrer(ctx, target, pm.desc)
 	if err != nil {
 		return v, fmt.Errorf("manifest %s: %w", pm.desc.Digest, err)
+	}
+	if err := checkDigest(referrer.Digest); err != nil {
+		return v, fmt.Errorf("manifest %s: referrer: %w", pm.desc.Digest, err)
 	}
 	v.Referrer = referrer
 	var m ocispec.Manifest
@@ -166,8 +175,11 @@ func groupBlobs(descs []ocispec.Descriptor) (map[digest.Digest]*blobs, error) {
 	out := map[digest.Digest]*blobs{}
 	for i := range descs {
 		d := &descs[i]
+		if err := checkDigest(d.Digest); err != nil {
+			return nil, fmt.Errorf("blob: %w", err)
+		}
 		src := digest.Digest(d.Annotations[AnnotationSourceLayerDigest])
-		if err := src.Validate(); err != nil {
+		if err := checkDigest(src); err != nil {
 			return nil, fmt.Errorf("blob %s: annotation %s: %w", d.Digest, AnnotationSourceLayerDigest, err)
 		}
 		b := out[src]

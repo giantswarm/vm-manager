@@ -142,7 +142,7 @@ func testImage(t *testing.T) (*memory.Store, map[string][]byte) {
 	amd64 := pushManifest(t, store, "amd64", []testLayer{{tar: tars["base"], compression: "gzip"}, {tar: tars["amd64"]}, {tar: tars["zstd"], compression: "zstd"}})
 	arm64 := pushManifest(t, store, "arm64", []testLayer{{tar: tars["base"], compression: "gzip"}, {tar: tars["arm64"], compression: "gzip"}})
 	attestation := pushManifest(t, store, "unknown", []testLayer{{tar: []byte(`{"_type":"https://in-toto.io/Statement/v0.1"}`), mediaType: "application/vnd.in-toto+json"}})
-	attestation.Annotations = map[string]string{dockerReferenceType: "attestation-manifest"}
+	attestation.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
 	index := pushJSON(t, store, ocispec.MediaTypeImageIndex, ocispec.Index{
 		Versioned: specs.Versioned{SchemaVersion: 2},
 		MediaType: ocispec.MediaTypeImageIndex,
@@ -171,7 +171,10 @@ func TestSignVerify(t *testing.T) {
 
 	signed, err := Sign(ctx, store, testTag, signOpts(k, testTime))
 	require.NoError(t, err)
-	require.Len(t, signed, 2, "one referrer per platform manifest; the attestation is skipped")
+	require.Len(t, signed, 3, "one referrer per platform manifest; the attestation is skipped")
+	require.Contains(t, signed[2].Skipped, "unknown/unknown")
+	require.Empty(t, signed[2].Referrer.Digest)
+	signed = signed[:2]
 	require.Len(t, signed[0].Layers, 3)
 	require.Len(t, signed[1].Layers, 2)
 	require.Equal(t, signed[0].Layers[0], signed[1].Layers[0], "a shared layer has one root hash")
@@ -200,7 +203,8 @@ func TestSignVerify(t *testing.T) {
 
 	verified, err := Verify(ctx, store, testTag, VerifyOptions{Certificates: []*x509.Certificate{k.cert}, Logger: quiet})
 	require.NoError(t, err)
-	require.Len(t, verified, 2)
+	require.Len(t, verified, 3)
+	require.Contains(t, verified[2].Skipped, "unknown/unknown", "the skip is reported")
 	require.Equal(t, k.cert, verified[1].Layers[1].Signer)
 
 	// Re-signing gives the same blobs; the newer referrer is the one used.
@@ -375,6 +379,97 @@ func TestVerifyCatchesTampering(t *testing.T) {
 			require.ErrorAs(t, err, &le)
 			require.Equal(t, signed[0].Layers[0].Digest, le.Layer, "names the layer")
 			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestFailClosed: what a node would unpack and the signer cannot process
+// fails the image in sign and verify; nothing is skipped on its say-so.
+func TestFailClosed(t *testing.T) {
+	tarLayer := testLayer{tar: tarOf(t, map[string]string{"bin/app": "app"}, 0)}
+	for name, tc := range map[string]struct {
+		image   func(t *testing.T, store *memory.Store) ocispec.Descriptor
+		wantErr string
+	}{
+		"attestation annotation on a real platform": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				m := pushManifest(t, store, "amd64", []testLayer{{tar: []byte(`{}`), mediaType: "application/vnd.in-toto+json"}})
+				m.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
+				return pushJSON(t, store, ocispec.MediaTypeImageIndex, ocispec.Index{
+					Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex,
+					Manifests: []ocispec.Descriptor{pushManifest(t, store, "arm64", []testLayer{tarLayer}), m},
+				})
+			},
+			wantErr: `media type "application/vnd.in-toto+json"`,
+		},
+		"layer type that is no plain tar": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				return pushManifest(t, store, "amd64", []testLayer{tarLayer, {tar: []byte("x"), mediaType: "application/vnd.oci.image.layer.v1.tar+encrypted"}})
+			},
+			wantErr: "no tar layer this signer processes",
+		},
+		"config that is no image config": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				return pushJSON(t, store, ocispec.MediaTypeImageManifest, ocispec.Manifest{
+					Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageManifest,
+					Config: pushJSON(t, store, "application/vnd.example.config.v1+json", map[string]string{}),
+					Layers: []ocispec.Descriptor{pushBlob(t, store, ocispec.MediaTypeImageLayer, tarLayer.tar)},
+				})
+			},
+			wantErr: "is not a container image config",
+		},
+		"index entry that is no manifest": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				other := pushBlob(t, store, "application/vnd.example+json", []byte(`{}`))
+				other.Platform = &ocispec.Platform{OS: "linux", Architecture: "amd64"}
+				return pushJSON(t, store, ocispec.MediaTypeImageIndex, ocispec.Index{
+					Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex,
+					Manifests: []ocispec.Descriptor{other},
+				})
+			},
+			wantErr: "neither an image index nor an image manifest",
+		},
+		"digest with a path": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				return pushJSON(t, store, ocispec.MediaTypeImageManifest, ocispec.Manifest{
+					Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageManifest,
+					Config: pushJSON(t, store, ocispec.MediaTypeImageConfig, ocispec.Image{}),
+					Layers: []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayer, Digest: "sha256:../../../../tmp/escape", Size: 1}},
+				})
+			},
+			wantErr: `digest "sha256:../../../../tmp/escape"`,
+		},
+		"digest of another algorithm": {
+			image: func(t *testing.T, store *memory.Store) ocispec.Descriptor {
+				return pushJSON(t, store, ocispec.MediaTypeImageManifest, ocispec.Manifest{
+					Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageManifest,
+					Config: pushJSON(t, store, ocispec.MediaTypeImageConfig, ocispec.Image{}),
+					Layers: []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.SHA384.FromString("x"), Size: 1}},
+				})
+			},
+			wantErr: "neither sha256 nor sha512",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := memory.New()
+			require.NoError(t, store.Tag(ctx, tc.image(t, store), testTag))
+			k := newTestKey(t, "p256")
+
+			_, err := Verify(ctx, store, testTag, VerifyOptions{Certificates: []*x509.Certificate{k.cert}, Logger: quiet})
+			require.ErrorContains(t, err, tc.wantErr, "verify")
+
+			if _, err := newMkfsErofs(ctx, ""); err != nil {
+				t.Skipf("no usable mkfs.erofs for sign: %v", err)
+			}
+			work := t.TempDir()
+			opts := signOpts(k, testTime)
+			opts.TempDir = work
+			_, err = Sign(ctx, store, testTag, opts)
+			require.ErrorContains(t, err, tc.wantErr, "sign")
+			entries, err := os.ReadDir(work)
+			require.NoError(t, err)
+			require.Empty(t, entries, "the work directory is removed")
 		})
 	}
 }

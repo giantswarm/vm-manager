@@ -8,12 +8,10 @@ for an image in a registry, `vm-manager layers verify` checks them the way a nod
 
 ## What is signed
 
-For every layer of every platform manifest (an index is walked; build attestations are
-skipped), the signer:
+For every layer of every platform manifest, the signer:
 
 1. fetches the layer and decompresses it (gzip, zstd or none) to the uncompressed tar, the
-   bytes of the config's `diff_id`; native EROFS layers (`application/vnd.erofs.layer*`)
-   are refused;
+   bytes of the config's `diff_id`;
 2. builds the tar index with `mkfs.erofs --tar=i --aufs --quiet -T0 --mkfs-time -U <uuid>`,
    where `<uuid>` is UUIDv5(URL, `erofs:blobs/<layer digest>`), so the index is
    reproducible;
@@ -36,6 +34,13 @@ annotated `io.containerd.erofs.v1/dmverity.source-layer-digest: <layer digest>`:
 | `application/vnd.containerd.erofs.dmverity.layer-signature.v1+pkcs7` | the signature, annotated `io.containerd.erofs.v1/dmverity.root-hash: <hex>` |
 | `application/vnd.containerd.erofs.metadata.v1` | the tar index |
 | `application/vnd.containerd.erofs.dmverity.merkle-tree.v1` | the dm-verity superblock, then the tree |
+
+Both commands fail closed. An index is walked, and only an entry for the platform
+`unknown/unknown` (how BuildKit marks build attestations) is skipped, and reported. Any
+other manifest that is no container image (another config media type, an artifact), a
+layer that is no OCI or Docker tar layer (native EROFS `application/vnd.erofs.layer*`,
+encrypted, or anything else) and a digest that is not sha256 or sha512 fail the whole
+image before any work, so nothing a node would unpack goes unsigned or unchecked.
 
 Signing the same image with the same key again gives the same blobs, which the registry
 deduplicates; only the referrer manifest is new. A layer shared between images with the

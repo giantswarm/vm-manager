@@ -83,6 +83,9 @@ type Signed struct {
 	Referrer ocispec.Descriptor
 	// Layers are the signed layers in manifest order, with their root hashes.
 	Layers []SignedLayer
+	// Skipped says why the manifest was not signed (an index entry for the
+	// platform unknown/unknown); empty for a signed one.
+	Skipped string
 }
 
 // SignedLayer is one signed layer.
@@ -131,13 +134,16 @@ func Sign(ctx context.Context, target Target, reference string, opts SignOptions
 	s := &signer{opts: opts, target: target, mkfs: mkfs, work: work, bundles: map[digest.Digest]*layerBundle{}}
 	var out []Signed
 	for _, pm := range manifests {
+		if pm.skipped != "" {
+			s.logger().Warn("skipped manifest", "manifest", pm.desc.Digest, "reason", pm.skipped)
+			out = append(out, Signed{Manifest: pm.desc, Skipped: pm.skipped})
+			continue
+		}
 		signed, err := s.manifest(ctx, pm)
 		if err != nil {
 			return out, fmt.Errorf("manifest %s: %w", pm.desc.Digest, err)
 		}
-		if len(signed.Layers) > 0 {
-			out = append(out, signed)
-		}
+		out = append(out, signed)
 	}
 	return out, nil
 }
@@ -151,7 +157,19 @@ func resolve(ctx context.Context, target Target, reference string) ([]platformMa
 	if err != nil {
 		return nil, err
 	}
-	if len(manifests) == 0 {
+	// Every manifest's layers are checked before any work, so an image with
+	// a layer that cannot be signed fails as a whole.
+	images := 0
+	for _, pm := range manifests {
+		if pm.skipped != "" {
+			continue
+		}
+		if _, _, err := pm.layers(); err != nil {
+			return nil, fmt.Errorf("manifest %s: %w", pm.desc.Digest, err)
+		}
+		images++
+	}
+	if images == 0 {
 		return nil, fmt.Errorf("%s (%s, %s) holds no container image manifest", reference, desc.MediaType, desc.Digest)
 	}
 	return manifests, nil
@@ -222,8 +240,8 @@ func (s *signer) layer(ctx context.Context, layer ocispec.Descriptor, diffID dig
 	if b, ok := s.bundles[layer.Digest]; ok {
 		return b, nil
 	}
-	dir := filepath.Join(s.work, layer.Digest.Encoded())
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	dir, err := os.MkdirTemp(s.work, "layer-")
+	if err != nil {
 		return nil, err
 	}
 	p := func(name string) string { return filepath.Join(dir, name) }

@@ -86,6 +86,10 @@ mkfs.erofs (erofs-utils with --tar=i and --mkfs-time) must be on PATH or given w
 				return err
 			}
 			for _, s := range signed {
+				if s.Skipped != "" {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "skipped %s: %s\n", s.Manifest.Digest, s.Skipped)
+					continue
+				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "signed %s: %d layers, referrer %s\n", s.Manifest.Digest, len(s.Layers), s.Referrer.Digest)
 			}
 			return nil
@@ -139,6 +143,10 @@ rotation the nodes trust both.`,
 				return err
 			}
 			for _, v := range verified {
+				if v.Skipped != "" {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "skipped %s: %s\n", v.Manifest.Digest, v.Skipped)
+					continue
+				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "verified %s: %d layers, referrer %s\n", v.Manifest.Digest, len(v.Layers), v.Referrer.Digest)
 			}
 			return nil
