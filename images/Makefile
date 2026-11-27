@@ -117,7 +117,7 @@ define mkosi-ipe
 	$(MKOSI) $(MKOSI_ARGS) --force build
 	$(SCRIPTS)/sign-ipe-policy $(IPE_POLICY) $(VERSION) $(ROOTHASH) $(KEYS) $(IPE_DIR)
 	$(MKOSI) $(MKOSI_ARGS) $(1) --force build
-	cmp -s $(IPE_DIR)/roothash $(ROOTHASH) || \
+	test "$$(tr -d '\n' <$(IPE_DIR)/roothash)" = "$$(tr -d '\n' <$(ROOTHASH))" || \
 		{ echo "mkosi-ipe: the second run built root $$(cat $(ROOTHASH)), the IPE policy names $$(cat $(IPE_DIR)/roothash): the root is not reproducible" >&2; exit 1; }
 endef
 
