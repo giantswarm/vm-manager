@@ -20,12 +20,13 @@ ARG OVMF_GENERIC_VERSION=2025.11-3ubuntu7.4
 # qemu-system-x86: qemu-system-x86_64 10.2; swtpm 0.10 (the vTPM, one per VM);
 # ovmf-generic: the firmware, a location the firmware probe knows;
 # openssh-client: exec_vm; ca-certificates: the identity provider's and the
-# registry's TLS. No systemd: the pod has no service manager, VMs are plain
+# registry's TLS; erofs-utils: mkfs.erofs for `vm-manager layers sign`, which
+# release pipelines and customers run from this image (docs/layer-signing.md). No systemd: the pod has no service manager, VMs are plain
 # child processes (--launcher process) and volumes plain files.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       qemu-system-x86 swtpm "ovmf-generic=${OVMF_GENERIC_VERSION}" \
-      openssh-client ca-certificates \
+      openssh-client ca-certificates erofs-utils \
  && rm -rf /var/lib/apt/lists/*
 ARG TARGETOS
 ARG TARGETARCH

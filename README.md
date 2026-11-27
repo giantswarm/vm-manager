@@ -218,6 +218,11 @@ serves signed artifacts and never holds a private key. PCR 11 values are reprodu
 the UKI; PCR 13 from the sysext's `SHA256SUMS` line; the firmware PCRs are learned once
 per image and host firmware, see below.
 
+Container images for these guests carry a dm-verity signature per layer, since IPE lets
+the guest run code only from signed dm-verity devices: `vm-manager layers sign` signs an
+image's layers in its registry and `vm-manager layers verify` checks them as a node does
+([docs/layer-signing.md](docs/layer-signing.md)).
+
 ## Attestation
 
 The guest proves its integrity to vm-manager over the IMDS, twice per boot. `GET
