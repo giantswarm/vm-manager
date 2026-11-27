@@ -38,12 +38,12 @@ export KUBERNETES_VERSION
 PKGS                := $(BUILD)/pkgs
 KUBERNETES_PKGS     := $(PKGS)/$(KUBERNETES_VERSION)
 # CNI releases a cni sysext is built for, one per entry of cni/ (the entry
-# pins the release, the asset and its sha256; Renovate bumps the release):
+# pins the release, the image and its digest; Renovate bumps both):
 # "<entry>-<release without v>". The first is the default of `make cni` and
 # the one `make images` builds in the same mkosi run as the base image;
 # `make cni-all` (part of `make`) builds every one, and build/sysupdate/cni/
 # accumulates them. scripts/fetch-cni-plugins stages the release's plugins
-# into $(CNI_TREE), ExtraTrees= of mkosi.images/cni/mkosi.conf, and the
+# and cni.extra/<entry> into $(CNI_TREE), ExtraTrees= of mkosi.images/cni/mkosi.conf, and the
 # subimage's executable mkosi.version turns the exported CNI_VERSION into the
 # image version.
 CNI_VERSIONS ?= $(shell for f in cni/*; do (. "./$$f" && echo "$${f##*/}-$${release#v}"); done)
@@ -185,8 +185,8 @@ containerd:
 	$(SCRIPTS)/fetch-containerd $(CONTAINERD_IMAGE) $(CONTAINERD_CACHE) $(CONTAINERD_TREE)
 
 # The plugins of $(CNI_VERSION), staged as the cni sysext's tree. Always
-# restaged: the tree is shared by every release (the download is cached and
-# re-verified in $(CNI_CACHE)).
+# restaged: the tree is shared by every release (the files exported from the
+# image are cached per digest in $(CNI_CACHE)).
 cni-plugins:
 	$(SCRIPTS)/fetch-cni-plugins $(CNI_VERSION) $(CNI_CACHE) $(CNI_TREE)
 

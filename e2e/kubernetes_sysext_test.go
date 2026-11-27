@@ -422,11 +422,14 @@ func tomlSection(dump, header string) string {
 	return strings.Join(out, "\n")
 }
 
-// assertCNIPlugins checks where containerd finds CNI plugins: its effective
-// plugin directories are /usr/lib/cni alone, the CNI sysext's plugins are
-// there and execute (under IPE: from the extension's signed verity device),
-// and on an IPE image a copy of the plugin in /opt/cni/bin, where a CNI
-// DaemonSet still installs it, is refused.
+// assertCNIPlugins checks where containerd finds CNI plugins and what the
+// Cilium CNI sysext provides: containerd's effective plugin directories are
+// /usr/lib/cni alone, cilium-cni is there and executes (under IPE: from the
+// extension's signed verity device), cgroup2 is at /sys/fs/cgroup for
+// cgroup.hostRoot, the sysext's sysctl drop-in is applied, to links Cilium
+// creates later too, and on an IPE image a copy of the plugin in /opt/cni/bin,
+// where the chart's install-cni-binaries still installs it, is refused
+// (images/README.md, Cilium).
 func assertCNIPlugins(ctx context.Context, t *testing.T, g *guest, sx sysexts, ipe bool) {
 	t.Helper()
 	var info struct {
@@ -436,23 +439,35 @@ func assertCNIPlugins(ctx context.Context, t *testing.T, g *guest, sx sysexts, i
 	require.NoError(t, json.Unmarshal([]byte(raw), &info), "crictl info: %s", raw)
 	assert.Equal(t, []string{"/usr/lib/cni"}, info.CNIConfig.PluginDirs, "containerd's effective bin_dirs: only the sysexts' /usr/lib/cni")
 
+	require.True(t, strings.HasPrefix(sx.cni.version, "cilium-"), "the default cni sysext is Cilium's, got %s", sx.cni.version)
 	plugins := strings.Fields(g.sh(ctx, "ls /usr/lib/cni"))
 	t.Logf("/usr/lib/cni (kubernetes %s + cni %s): %v", sx.kubernetes.version, sx.cni.version, plugins)
 	assert.Contains(t, plugins, "bridge", "reference plugins of the kubernetes sysext")
-	name := strings.SplitN(sx.cni.version, "-", 2)[0]
-	require.Contains(t, plugins, name, "the plugin of the cni sysext")
-	out := g.sh(ctx, "CNI_COMMAND=VERSION /usr/lib/cni/"+name+" </dev/null")
-	t.Logf("CNI_COMMAND=VERSION /usr/lib/cni/%s: %s", name, out)
+	const plugin = "cilium-cni"
+	require.Contains(t, plugins, plugin, "the plugin of the cni sysext")
+	out := g.sh(ctx, "CNI_COMMAND=VERSION /usr/lib/cni/"+plugin+" </dev/null")
+	t.Logf("CNI_COMMAND=VERSION /usr/lib/cni/%s: %s", plugin, out)
 	assert.Contains(t, out, "supportedVersions", "the cni sysext's plugin executes")
+
+	assert.Equal(t, "cgroup2fs", g.sh(ctx, "stat -fc %T /sys/fs/cgroup"), "cgroup2 at /sys/fs/cgroup, Cilium's cgroup.hostRoot")
+	assert.Equal(t, "0", g.sh(ctx, "sysctl -n net.ipv4.conf.all.rp_filter"), "the cni sysext's sysctl drop-in")
+	// A link created after the merge, named like Cilium's endpoint veths,
+	// gets the drop-in's per-link key from systemd's udev rule; its peer
+	// keeps the default.
+	link := g.sh(ctx, "ip link add lxce2e type veth peer name e2epeer && udevadm settle && "+
+		"sysctl -n net.ipv4.conf.lxce2e.rp_filter net.ipv4.conf.e2epeer.rp_filter; ip link del lxce2e")
+	t.Logf("rp_filter of lxce2e and e2epeer: %q\n%s", link, g.sh(ctx, "systemd-sysctl --cat-config --no-pager | grep -B1 -A1 -F lxc || true"))
+	assert.True(t, strings.HasPrefix(link, "0\n"), "rp_filter 0 on a new lxc* link: %q", link)
+
 	if !ipe {
 		return
 	}
-	res, err := g.run(ctx, "install -D -m0755 /usr/lib/cni/"+name+" /opt/cni/bin/"+name+" && CNI_COMMAND=VERSION /opt/cni/bin/"+name+" </dev/null")
+	res, err := g.run(ctx, "install -D -m0755 /usr/lib/cni/"+plugin+" /opt/cni/bin/"+plugin+" && CNI_COMMAND=VERSION /opt/cni/bin/"+plugin+" </dev/null")
 	require.NoError(t, err)
 	t.Logf("copy in /opt/cni/bin: exit %d %s%s", res.ExitCode, res.Stdout, res.Stderr)
 	assert.NotZero(t, res.ExitCode, "IPE refuses the plugin copied into /opt/cni/bin")
 	assert.Contains(t, res.Stderr, "Permission denied")
-	g.sh(ctx, "rm -f /opt/cni/bin/"+name)
+	g.sh(ctx, "rm -f /opt/cni/bin/"+plugin)
 }
 
 // assertStrayExtensionRefused adds an extension the VM was not created with

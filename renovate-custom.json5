@@ -22,18 +22,20 @@
     },
     {
       // The CNI release a cni sysext is built from, one entry per CNI in
-      // images/cni/, announced by the comment above it:
-      //   # renovate: datasource=github-releases depName=flannel-io/cni-plugin
-      //   release=v1.9.1-flannel3
-      // flannel's tags carry a -flannel<n> rebuild suffix, compared as the
-      // build number rather than a pre-release.
+      // images/cni/: the CNI's image tag and its digest, announced by the
+      // comment above them:
+      //   # renovate: datasource=docker
+      //   release=v1.20.5
+      //   image=gsoci.azurecr.io/giantswarm/cilium
+      //   digest=sha256:<64 hex digits>
+      // A bump replaces both, so the build exports the new release's plugins
+      // without a hand edit.
       customType: 'regex',
       description: 'CNI releases of the cni sysexts (images/cni/<name>)',
       managerFilePatterns: ['/^images/cni/[^/]+$/'],
       matchStrings: [
-        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s+release=(?<currentValue>\\S+)',
+        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+release=(?<currentValue>\\S+)\\s+image=(?<depName>\\S+)\\s+digest=(?<currentDigest>sha256:[0-9a-f]{64})',
       ],
-      versioningTemplate: 'regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)(-[a-z]+(?<build>\\d+))?$',
     },
     {
       // The containerd release of the kubernetes sysext, an OCI artifact of
@@ -55,13 +57,13 @@
   ],
   packageRules: [
     {
-      // A CNI entry pins its asset's sha256 next to the release: the bump
-      // fails the image build until the new value is in, which the build
-      // prints (scripts/fetch-cni-plugins).
-      description: 'A CNI release bump needs the asset sha256 in its images/cni entry',
-      matchFileNames: ['images/cni/**'],
+      // A Cilium release can change what the host-binary init containers of
+      // its agent DaemonSet set up, which images/cni.extra/cilium ships
+      // instead (images/README.md, Cilium).
+      description: 'A Cilium bump checks the sysctl drop-in and the chart values of the cni sysext',
+      matchFileNames: ['images/cni/cilium'],
       prBodyNotes: [
-        '**The entry pins the asset\'s sha256.** Set `sha256=` in the `images/cni/` file to the new release\'s value: `make -C images cni-plugins` fails and prints it, or `curl -fsSL <url> | sha256sum`.',
+        '**Check what IPE nodes provide instead of the chart.** Compare `tools/sysctlfix/main.go` of the new Cilium release with `images/cni.extra/cilium/usr/lib/sysctl.d/99-zzz-override_cilium.conf`, and the agent DaemonSet\'s init containers with the chart values in `images/README.md` (section Cilium).',
       ],
     },
     {

@@ -30,8 +30,9 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp`. It is the IPE policy's version too |
 | `ipe/giantswarm-vm.policy` | the IPE policy, generated for the root's verity root hash and signed between the two mkosi runs of `make base`/`images` into `build/ipe/tree/usr/lib/vm-manager/ipe/giantswarm-vm.p7b` for the initrd (see [IPE](#ipe)) |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy for a root hash, with the verity key), `fetch-containerd` (the pinned containerd release of the Giant Swarm line, digest-checked, into `build/containerd/tree/`), `fetch-cni-plugins` (one CNI release's plugins, sha256-checked against its `cni/<name>` entry, staged into `build/cni/tree/`), `build-e2e-sysext` (the e2e tests' signed firmware sysext into `build/e2e/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
-| `cni/` | one entry per CNI (`flannel`): the pinned release, asset and sha256 the cni sysext is built from, see [CNI sysext](#cni-sysext) |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy for a root hash, with the verity key), `fetch-containerd` (the pinned containerd release of the Giant Swarm line, digest-checked, into `build/containerd/tree/`), `fetch-cni-plugins` (one CNI release's plugins, exported by digest from the image its `cni/<name>` entry pins, staged with `cni.extra/<name>/` into `build/cni/tree/`), `build-e2e-sysext` (the e2e tests' signed firmware sysext into `build/e2e/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
+| `cni/` | one entry per CNI (`cilium`): the pinned release, image and digest the cni sysext's plugins come from, see [CNI sysext](#cni-sysext) |
+| `cni.extra/` | per CNI, the files the cni sysext adds to its plugins (`cilium`: the sysctl drop-in of `cilium-sysctlfix`), see [Cilium](#cilium) |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -443,7 +444,7 @@ runc,crictl,conntrack,socat,ethtool,iptables,...}`, the reference CNI plugins in
   kubelet package brings `ip_forward` and `br_netfilter`), `tmpfiles.d/kubernetes.conf`
   (`/etc/cni/net.d`, `/opt/cni/bin`). The links a CNI creates are left to it by the base
   image's `network/70-kubernetes-cni.network` (see [Image content](#image-content-mkosiimagesbasemkosiextra)); the
-  cluster e2e checks `networkctl list` reports `cni0`, `flannel.1` and the pod veths as
+  cluster e2e checks `networkctl list` reports the CNI's links and the pod veths as
   unmanaged.
 - `usr/lib/extension-release.d/extension-release.kubernetes_<kv>`: `ID=arch`
   (the base has neither `SYSEXT_LEVEL` nor `VERSION_ID`, rolling release, so ID alone
@@ -646,35 +647,72 @@ the attested boot to the exact artifact.
 
 `mkosi.images/cni/` builds `cni_<cni>-<release>.raw`, one systemd-sysext DDI per CNI
 release, like the kubernetes sysext: an overlay delta on the base tree, erofs (zstd),
-dm-verity signed with the image's verity key, `SYSEXT_SCOPE=system`. Its only content is
-the CNI's plugin binaries in `/usr/lib/cni`, the one directory containerd's `bin_dirs`
-lists; systemd-sysext merges them next to the reference plugins (`bridge`, `host-local`,
-`loopback`, `portmap`, ...) of the kubernetes sysext, so under IPE every plugin containerd
-runs comes from a signed verity device. A CNI bump rebuilds this extension only, never a
-kubernetes one.
+dm-verity signed with the image's verity key, `SYSEXT_SCOPE=system`. Its content is the
+CNI's plugin binaries in `/usr/lib/cni`, the one directory containerd's `bin_dirs` lists,
+and the host configuration the CNI's own init containers would write with binaries IPE
+refuses (`cni.extra/<cni>/`). systemd-sysext merges the plugins next to the reference
+plugins (`bridge`, `host-local`, `loopback`, `portmap`, ...) of the kubernetes sysext, so
+under IPE every plugin containerd runs comes from a signed verity device. A CNI bump
+rebuilds this extension only, never a kubernetes one.
 
-The CNIs are the entries of `cni/` (`flannel`: flannel's `flannel` plugin from
-`flannel-io/cni-plugin`, the release flannel's manifest installs). An entry pins
-`release` (Renovate bumps it, `renovate-custom.json5`), the asset `url`, its `sha256`
-and the `plugins` to install; the sysext version is `<entry>-<release without v>`
-(`flannel-1.9.1-flannel3`), `CNI_VERSIONS` in the Makefile lists one per entry, the
-first is the default of `make cni` and of `make images`. `scripts/fetch-cni-plugins`
-downloads the asset into `build/cni/<version>/`, refuses a sha256 other than the
-entry's (printing the one it got, which a Renovate bump needs) and stages the plugins
-into `build/cni/tree/`, the subimage's `ExtraTrees=`.
+The CNIs are the entries of `cni/`. An entry pins the image tag `release`, the `image`
+and the tag's `digest` (Renovate bumps tag and digest together, `renovate-custom.json5`)
+and the `plugins`, files of the image's `linux/amd64` variant, each
+`<path in the image>[:<name>]`; the sysext version is `<entry>-<release without v>`
+(`cilium-1.20.5`), `CNI_VERSIONS` in the Makefile lists one per entry, the first is the
+default of `make cni` and of `make images`. `scripts/fetch-cni-plugins` refuses a tag
+that no longer names the pinned digest, exports the plugins with `crane` (which checks
+the digest of every manifest and layer it reads) into `build/cni/<version>/<digest>/` and
+stages them and `cni.extra/<entry>/` into `build/cni/tree/`, the subimage's `ExtraTrees=`.
 
-Adding a CNI: one entry `cni/<name>` (an asset that is a single binary installs as its
-one plugin; a `.tar.gz` installs the members `plugins` lists, each `<member>[:<name>]`),
-then `make cni CNI_VERSION=<name>-<release> verify-cni` (or `make`). Nothing else
-changes: publishing, the sysupdate transfer (`sysupdate.cni.d/50-cni.transfer`,
-`cni_@v.raw`), the catalog and the PCR 13 policy are per component, not per CNI.
+Adding a CNI release: Renovate's bump of the entry, or a new entry `cni/<name>` with its
+`cni.extra/<name>/`, then `make cni CNI_VERSION=<name>-<release> verify-cni` (or `make`).
+Before merging, compare the new release's agent DaemonSet: what its host-binary init
+containers write belongs in `cni.extra/<name>/`, and a new one needs its chart value
+below. Nothing else changes: publishing, the sysupdate transfer
+(`sysupdate.cni.d/50-cni.transfer`, `cni_@v.raw`), the catalog and the PCR 13 policy are
+per component, not per CNI.
 
 The guest: vm-manager offers the published versions (`get_image` `cniVersions`),
-`create_vm` takes `cni_version` (default: the newest `flannel-*` release, only for a VM
+`create_vm` takes `cni_version` (default: the newest `cilium-*` release, only for a VM
 with a Kubernetes version) and serves it as `/cni-version`; `vm-kubernetes.service` pulls
 it with `systemd-sysupdate --component=cni update <version>` right after the Kubernetes
-sysext, merges both and measures both into PCR 13 (see [PCR 13](#pcr-13)). A CNI's
-DaemonSet that still copies its plugin into `/opt/cni/bin` succeeds and is ignored.
+sysext, merges both, restarts `systemd-sysctl.service` and measures both into PCR 13 (see
+[PCR 13](#pcr-13)).
+
+### Cilium
+
+`cni/cilium` takes `cilium-cni` from the Cilium agent image `giantswarm/cilium-app`
+deploys, `gsoci.azurecr.io/giantswarm/cilium` (the chart's `image.tag` and
+`image.digest`); `cilium-1.20.5` is the Cilium of cilium-app v1.9.0. The agent
+DaemonSet's init containers that only run the agent image (`config`, `mount-bpf-fs`,
+`clean-cilium-state`) run from its container layers. Three reach into the host:
+
+- `install-cni-binaries` copies `cilium-cni` into `cni.binPath` (`/opt/cni/bin`, the
+  chart default, kept). The copy succeeds and is ignored: containerd runs the sysext's
+  `/usr/lib/cni/cilium-cni`.
+- `mount-cgroup` copies `cilium-mount` into `cni.binPath` and runs it on the host through
+  `nsenter`, which IPE refuses (var partition). There is nothing to mount: systemd mounts
+  the cgroup2 hierarchy at `/sys/fs/cgroup`, and the agent uses it there.
+- `apply-sysctl-overwrites` does the same with `cilium-sysctlfix`, which writes
+  `/etc/sysctl.d/99-zzz-override_cilium.conf` and restarts `systemd-sysctl.service`. The
+  sysext ships that file's content for its release as
+  `/usr/lib/sysctl.d/99-zzz-override_cilium.conf` (`cni.extra/cilium/`): `rp_filter` 0
+  for `lxc*`, `cilium_*` and `all`. `vm-kubernetes.service` restarts
+  `systemd-sysctl.service` after the merge, and systemd's udev rule applies the per-link
+  keys to every link the agent creates later.
+
+A cluster on these nodes sets these values of the cilium-app chart, which drop the two
+init containers IPE would fail:
+
+```yaml
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+sysctlfix:
+  enabled: false
+```
 
 ## IPE
 
@@ -893,7 +931,7 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
 8. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 9. Writes `build/policy.json`.
 
-`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and nothing else, the entry's plugins present, the merge):
+`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and besides them only sysctl drop-ins in `/usr/lib/sysctl.d`, the entry's plugins and its `cni.extra/<name>/` files present, the merge):
 
 1. GPT via `sfdisk --json`: root, root-verity, root-verity-sig and nothing else;
    root/verity partition UUIDs equal the halves of `kubernetes_<kv>.roothash`.
