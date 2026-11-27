@@ -803,7 +803,7 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
 8. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 9. Writes `build/policy.json`.
 
-`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and nothing else, the entry's plugins present, the merge):
+`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and besides them only sysctl drop-ins in `/usr/lib/sysctl.d`, the entry's plugins and its `cni.extra/<name>/` files present, the merge):
 
 1. GPT via `sfdisk --json`: root, root-verity, root-verity-sig and nothing else;
    root/verity partition UUIDs equal the halves of `kubernetes_<kv>.roothash`.
