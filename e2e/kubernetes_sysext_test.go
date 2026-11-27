@@ -128,7 +128,7 @@ func TestKubernetesSysext(t *testing.T) {
 // for a .ko, a firmware blob and a kernel: the same call with a file of the
 // base root passes IPE and fails only at the format check. The audit record
 // names the path the kernel opened: the sysext's own for the module,
-// firmware (a symlink resolves to it), the bind mount on the ESP for kexec.
+// bind mounts of it in /run for the firmware and on the ESP for kexec.
 func assertSysextOnlyExecutes(ctx context.Context, t *testing.T, g *guest) {
 	t.Helper()
 	const sysextFile = "/usr/bin/kubelet"
