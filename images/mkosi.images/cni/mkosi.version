@@ -1,0 +1,11 @@
+#!/bin/sh
+# The image version of the cni sysext is the CNI release it ships,
+# "<cni>-<release>": CNI_VERSION, exported by images/Makefile (mkosi runs an
+# executable mkosi.version and takes its output as ImageVersion=). One
+# configuration builds every CNI release; its plugins come from the tree
+# scripts/fetch-cni-plugins stages, see the cni targets of the Makefile.
+if [ -z "${CNI_VERSION:-}" ]; then
+        echo "cni/mkosi.version: CNI_VERSION is unset; run mkosi through make -C images (cni, cni-all, images)" >&2
+        exit 1
+fi
+printf '%s\n' "$CNI_VERSION"

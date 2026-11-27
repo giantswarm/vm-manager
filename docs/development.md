@@ -289,7 +289,7 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   session (`ssh -i <state-dir>/vms/<id>/ssh_key -p <port> root@127.0.0.1`).
 - **Attestation.** `get_vm_attestation` shows both stages with the PCRs the agent quoted
   and the verifier's reason; compare against `policy.json` (`pcr11` per phase path,
-  `pcr13` per Kubernetes version, `golden.sha256`). A server in learn mode logs a warning
+  `sysexts` with the sha256 per Kubernetes and CNI sysext, `golden.sha256`). A server in learn mode logs a warning
   at startup and reports learned PCRs on the VM.
 - **e2e leftovers.** `VM_MANAGER_E2E_KEEP=1 make e2e` keeps every test's state directory
   (consoles, TPM state, disks, the server's log) and prints the path; without it only

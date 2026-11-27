@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/giantswarm/vm-manager/internal/api"
-	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/images"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
@@ -34,7 +33,7 @@ type node struct {
 	version string
 	file    string
 	line    string
-	pcr13   string
+	sysexts sysexts
 	vm      vm.VM
 }
 
@@ -66,7 +65,7 @@ func TestKubernetesVersions(t *testing.T) {
 	m := newMCPClient(ctx, t, srv.URL)
 
 	// The catalog: exactly the published versions, newest first, each with
-	// a PCR 13 policy entry that agrees with attest.SysextPCR.
+	// its sha256 in policy.json; every node gets the default CNI sysext.
 	var img images.Image
 	m.call(ctx, api.ToolGetImage, map[string]any{"ref": imageID}, &img)
 	assert.ElementsMatch(t, published, img.KubernetesVersions, "get_image lists what SHA256SUMS lists")
@@ -74,11 +73,8 @@ func TestKubernetesVersions(t *testing.T) {
 		"kubernetesVersions newest first: %v", img.KubernetesVersions)
 	nodes := make([]*node, 0, len(img.KubernetesVersions))
 	for _, version := range img.KubernetesVersions {
-		file := "kubernetes_" + version + ".raw"
-		line := attest.SysextMeasurement(sums[file], file)
-		want := attest.SysextPCR(line)
-		require.Equal(t, want, policy.PCR13[version], "policy.json pcr13[%s] disagrees with attest.SysextPCR(%q); run `make -C images verify-kubernetes`", version, line)
-		nodes = append(nodes, &node{version: version, file: file, line: line, pcr13: want})
+		sx := publishedSysexts(t, image.Dir, policy, version, img.DefaultCNIVersion())
+		nodes = append(nodes, &node{version: version, file: sx.kubernetes.file, line: sx.kubernetes.line, sysexts: sx})
 	}
 	t.Logf("kubernetes versions: %v", img.KubernetesVersions)
 
@@ -123,10 +119,10 @@ func TestKubernetesVersions(t *testing.T) {
 		t.Run(n.version, func(t *testing.T) {
 			g := &guest{m: m, id: n.vm.ID}
 			g.waitSSH(ctx)
-			assertKubernetesPulled(ctx, t, g, n.version, n.file, n.line)
+			assertKubernetesPulled(ctx, t, g, n.sysexts)
 			assert.Equal(t, "v"+n.version, g.sh(ctx, "kubeadm version -o short"))
 			assert.Equal(t, "Kubernetes v"+n.version, g.sh(ctx, "kubelet --version"))
-			assertPCR13(ctx, t, g, n.pcr13)
+			assertPCR13(ctx, t, g, n.sysexts)
 			assertOtherVersionsUntouched(ctx, t, g, n, nodes)
 		})
 	}

@@ -39,6 +39,7 @@ func instanceOf(e *entry) imds.Instance {
 		Zone:              rec.Zone,
 		SSHAuthorizedKeys: append([]string{rec.SSHPublicKey}, rec.SSHAuthorizedKeys...),
 		KubernetesVersion: rec.KubernetesVersion,
+		CNIVersion:        rec.CNIVersion,
 		Metadata:          rec.Metadata,
 		UserData:          e.userData,
 		UserDataReleased:  rec.Attestation.UserDataReleased,
@@ -89,6 +90,7 @@ func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, erro
 		return attest.Policy{}, fmt.Errorf("%w: image %s: %v", attest.ErrNoPolicy, img.Ref(), err)
 	}
 	p.KubernetesVersion = v.KubernetesVersion
+	p.CNIVersion = v.CNIVersion
 	return p, nil
 }
 

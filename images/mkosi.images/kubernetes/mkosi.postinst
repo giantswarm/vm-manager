@@ -15,9 +15,10 @@ if [[ "$installed" != "$IMAGE_VERSION" ]]; then
 fi
 
 # cni-plugins installs the reference plugins to both /usr/lib/cni and
-# /opt/cni/bin. /opt stays with the base system (writable per boot through
-# systemd.volatile=overlay) so CNI DaemonSets can install their binaries into
-# /opt/cni/bin; containerd.toml searches both directories.
+# /opt/cni/bin. containerd.toml searches /usr/lib/cni only, where the CNI
+# sysext adds its plugins; /opt stays with the base system (writable per boot
+# through systemd.volatile=overlay), so the copy a CNI DaemonSet still makes
+# into /opt/cni/bin succeeds and is ignored.
 rm -rf "$BUILDROOT/opt/cni"
 
 # Seed the extension-release file. mkosi appends ID, SYSEXT_ID, SYSEXT_VERSION_ID,

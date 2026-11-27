@@ -82,7 +82,7 @@ Design decisions and their reasons are in [docs/design.md](docs/design.md), the 
 | The current boot's attestation verdicts | `GET /api/v1/vms/{id}/attestation` | `get_vm_attestation` | no |
 | Create a network (`name`, `cidr`, `dns_search_domain`); IMDS always on | `POST /api/v1/networks` | `create_network` | yes |
 | Delete a network; `conflict` while a VM is attached | `DELETE /api/v1/networks/{name}` | `delete_network` | yes, destructive |
-| Create a VM (`name`, `image`, `kubernetes_version`, `cpus` 2, `memory_mib` 2048, `disk_gib` 20, `network` default, `user_data`, `ssh_authorized_keys`, `hostname`, `metadata`, `require_attestation` true, `wait_for` ready) | `POST /api/v1/vms` | `create_vm` | yes |
+| Create a VM (`name`, `image`, `kubernetes_version`, `cni_version`, `cpus` 2, `memory_mib` 2048, `disk_gib` 20, `network` default, `user_data`, `ssh_authorized_keys`, `hostname`, `metadata`, `require_attestation` true, `wait_for` ready) | `POST /api/v1/vms` | `create_vm` | yes |
 | Boot a stopped or failed VM from its disk | `POST /api/v1/vms/{id}/start` | `start_vm` | yes |
 | Power a VM down (ACPI, then SIGTERM/SIGKILL after `--stop-timeout`) | `POST /api/v1/vms/{id}/stop` | `stop_vm` | yes |
 | Stop, then start | `POST /api/v1/vms/{id}/reboot` | `reboot_vm` | yes |
@@ -150,10 +150,11 @@ does the following in order:
 7. **Switch root.** `systemd-firstboot` applies hostname and friends once (the overlay keeps
    them), sshd comes up with `systemd-ssh-generator`'s AF_VSOCK listener and the per-VM key
    `exec_vm` uses, networkd on the virtio NIC.
-8. **Kubernetes sysext.** `vm-kubernetes.service` reads `/kubernetes-version` from the IMDS,
-   pulls `kubernetes_<kv>.raw` with `systemd-sysupdate --component=kubernetes` (2 s for the
-   206 MB, a no-op on later boots), merges it with `systemd-sysext refresh`, extends PCR 13
-   with the file's `SHA256SUMS` line, re-applies the extension's modules and sysctls and
+8. **Kubernetes and CNI sysexts.** `vm-kubernetes.service` reads `/kubernetes-version` and
+   `/cni-version` from the IMDS, pulls `kubernetes_<kv>.raw` with `systemd-sysupdate
+   --component=kubernetes` (2 s for the 206 MB, a no-op on later boots) and
+   `cni_<cni>-<release>.raw` with `--component=cni`, merges both with `systemd-sysext
+   refresh`, extends PCR 13 with each file's `SHA256SUMS` line, re-applies the extension's modules and sysctls and
    waits for containerd. A VM without a Kubernetes version skips it.
 9. **User-data's units.** CAPI's kubeadm unit, ordered `After=vm-kubernetes.service`, runs
    `kubeadm init|join`.
@@ -182,7 +183,7 @@ the contract of `--image-dir`:
 |---|---|
 | `giantswarm-vm-base_<v>.efi` | the UKI: kernel, initrd (systemd-networkd, systemd-imdsd, `vm-agent`, Ignition), command line with `roothash=`, `.pcrsig` / `.pcrpkey` for PCR 11 |
 | `giantswarm-vm-base_<v>.raw` | the disk image: ESP with systemd-boot and the UKI, erofs root, verity hash and signature partitions |
-| `policy.json` | `pcr11` per phase path (computed with `systemd-measure calculate` by `make -C images verify`), `pcr13` per Kubernetes version, `golden.sha256` for PCRs 0, 2-4, 6, 7, 13 and `golden_firmware` (the firmware build they belong to) once `vm-manager image golden` ran; a released guest image artifact carries them |
+| `policy.json` | `pcr11` per phase path (computed with `systemd-measure calculate` by `make -C images verify`), `sysexts` (the sha256 of every Kubernetes and CNI sysext, from which PCR 13 is computed), `golden.sha256` for PCRs 0, 2-4, 6, 7, 13 and `golden_firmware` (the firmware build they belong to) once `vm-manager image golden` ran; a released guest image artifact carries them |
 | `sysupdate/base/` | the A/B OS update artifacts the image's `/usr/lib/sysupdate.d/` transfers name, with `SHA256SUMS` and `SHA256SUMS.gpg` |
 | `sysupdate/kubernetes/` | `kubernetes_<kv>.raw` per Kubernetes version, `SHA256SUMS`, `SHA256SUMS.gpg` |
 
@@ -205,8 +206,10 @@ under the `/etc` and `/usr` overlays. The Kubernetes sysext
 (`images/mkosi.images/kubernetes`) is an erofs `/usr` delta with kubeadm, kubelet, kubectl,
 containerd, runc, crictl and the CNI plugins, signed with the verity certificate the base
 trusts, its units started through `Upholds=` on `multi-user.target` because a layer merged
-during boot cannot be enabled by presets; `/opt/cni/bin` stays a writable bind mount from
-var for CNI DaemonSets.
+during boot cannot be enabled by presets. A CNI's plugins come from a CNI sysext
+(`cni_<cni>-<release>.raw`, chosen per VM with `cni_version`, default the newest flannel
+release): containerd's `bin_dirs` is `/usr/lib/cni` alone, and the copy a CNI DaemonSet
+still makes into `/opt/cni/bin` is ignored.
 
 Keys are generated per build (`make -C images keys`, git-ignored `images/keys/`): the
 verity certificate, the PCR signing key for the UKI, and the PGP key behind `SHA256SUMS`,
@@ -228,7 +231,7 @@ PCR digest matches the PCR values sent, and then the values:
 |---|---|---|
 | 11 | `policy.json` `pcr11[<phase path>]` | the exact UKI (kernel, initrd, command line) and its boot phase |
 | 0, 2, 3, 4, 6, 7 | `policy.json` `golden.sha256` | firmware code, option ROMs, boot loader and UKI, Secure Boot policy |
-| 13 (ready stage) | `policy.json` `pcr13[<kubernetes version>]`, golden 13 for a VM without one | the exact Kubernetes sysext, or none |
+| 13 (ready stage) | computed from `policy.json` `sysexts` for the VM's Kubernetes and CNI versions, golden 13 for a VM without one | the exact Kubernetes and CNI sysexts, or none |
 | 1, 5 | recorded, not compared | SMBIOS tables with per-VM credentials, the boot entry, the GPT with per-install UUIDs |
 
 The attestation key is pinned per VM on the first verified initrd quote (trust on first

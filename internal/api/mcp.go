@@ -53,6 +53,7 @@ const (
 	argLines              = "lines"
 	argImage              = "image"
 	argKubernetesVersion  = "kubernetes_version"
+	argCNIVersion         = "cni_version"
 	argCPUs               = "cpus"
 	argMemoryMiB          = "memory_mib"
 	argDiskGiB            = "disk_gib"
@@ -104,7 +105,7 @@ func (s Services) defaultNetwork() string {
 // instructionsFormat takes the default network's name.
 const instructionsFormat = `Provision cloud-provider-like virtual machines on this KVM host: an instance metadata service (IMDS), a vTPM with measured boot, an immutable mkosi-built OS and Kubernetes as a sysext layer, so the VMs can be handed to the CAPI based cluster-manager. Call get_host first: it reports whether the host can run VMs (ready) and, if not, which prerequisites are missing — nothing else can succeed until they are met.
 
-Lifecycle: list_images shows the bootable images and get_image the Kubernetes versions one offers. A VM needs a network: call create_network, or use the network named %q that the server creates at startup (see list_networks), then create_vm. create_vm installs the image onto a fresh disk (state installing), reboots into it (booting), attests from the initrd when require_attestation is set (attesting) and is ready once the guest's service manager sent READY=1; running means the process is up but READY never arrived within the boot timeout. wait_for chooses how long create_vm blocks: none returns at once and you poll get_vm; installed, attested or ready block until that milestone (a timeout error still leaves the VM running). user_data is CAPI's bootstrap Secret as Ignition JSON; the IMDS releases it to the guest only after a verified attestation quote from the initrd (right after the installed boot starts when require_attestation is false), so a VM created without user_data boots the bare OS. get_vm reports state, IP, attestation and the last error; get_vm_console shows the serial console when something goes wrong; exec_vm runs a command as root over ssh through the virtual network; forward_port exposes a guest port such as 6443 on a loopback address of the host. stop_vm, start_vm and reboot_vm move a VM between stopped and running; delete_vm removes the VM with its disk, and delete_network succeeds only once no VM is attached.`
+Lifecycle: list_images shows the bootable images and get_image the Kubernetes and CNI sysext versions one offers. A VM needs a network: call create_network, or use the network named %q that the server creates at startup (see list_networks), then create_vm. create_vm installs the image onto a fresh disk (state installing), reboots into it (booting), attests from the initrd when require_attestation is set (attesting) and is ready once the guest's service manager sent READY=1; running means the process is up but READY never arrived within the boot timeout. wait_for chooses how long create_vm blocks: none returns at once and you poll get_vm; installed, attested or ready block until that milestone (a timeout error still leaves the VM running). user_data is CAPI's bootstrap Secret as Ignition JSON; the IMDS releases it to the guest only after a verified attestation quote from the initrd (right after the installed boot starts when require_attestation is false), so a VM created without user_data boots the bare OS. get_vm reports state, IP, attestation and the last error; get_vm_console shows the serial console when something goes wrong; exec_vm runs a command as root over ssh through the virtual network; forward_port exposes a guest port such as 6443 on a loopback address of the host. stop_vm, start_vm and reboot_vm move a VM between stopped and running; delete_vm removes the VM with its disk, and delete_network succeeds only once no VM is attached.`
 
 // hints are the four MCP tool annotations.
 type hints struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -173,7 +174,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		"Empty means no image was built or --image-dir points elsewhere.",
 		hintRead), t.listImages)
 	s.AddTool(newTool(ToolGetImage,
-		"Describe one VM image: its artifacts, the Kubernetes versions it offers as a sysext and its PCR policy.",
+		"Describe one VM image: its artifacts, the Kubernetes and CNI versions it offers as sysexts and its PCR policy.",
 		"list_images has the references.",
 		hintRead,
 		mcp.WithString(argRef, mcp.Required(), mcp.Description(`Image reference: "<id>_<version>" or the bare id for its newest version`)),
@@ -232,6 +233,7 @@ func NewMCPServer(svc Services, build buildinfo.Info) *mcpserver.MCPServer {
 		mcp.WithString(argName, mcp.Required(), mcp.Description(fmt.Sprintf("VM name, a DNS label of at most %d characters; also the default hostname", vm.MaxNameLen))),
 		mcp.WithString(argImage, mcp.Description(`Image reference ("<id>_<version>" or bare id); default: the catalog's newest image`)),
 		mcp.WithString(argKubernetesVersion, mcp.Description("Kubernetes sysext version served as /kubernetes-version; default: the newest the image offers. See get_image")),
+		mcp.WithString(argCNIVersion, mcp.Description(`CNI sysext "<cni>-<release>" served as /cni-version, the only CNI plugins besides the reference ones; default: the newest flannel. See get_image`)),
 		mcp.WithNumber(argCPUs, mcp.Description(fmt.Sprintf("Virtual CPUs, default %d", DefaultCPUs))),
 		mcp.WithNumber(argMemoryMiB, mcp.Description(fmt.Sprintf("Memory in MiB, default %d, at least %d", DefaultMemoryMiB, vm.MinMemoryMiB))),
 		mcp.WithNumber(argDiskGiB, mcp.Description(fmt.Sprintf("Disk size in GiB, default %d", DefaultDiskGiB))),

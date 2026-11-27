@@ -1,32 +1,38 @@
 #!/usr/bin/env bash
-# Pull the Kubernetes sysext the VM was created with, activate it and measure
-# it into PCR 13. Run once per boot by vm-kubernetes.service.
+# Pull the Kubernetes and CNI sysexts the VM was created with, activate them
+# and measure them into PCR 13. Run once per boot by vm-kubernetes.service.
 #
-#  1. /kubernetes-version from the IMDS names the version; an unset key means
-#     the VM runs without Kubernetes and the unit ends here.
-#  2. Every other kubernetes_*.raw in /var/lib/extensions is removed first:
-#     systemd-sysext merges every image it finds (the later name wins per
-#     file), so exactly one version may be present when it refreshes. The
-#     sysupdate transfer keeps InstancesMax=2 (the minimum sysupdate.d(5)
-#     accepts); this is what enforces one.
-#  3. systemd-sysupdate --component=kubernetes update <version> downloads
-#     kubernetes_<version>.raw from the vm-manager IMDS directory, verifying
+#  1. /kubernetes-version from the IMDS names the Kubernetes version; an unset
+#     key means the VM runs without Kubernetes and the unit ends here.
+#     /cni-version names the CNI sysext, "<cni>-<release>"; an unset key means
+#     the VM runs without one (containerd then has the reference plugins of
+#     the Kubernetes sysext only).
+#  2. Per component, every other <component>_*.raw in /var/lib/extensions is
+#     removed first: systemd-sysext merges every image it finds (the later
+#     name wins per file), so exactly one version of each may be present when
+#     it refreshes. The sysupdate transfers keep InstancesMax=2 (the minimum
+#     sysupdate.d(5) accepts); this is what enforces one.
+#  3. systemd-sysupdate --component=<component> update <version> downloads
+#     <component>_<version>.raw from the vm-manager IMDS directory, verifying
 #     SHA256SUMS.gpg against /etc/systemd/import-pubring.pgp; an already
 #     present version is a no-op. It runs from /usr/lib/systemd, like
 #     systemd-imds and systemd-pcrextend: systemd 262 no longer installs it in
 #     /usr/bin (updatectl is the command there), and images/scripts/verify
 #     checks every tool these scripts run is in the image.
-#  4. systemd-sysext refresh merges it (a no-op when systemd-sysext.service
-#     already merged this very file early in the boot). The extension carries
-#     EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the manager and the
-#     Upholds= of multi-user.target starts containerd and kubelet.
-#  5. The line `sha256sum kubernetes_<version>.raw` prints in
-#     /var/lib/extensions ("<sha256>  kubernetes_<version>.raw", the same line
-#     the published SHA256SUMS carries) is measured into PCR 13 with
-#     systemd-pcrextend: PCR 13 := sha256(PCR 13 || sha256(line)). The only
-#     other PCR 13 event of a boot is the initrd's "os-separator", so the host
-#     predicts the value from the artifact alone (images/scripts/verify-kubernetes
-#     writes it to policy.json as pcr13.<version>).
+#  4. systemd-sysext refresh merges them (a no-op when systemd-sysext.service
+#     already merged these very files early in the boot). The Kubernetes
+#     extension carries EXTENSION_RELOAD_MANAGER=1, so the refresh reloads the
+#     manager and the Upholds= of multi-user.target starts containerd and
+#     kubelet. The CNI extension adds its plugins to /usr/lib/cni, the one
+#     directory containerd's bin_dirs lists.
+#  5. For each merged file, Kubernetes first, then CNI, the line
+#     `sha256sum <component>_<version>.raw` prints in /var/lib/extensions
+#     ("<sha256>  <file>", the same line the published SHA256SUMS carries) is
+#     measured into PCR 13 with systemd-pcrextend: PCR 13 := sha256(PCR 13 ||
+#     sha256(line)). The only other PCR 13 event of a boot is the initrd's
+#     "os-separator", so the host computes the value from the published
+#     sha256 of each file (images/scripts/verify-sysext writes them to
+#     policy.json as sysexts.<component>.<version>; attest.SysextPCR).
 #  6. The node stack is made usable for units ordered After=vm-kubernetes.service
 #     (the kubeadm unit from CAPI's Ignition config): on a boot that downloaded
 #     the extension, systemd-modules-load.service and systemd-sysctl.service
@@ -36,9 +42,9 @@
 #     preflight dials is there when this unit is active. kubelet is left to
 #     its restart loop until kubeadm configures it.
 #
-# A different /kubernetes-version on a later boot replaces the file and the
-# merge; PCR 13 then carries the new version only, because this runs once per
-# boot and measures after the final merge.
+# A different version on a later boot replaces the file and the merge; PCR 13
+# then carries the new versions only, because this runs once per boot and
+# measures after the final merge.
 set -euo pipefail
 shopt -s nullglob
 
@@ -48,60 +54,84 @@ pcr=13
 log() { echo "vm-kubernetes: $*"; }
 fail() { echo "vm-kubernetes: $*" >&2; exit 1; }
 
-# systemd-imds exits 1 on every error; stderr tells them apart. systemd-imdsd's
-# KeyNotFound for an unset key (vm-manager's bodyless 404: the VM was created
-# without a Kubernetes version) prints as "Key not available." (the tool maps
-# KeyNotFound and WellKnownKeyUnset to that line, src/imds/imds-tool.c);
-# NotSupported, when no IMDS provider matched the machine (a boot outside
-# vm-manager, e.g. scripts/smoke-boot), prints its varlink error name. Both
-# mean there is nothing to pull; CommunicationFailure, Timeout and
-# NotAvailable are failures of a VM that should have a version.
-err=/run/vm-kubernetes.imds-err
-nothing_to_pull='^Key not available\.$|InstanceMetadata\.NotSupported'
-if ! version="$(/usr/lib/systemd/systemd-imds /kubernetes-version 2>"$err")"; then
-        if reason="$(/usr/bin/grep -m1 -o -E "$nothing_to_pull" "$err")"; then
-                log "no /kubernetes-version from the IMDS ($reason), this VM runs without Kubernetes"
-                exit 0
+# imds_version <key> prints the version an IMDS key names, nothing when the
+# key is unset. systemd-imds exits 1 on every error; stderr tells them apart.
+# systemd-imdsd's KeyNotFound for an unset key (vm-manager's bodyless 404: the
+# VM was created without that version) prints as "Key not available." (the
+# tool maps KeyNotFound and WellKnownKeyUnset to that line,
+# src/imds/imds-tool.c); NotSupported, when no IMDS provider matched the
+# machine (a boot outside vm-manager, e.g. scripts/smoke-boot), prints its
+# varlink error name. Both mean there is nothing to pull; CommunicationFailure,
+# Timeout and NotAvailable are failures of a VM that should have a version.
+imds_version() {
+        local key="$1" err=/run/vm-kubernetes.imds-err version reason
+        local nothing_to_pull='^Key not available\.$|InstanceMetadata\.NotSupported'
+        if ! version="$(/usr/lib/systemd/systemd-imds "$key" 2>"$err")"; then
+                if reason="$(/usr/bin/grep -m1 -o -E "$nothing_to_pull" "$err")"; then
+                        log "no $key from the IMDS ($reason)" >&2
+                        return 0
+                fi
+                fail "cannot read $key from the IMDS: $(tr '\n' ' ' <"$err")"
         fi
-        fail "cannot read /kubernetes-version from the IMDS: $(tr '\n' ' ' <"$err")"
-fi
-version="${version//[[:space:]]/}"
-[[ -n "$version" ]] || { log "/kubernetes-version is empty, this VM runs without Kubernetes"; exit 0; }
-name="kubernetes_$version.raw"
+        printf '%s' "${version//[[:space:]]/}"
+}
 
-for f in "$extensions"/kubernetes_*.raw; do
-        [[ "${f##*/}" == "$name" ]] && continue
-        log "removing superseded ${f##*/}"
-        rm -f "$f"
-done
-
-if [[ -s "$extensions/$name" ]]; then
-        log "$name is present, no download"
-else
+# pull <component> <version> leaves exactly <component>_<version>.raw of the
+# component in /var/lib/extensions, downloading it when absent.
+pull() {
+        local component="$1" version="$2" name="$1_$2.raw" f start ms
+        for f in "$extensions/$component"_*.raw; do
+                [[ "${f##*/}" == "$name" ]] && continue
+                log "removing superseded ${f##*/}"
+                rm -f "$f"
+        done
+        if [[ -s "$extensions/$name" ]]; then
+                log "$name is present, no download"
+                return
+        fi
         # EPOCHREALTIME is seconds with six decimals; strip the point for
         # microsecond integer arithmetic (the base image has no awk or bc).
         start=${EPOCHREALTIME/./}
-        /usr/lib/systemd/systemd-sysupdate --component=kubernetes update "$version"
+        /usr/lib/systemd/systemd-sysupdate --component="$component" update "$version"
         [[ -s "$extensions/$name" ]] || fail "systemd-sysupdate did not install $name"
         ms=$(( (${EPOCHREALTIME/./} - start) / 1000 ))
         log "pulled $name ($(stat -c %s "$extensions/$name") bytes) in $((ms / 1000)).$(printf '%03d' $((ms % 1000))) s"
+}
+
+kubernetes="$(imds_version /kubernetes-version)"
+[[ -n "$kubernetes" ]] || { log "no Kubernetes version, this VM runs without Kubernetes"; exit 0; }
+cni="$(imds_version /cni-version)"
+
+# The order of measured is the order of PCR 13's events.
+measured=("kubernetes_$kubernetes")
+pull kubernetes "$kubernetes"
+if [[ -n "$cni" ]]; then
+        measured+=("cni_$cni")
+        pull cni "$cni"
+else
+        log "no CNI sysext: removing any cni_*.raw, containerd has the reference plugins only"
+        rm -f "$extensions"/cni_*.raw
 fi
 
 systemd-sysext refresh
 # `systemd-sysext status` prints one row per hierarchy: HIERARCHY EXTENSIONS
-# SINCE, EXTENSIONS comma-separated. Exactly our version may be on /usr.
+# SINCE, EXTENSIONS comma-separated. Exactly our versions may be on /usr.
 merged=""
 while read -r hierarchy exts _; do
         [[ "$hierarchy" == /usr ]] && merged="$exts"
 done < <(systemd-sysext status --no-legend --no-pager 2>/dev/null)
-[[ "$merged" == "kubernetes_$version" ]] || fail "expected kubernetes_$version merged on /usr, systemd-sysext status says '${merged:-nothing}'"
+want="$(printf '%s\n' "${measured[@]}" | sort | paste -sd,)"
+[[ "$(tr ',' '\n' <<<"$merged" | sort | paste -sd,)" == "$want" ]] \
+        || fail "expected $want merged on /usr, systemd-sysext status says '${merged:-nothing}'"
 
-line="$(cd "$extensions" && sha256sum "$name")"
-/usr/lib/systemd/systemd-pcrextend --pcr="$pcr" "$line"
-log "measured '$line' into PCR $pcr"
+for name in "${measured[@]}"; do
+        line="$(cd "$extensions" && sha256sum "$name.raw")"
+        /usr/lib/systemd/systemd-pcrextend --pcr="$pcr" "$line"
+        log "measured '$line' into PCR $pcr"
+done
 
 # Modules first: net.bridge.* exists only once br_netfilter is loaded. Both
 # are no-ops on a boot where systemd-sysext.service merged the extension early.
 systemctl restart systemd-modules-load.service systemd-sysctl.service
 systemctl start containerd.service
-log "kubernetes_$version active: modules and sysctls applied, containerd started"
+log "${measured[*]} active: modules and sysctls applied, containerd started"
