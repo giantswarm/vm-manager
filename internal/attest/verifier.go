@@ -15,7 +15,9 @@
 //     signing key (tpmquote.Parse);
 //  4. the signature verifies with ak_pub, the qualifying data is the nonce,
 //     the sha256 bank sent reproduces the quoted PCR digest and covers the
-//     PCRs the stage needs (0-7, 11; plus 13 at ready);
+//     PCRs the stage needs (0-7, 11; plus 13 at ready, and 15 at ready when
+//     the image's policy says it measures layer certificates,
+//     Policy.RequiredPCRs);
 //  5. the AK equals the one pinned for this VM (trust on first use: the
 //     first verified initrd quote enrolls it; a ready quote without an
 //     enrolled AK is rejected);
@@ -24,12 +26,27 @@
 //     VM, see goldenFirmwarePCRs; they are quoted and recorded, not
 //     compared); a PCR without a golden value is accepted only in learn mode
 //     (Options.LearnGolden) and reported in Result.Learned; PCR 13 is
-//     compared at the ready stage against the policy's pcr13 entry for the
-//     VM's Kubernetes version, else against the golden value, and recorded
+//     compared at the ready stage against the value computed from the
+//     policy's sysexts entries of the VM's Kubernetes and CNI versions (or
+//     the pcr13 entry of a VM without CNI), else against the golden value,
+//     and recorded
 //     when the policy has neither. A mismatch of a firmware PCR names the
 //     firmware build the values were recorded under next to the one this
 //     server boots (Policy.GoldenFirmware, Options.Firmware), which tells a
-//     firmware change apart from a boot that differs on the same firmware.
+//     firmware change apart from a boot that differs on the same firmware;
+//  8. at the ready stage, an image whose policy does not measure layer
+//     certificates (Policy.PCR15) cannot be served any; when the quote
+//     covers PCR 15 (always for an image that measures them, step 4; an
+//     older image may leave it out, which the message records), the PCR 15
+//     records of the userspace log
+//     (QuoteRequest.UserspaceLog) replay to the quoted PCR 15, every one of
+//     them bound to its content (a systemd string record whose sha256 digest
+//     is the sha256 of its word, the word a machine-id:, file-system: or
+//     layer-certificate: measurement; anything else rejects the log), and
+//     the layer certificate words among them name exactly the certificates
+//     the IMDS serves the VM (Policy.LayerCertificates), in that order; none
+//     served means none measured. Result.LayerCertificates records what the
+//     node measured, also when the comparison fails.
 //
 // Every verdict is kept per VM and stage (Results) for get_vm_attestation
 // and `vm-manager image golden`.
@@ -41,6 +58,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -96,6 +114,10 @@ type Result struct {
 	PCRs map[int]string `json:"pcrs,omitempty"`
 	// Learned lists the PCRs accepted without a golden value.
 	Learned []int `json:"learned,omitempty"`
+	// LayerCertificates are the sha256 digests of the layer certificates
+	// the ready quote's PCR 15 measured, in order, set once the userspace
+	// log replayed to the quoted value.
+	LayerCertificates []string `json:"layerCertificates,omitempty"`
 }
 
 // pinMismatch is the rejection for a quote signed by another key than the
@@ -185,8 +207,12 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 		return reject("pcr digest: %v", err)
 	}
 	res.PCRs = hexPCRs(values)
-	if missing := missingPCRs(q.PCRs, RequiredPCRs(req.Stage)); len(missing) > 0 {
-		return reject("quote covers pcrs %s but stage %s also needs %s", indexList(q.PCRs), req.Stage, indexList(missing))
+	if missing := missingPCRs(q.PCRs, policy.RequiredPCRs(req.Stage)); len(missing) > 0 {
+		reason := ""
+		if slices.Contains(missing, PCRSystemIdentity) {
+			reason = fmt.Sprintf(" (pcr 15: the image's policy has pcr15 %q)", policy.PCR15)
+		}
+		return reject("quote covers pcrs %s but stage %s also needs %s%s", indexList(q.PCRs), req.Stage, indexList(missing), reason)
 	}
 
 	if pinned, ok := v.pinned(vmID); ok && pinned != q.AKFingerprint {
@@ -202,20 +228,20 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	firmwareMismatch := false
 	compare := func(index int) {
 		got := res.PCRs[index]
-		want, kubernetes, ok := policy.expected(index)
+		want, sysexts, ok := policy.expected(index)
 		switch {
 		case !ok && (v.opts.LearnGolden || index == PCRSysext):
 			res.Learned = append(res.Learned, index)
 			learned = append(learned, fmt.Sprintf("%d=%s", index, got))
 		case !ok:
 			unknown = append(unknown, fmt.Sprint(index))
-		case want != got && kubernetes != "":
-			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s for kubernetes %s, got %s", index, want, kubernetes, got))
+		case want != got && sysexts != "":
+			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s for %s, got %s", index, want, sysexts, got))
 		case want != got:
 			mismatched = append(mismatched, fmt.Sprintf("pcr %d expected %s, got %s", index, want, got))
 			firmwareMismatch = firmwareMismatch || index != PCRSysext
-		case kubernetes != "":
-			sysext = kubernetes
+		case sysexts != "":
+			sysext = sysexts
 		}
 	}
 	for _, i := range goldenFirmwarePCRs {
@@ -234,11 +260,31 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	if len(unknown) > 0 {
 		return reject("no golden value for pcr %s in the image policy: record one with `vm-manager image golden` or run with --attestation-learn-golden", strings.Join(unknown, ","))
 	}
+	_, quoted15 := values[PCRSystemIdentity]
+	if n := len(policy.LayerCertificates); req.Stage == imds.StageReady && n > 0 && !policy.MeasuresLayerCertificates() {
+		return reject("the vm is served %d layer certificates, but its image does not measure them (its policy.json lacks pcr15 %q) and cannot have enrolled them", n, PCR15LayerCertificates)
+	}
+	if req.Stage == imds.StageReady && quoted15 {
+		measured, err := measuredLayerCertificates(req.UserspaceLog, values[PCRSystemIdentity])
+		if err != nil {
+			return reject("pcr 15: %v", err)
+		}
+		res.LayerCertificates = measured
+		if err := compareLayerCertificates(policy.LayerCertificates, measured); err != nil {
+			return reject("%v", err)
+		}
+	}
 
 	res.Verified = true
 	res.Message = fmt.Sprintf("verified: ak %s, pcr 11 phase %s", short(q.AKFingerprint), phase)
 	if sysext != "" {
-		res.Message += ", pcr 13 kubernetes " + sysext
+		res.Message += ", pcr 13 " + sysext
+	}
+	switch n := len(res.LayerCertificates); {
+	case req.Stage == imds.StageReady && !quoted15:
+		res.Message += ", pcr 15 not quoted (the image predates layer certificates)"
+	case n > 0:
+		res.Message += fmt.Sprintf(", pcr 15 %d layer certificates", n)
 	}
 	if len(learned) > 0 {
 		res.Message += "; accepted without golden value: " + strings.Join(learned, " ")
@@ -363,6 +409,7 @@ func (r Result) clone() Result {
 		r.PCRs = pcrs
 	}
 	r.Learned = append([]int(nil), r.Learned...)
+	r.LayerCertificates = append([]string(nil), r.LayerCertificates...)
 	return r
 }
 

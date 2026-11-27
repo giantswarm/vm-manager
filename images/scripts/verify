@@ -217,9 +217,12 @@ root_agent_size="$(dump.erofs --path=/usr/bin/vm-agent "$rootfs" 2>/dev/null | a
 ok "vm-agent $("$tmp/initrd/usr/bin/vm-agent" version 2>/dev/null | awk '{print $3}') (static, $agent_size bytes) in initrd and root; attest units wired (initrd: initrd.target, before ignition-fetch; root: enabled)"
 
 # 6d. IPE (README.md, IPE): the kernel starts the LSM and opens the root's
-# verity device with its signature (UKI cmdline); the root carries the policy,
-# signed by the verity key whose certificate is published next to the image
-# for vm-manager's db enrollment, and the manager drop-in that drops
+# verity device with its signature (UKI cmdline); the initrd carries the
+# policy, signed by the verity key whose certificate is published next to the
+# image for vm-manager's db enrollment, which lets signed dm-verity devices
+# execute and pins every other operation to this image's root hash, and the
+# unit that hands it to the real root's PID 1 through /run/ipe; the root
+# carries no policy of its own and the manager drop-in that drops
 # CAP_MAC_ADMIN; the exitrd's /shutdown is the image's binary, not a script
 # on /run; the initrd dissects the installer disk for the signature and pins
 # the policy and the manager configuration against the /etc overlay.
@@ -230,12 +233,29 @@ for umh in bset inheritable; do
         /usr/bin/grep -qF "sysctl.kernel.usermodehelper.$umh=\"4294967295 509\"" "$tmp/ukify.txt" || fail "UKI cmdline does not drop CAP_MAC_ADMIN from the usermode helpers' $umh"
 done
 cmp -s "$build/$name.crt" "$keys/verity.crt" || fail "$build/$name.crt is not $keys/verity.crt"
-ipe_p7b="$tmp/root/etc/ipe/giantswarm-vm.p7b"
-[[ -s "$ipe_p7b" ]] || fail "/etc/ipe/giantswarm-vm.p7b missing from the root"
+[[ ! -e "$tmp/root/etc/ipe" ]] || fail "the root carries /etc/ipe; the policy belongs to the initrd"
+zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/vm-manager/ipe/giantswarm-vm.p7b usr/lib/vm-manager/ipe-policy \
+        usr/lib/systemd/system/vm-ipe-policy.service usr/lib/systemd/system/initrd.target.requires/vm-ipe-policy.service 2>/dev/null) || true
+ipe_p7b="$tmp/initrd/usr/lib/vm-manager/ipe/giantswarm-vm.p7b"
+[[ -s "$ipe_p7b" ]] || fail "/usr/lib/vm-manager/ipe/giantswarm-vm.p7b missing from the initrd"
 openssl smime -verify -binary -inform der -in "$ipe_p7b" -CAfile "$keys/verity.crt" -purpose any -out "$tmp/ipe.policy" 2>/dev/null \
-        || fail "/etc/ipe/giantswarm-vm.p7b is not signed by $keys/verity.crt"
+        || fail "the initrd's giantswarm-vm.p7b is not signed by $keys/verity.crt"
 [[ "$(head -n1 "$tmp/ipe.policy")" == "policy_name=giantswarm-vm policy_version=$version" ]] || fail "IPE policy header is '$(head -n1 "$tmp/ipe.policy")'"
-/usr/bin/grep -qx 'DEFAULT action=DENY' "$tmp/ipe.policy" || fail "IPE policy does not deny by default"
+# Every rule, exactly: signed devices execute, the rest is this root's.
+python3 - "$tmp/ipe.policy" "$roothash" <<'EOF' || fail "IPE policy rules"
+import sys
+rules = [l for l in open(sys.argv[1]).read().splitlines()[1:] if l and not l.startswith("#")]
+pinned = f"dmverity_roothash=sha256:{sys.argv[2]}"
+want = ["DEFAULT action=DENY", "op=EXECUTE dmverity_signature=TRUE action=ALLOW"] + [
+    f"op={op} {pinned} action=ALLOW"
+    for op in ("FIRMWARE", "KMODULE", "KEXEC_IMAGE", "KEXEC_INITRAMFS", "POLICY", "X509_CERT")
+]
+if rules != want:
+    sys.exit("verify: FAIL: IPE policy rules\n  " + "\n  ".join(rules) + "\nwant\n  " + "\n  ".join(want))
+EOF
+[[ -x "$tmp/initrd/usr/lib/vm-manager/ipe-policy" ]] || fail "initrd lacks /usr/lib/vm-manager/ipe-policy"
+[[ -L "$tmp/initrd/usr/lib/systemd/system/initrd.target.requires/vm-ipe-policy.service" ]] || fail "initrd.target does not require vm-ipe-policy.service"
+/usr/bin/grep -qx 'OnFailure=emergency.target' "$tmp/initrd/usr/lib/systemd/system/vm-ipe-policy.service" || fail "vm-ipe-policy.service does not fail closed"
 extract /usr/lib/systemd/system.conf.d
 /usr/bin/grep -qx 'CapabilityBoundingSet=~CAP_MAC_ADMIN' "$tmp/root/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf" || fail "the manager does not drop CAP_MAC_ADMIN"
 extract /usr/lib/tmpfiles.d
@@ -243,7 +263,7 @@ extract /usr/lib/tmpfiles.d
 /usr/bin/grep -qx usr/lib/udev/rules.d/85-vm-manager-dissect-image.rules "$tmp/initrd.lst" || fail "initrd lacks the dissect rule for the installer disk"
 zstd -dc "$initrd" 2>/dev/null | (cd "$tmp/initrd" && cpio -id --quiet usr/lib/vm-manager/persistent-etc 2>/dev/null) || true
 /usr/bin/grep -q '^for pinned in ipe systemd/system.conf systemd/system.conf.d; do' "$tmp/initrd/usr/lib/vm-manager/persistent-etc" || fail "persistent-etc does not pin /etc/ipe and the manager configuration"
-ok "ipe: $cmdline_lsm, policy giantswarm-vm $version signed by the published $name.crt, CAP_MAC_ADMIN dropped (manager and usermode helpers), exitrd and initrd ready"
+ok "ipe: $cmdline_lsm, policy giantswarm-vm $version in the initrd for root $roothash, signed by the published $name.crt, CAP_MAC_ADMIN dropped (manager and usermode helpers), exitrd and initrd ready"
 
 # 7. sysupdate directory: manifest signature and checksums. gpg rewrites a
 #    --keyring file it opens (leaving import-pubring.pgp~ behind), which would
@@ -255,10 +275,12 @@ GNUPGHOME="$keys/gnupg" gpg --batch --quiet --no-default-keyring --keyring "$tmp
 (cd "$sysupdate" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS mismatch"
 ok "sysupdate/base: SHA256SUMS.gpg verifies, $(/usr/bin/grep -c . "$sysupdate/SHA256SUMS") artifacts"
 
-# 8. policy.json. The golden PCR values `vm-manager image golden` recorded
-#    into an existing policy.json for this image version survive a re-run with
-#    the firmware build they belong to, as do the pcr13 values
-#    scripts/verify-kubernetes adds per sysext version.
+# 8. policy.json. "pcr15": "layer-certificates" declares that the initrd
+#    measures the installation layer certificates into PCR 15, so vm-manager
+#    requires PCR 15 in the ready quote of this image. The golden PCR values
+#    `vm-manager image golden` recorded into an existing policy.json for this
+#    image version survive a re-run with the firmware build they belong to, as
+#    do the sysexts entries scripts/verify-sysext adds per sysext version.
 python3 - "$policy" "$id" "$version" "$roothash" "$tmp/pcr11.json" "$tmp/partitions.json" "$uki" <<'EOF'
 import json, os, sys
 policy, image_id, version, roothash, pcr11, partitions, uki = sys.argv[1:]
@@ -270,13 +292,14 @@ out = {
     "roothash": roothash,
     "partitions": parts,
     "pcr11": {e["phase"]: e["hash"] for e in json.load(open(pcr11))["sha256"]},
+    "pcr15": "layer-certificates",
 }
 try:
     prev = json.load(open(policy))
 except (OSError, ValueError):
     prev = {}
 if prev.get("image_id") == image_id and prev.get("image_version") == version:
-    for key in ("pcr13", "golden", "golden_firmware"):
+    for key in ("sysexts", "golden", "golden_firmware"):
         if isinstance(prev.get(key), dict):
             out[key] = prev[key]
             print(f"verify: kept {key} values from the previous policy.json")

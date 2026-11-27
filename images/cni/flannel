@@ -1,0 +1,20 @@
+# flannel's CNI plugin (github.com/flannel-io/cni-plugin): the binary the
+# install-cni-plugin init container of flannel's manifest copies into
+# /opt/cni/bin, which IPE refuses to execute. The cni sysext
+# cni_flannel-<release without v>.raw ships it as /usr/lib/cni/flannel.
+#
+# An entry is a POSIX shell fragment that scripts/fetch-cni-plugins and the
+# Makefile source; its file name is the CNI's name in the sysext version
+# (<name>-<release without v>). It sets:
+#   release  the upstream release; Renovate bumps it (renovate-custom.json5)
+#   url      the asset to download, a single binary or a .tar.gz
+#   sha256   the asset's sha256; a bumped release needs its new value, which
+#            the fetch prints when it differs
+#   plugins  the plugin binaries to install into /usr/lib/cni: the asset
+#            itself (one name) or members of the archive, each as
+#            <member>[:<name>]
+# renovate: datasource=github-releases depName=flannel-io/cni-plugin
+release=v1.9.1-flannel3
+url="https://github.com/flannel-io/cni-plugin/releases/download/$release/flannel-amd64"
+sha256=82bf5fcdbd8ee7b9a9337fef81dbca163550141971a9f76ca426dd97e74d38ed
+plugins=flannel

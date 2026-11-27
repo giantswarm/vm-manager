@@ -12,6 +12,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/attest"
 	"github.com/giantswarm/vm-manager/internal/imds"
+	"github.com/giantswarm/vm-manager/internal/layercert"
 )
 
 const imdsHeaderTimeout = 10 * time.Second
@@ -39,6 +40,8 @@ func instanceOf(e *entry) imds.Instance {
 		Zone:              rec.Zone,
 		SSHAuthorizedKeys: append([]string{rec.SSHPublicKey}, rec.SSHAuthorizedKeys...),
 		KubernetesVersion: rec.KubernetesVersion,
+		CNIVersion:        rec.CNIVersion,
+		LayerCertificates: rec.LayerCertificates,
 		Metadata:          rec.Metadata,
 		UserData:          e.userData,
 		UserDataReleased:  rec.Attestation.UserDataReleased,
@@ -70,7 +73,8 @@ func (s *Service) StoreReport(ctx context.Context, vmID string, report json.RawM
 
 // PolicyFor implements attest.PolicyProvider: the policy of the image the
 // VM was created from, with the VM's Kubernetes version selecting the PCR
-// 13 entry. Errors wrap attest.ErrNoPolicy when the image or its policy is
+// 13 entry and the digests of the layer certificates the IMDS serves it as
+// what PCR 15 must measure. Errors wrap attest.ErrNoPolicy when the image or its policy is
 // missing or invalid, apierr.ErrNotFound for an unknown VM.
 func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, error) {
 	v, err := s.Get(vmID)
@@ -89,6 +93,10 @@ func (s *Service) PolicyFor(_ context.Context, vmID string) (attest.Policy, erro
 		return attest.Policy{}, fmt.Errorf("%w: image %s: %v", attest.ErrNoPolicy, img.Ref(), err)
 	}
 	p.KubernetesVersion = v.KubernetesVersion
+	p.CNIVersion = v.CNIVersion
+	if p.LayerCertificates, err = layercert.Digests(v.LayerCertificates); err != nil {
+		return attest.Policy{}, fmt.Errorf("%w: vm %s: %v", attest.ErrNoPolicy, vmID, err)
+	}
 	return p, nil
 }
 
@@ -130,7 +138,7 @@ func (a recordingAttestor) SubmitQuote(ctx context.Context, vmID string, req imd
 	q := &Quote{Verified: res.Verified, Message: res.Message, At: a.s.clock.Now()}
 	if src, ok := a.inner.(ResultSource); ok {
 		if r, ok := src.Result(vmID, req.Stage); ok {
-			q.AKFingerprint, q.PCRs, q.Learned = r.AKFingerprint, r.PCRs, r.Learned
+			q.AKFingerprint, q.PCRs, q.Learned, q.LayerCertificates = r.AKFingerprint, r.PCRs, r.Learned, r.LayerCertificates
 		}
 	}
 	a.s.recordQuote(vmID, req.Stage, q)

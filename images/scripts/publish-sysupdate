@@ -12,6 +12,9 @@
 #   publish-sysupdate kubernetes <build> kubernetes <version> <keys>
 #     build/sysupdate/kubernetes/
 #       kubernetes_<v>.raw                     -> /usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer
+#   publish-sysupdate cni <build> cni <cni>-<release> <keys>
+#     build/sysupdate/cni/
+#       cni_<cni>-<release>.raw                -> /usr/lib/sysupdate.cni.d/50-cni.transfer
 #
 # The directory accumulates: publishing a version replaces that version's
 # files and keeps every other version (`make kubernetes-all` publishes each
@@ -27,7 +30,7 @@
 # finds partitions carrying exactly those UUIDs.
 set -euo pipefail
 
-component="${1:?component (base|kubernetes)}" build="${2:?build dir}" id="${3:?image id}" version="${4:?version}" keys="${5:?keys dir}"
+component="${1:?component (base|kubernetes|cni)}" build="${2:?build dir}" id="${3:?image id}" version="${4:?version}" keys="${5:?keys dir}"
 name="${id}_${version}"
 out="$build/sysupdate/$component"
 
@@ -59,8 +62,8 @@ base)
         link "$name.root-x86-64-verity-sig.raw" "$name.verity-sig.raw"
         link "$name.efi"                        "$name.efi"
         ;;
-kubernetes)
-        [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing (run make kubernetes)" >&2; exit 1; }
+kubernetes | cni)
+        [[ -s "$build/$name.raw" ]] || { echo "publish-sysupdate: $build/$name.raw missing (run make $component)" >&2; exit 1; }
         rm -f "$out/$name.raw"
         link "$name.raw" "$name.raw"
         ;;

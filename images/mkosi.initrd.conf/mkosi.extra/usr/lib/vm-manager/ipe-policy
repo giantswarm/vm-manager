@@ -1,0 +1,32 @@
+#!/bin/sh
+# Installs the initrd's IPE policy for the real root (vm-ipe-policy.service,
+# initrd only): /usr/lib/vm-manager/ipe/<name>.p7b becomes the only file in
+# /run/ipe/, which the switch root moves to the real root, where PID 1 loads
+# and activates it before it starts anything. The policy names the root hash
+# of the image this initrd was built with (images/ipe/giantswarm-vm.policy).
+#
+# PID 1 reads /etc/ipe before /run/ipe, and a file there of the same name
+# (another policy, a symlink to /dev/null) would mask this one: whatever the
+# persistent /etc overlay shows in /sysroot/etc/ipe at this point (Ignition
+# wrote it, or an earlier boot did and persistent-etc missed it) is dropped.
+# The image's root carries no /etc/ipe of its own.
+set -eu
+
+src=/usr/lib/vm-manager/ipe
+dst=/run/ipe
+
+set -- "$src"/*.p7b
+[ -f "$1" ] || { echo "ipe-policy: no policy in $src, refusing to boot the real root without one" >&2; exit 1; }
+
+rm -rf "${dst:?}"
+mkdir -m 0755 "$dst"
+for policy; do
+        cp "$policy" "$dst/"
+        chmod 0644 "$dst/${policy##*/}"
+        echo "ipe-policy: $dst/${policy##*/} for the real root"
+done
+
+if [ -e /sysroot/etc/ipe ] || [ -L /sysroot/etc/ipe ]; then
+        echo "ipe-policy: dropping /etc/ipe, the policy is the initrd's" >&2
+        rm -rf /sysroot/etc/ipe
+fi
