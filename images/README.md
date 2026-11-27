@@ -30,7 +30,7 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp`. It is the IPE policy's version too |
 | `ipe/giantswarm-vm.policy` | the IPE policy, generated for the root's verity root hash and signed between the two mkosi runs of `make base`/`images` into `build/ipe/tree/usr/lib/vm-manager/ipe/giantswarm-vm.p7b` for the initrd (see [IPE](#ipe)) |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy for a root hash, with the verity key), `fetch-cni-plugins` (one CNI release's plugins, sha256-checked against its `cni/<name>` entry, staged into `build/cni/tree/`), `build-e2e-sysext` (the e2e tests' signed firmware sysext into `build/e2e/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy for a root hash, with the verity key), `fetch-containerd` (the pinned containerd release of the Giant Swarm line, digest-checked, into `build/containerd/tree/`), `fetch-cni-plugins` (one CNI release's plugins, sha256-checked against its `cni/<name>` entry, staged into `build/cni/tree/`), `build-e2e-sysext` (the e2e tests' signed firmware sysext into `build/e2e/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
 | `cni/` | one entry per CNI (`flannel`): the pinned release, asset and sha256 the cni sysext is built from, see [CNI sysext](#cni-sysext) |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
@@ -411,13 +411,17 @@ read-only base root at boot. It is built as `Overlay=yes` on top of `build/base`
 only the delta is packed, and signed with the same `keys/verity.crt` the base image
 trusts in `/usr/lib/verity.d/` (mkosi installs it there).
 
-Content (Arch packages `kubeadm kubelet kubectl containerd runc crictl cni-plugins
-conntrack-tools socat ethtool iptables`): `/usr/bin/{kubeadm,kubelet,kubectl,containerd,
-containerd-shim-runc-v2,ctr,runc,crictl,conntrack,socat,ethtool,iptables,...}`, the
-reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
+Content (Arch packages `kubeadm kubelet kubectl runc crictl cni-plugins
+conntrack-tools socat ethtool iptables`, and [containerd](#containerd) from the Giant
+Swarm line): `/usr/bin/{kubeadm,kubelet,kubectl,containerd,containerd-shim-runc-v2,ctr,
+runc,crictl,conntrack,socat,ethtool,iptables,...}`, the reference CNI plugins in
+`/usr/lib/cni`, and from `mkosi.extra/`:
 
 - `containerd.service.d/10-vm-manager.conf`: `--config /usr/lib/vm-manager/containerd.toml`
-  (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/usr/lib/cni']`,
+  (a sysext cannot ship `/etc`), and `systemd-modules-load` of the extension's
+  `modules-load.d/containerd.conf` (`erofs`, `dm_verity`, `loop`) before containerd starts.
+  `containerd.toml`: the [EROFS snapshotter with signed dm-verity layers](#containerd),
+  `SystemdCgroup=true`, CNI `bin_dirs=['/usr/lib/cni']`,
   `conf_dir=/etc/cni/net.d`. `bin_dirs` lists only directories inside sysexts:
   `/usr/lib/cni` holds the reference plugins of this extension and the plugins of the
   VM's [CNI sysext](#cni-sysext), merged into one directory. `/opt/cni/bin` is not
@@ -469,10 +473,59 @@ ones; "volatile" keeps it out of the incremental cache manifest, so the cached b
 survives a version switch), and the subimage pins `kubeadm=%v kubelet=%v kubectl=%v`: a
 release the directory lacks fails the build instead of silently installing what the
 repositories offer, and `mkosi.postinst` still refuses an installed kubeadm that is not
-`<kv>`. `containerd`, `runc`, `crictl` and `cni-plugins` come from the current repositories
+`<kv>`. `runc`, `crictl` and `cni-plugins` come from the current repositories
 (the same set for every release: both sysexts of this repository state carry
-containerd 2.3.5, runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1; `verify-sysext kubernetes` prints
-what a sysext holds).
+runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1), containerd is the release `CONTAINERD_IMAGE`
+pins (below); `verify-sysext kubernetes` prints what a sysext holds.
+
+### containerd
+
+containerd is not Arch's package but the Giant Swarm line of containerd
+([giantswarm/containerd](https://github.com/giantswarm/containerd), its `FORK.md`):
+upstream's release plus the EROFS snapshotter's signed dm-verity layers. A release is an
+OCI artifact (`application/vnd.giantswarm.containerd.binaries.v1`) whose one layer holds
+the static `bin/containerd`, `bin/containerd-shim-runc-v2` and `bin/ctr`.
+`CONTAINERD_IMAGE` in the Makefile pins it by tag and digest, and Renovate bumps both
+together (`renovate-custom.json5`). `make containerd` (`scripts/fetch-containerd`, part
+of `images` and `kubernetes`) downloads the manifest and the layer, refuses either unless
+it hashes to its pinned digest and the manifest names the tag as its version, and stages
+the binaries into `/usr/bin` and upstream's `containerd.service` of the release's commit
+(`org.opencontainers.image.revision`) into `build/containerd/tree/`, an extra tree of the
+sysext. `mkosi.postinst` refuses a build whose `containerd --version` is not the pinned
+version, or that installed Arch's `containerd`.
+
+Image layers run only from signed dm-verity devices (`containerd.toml`):
+
+- The CRI unpacks into the `erofs` snapshotter, and so does the transfer service, the
+  CRI's default pull path (`unpack_config`: `linux/amd64`, snapshotter and differ
+  `erofs`, replacing the default list whose `overlayfs` entry would unpack without
+  dm-verity). The diff service, the CRI's `use_local_image_pull` path, tries the `erofs`
+  differ first.
+- The differ runs in tar-index mode with dm-verity (`enable_tar_index`, `enable_dmverity`)
+  and `enable_dmverity_referrers`; the snapshotter has `dmverity_mode = "on"` and
+  `enable_dmverity_referrers`. A pull then fetches the image's
+  `application/vnd.containerd.erofs.dmverity.v1` referrer with the pull's own resolver
+  and credentials: per layer the EROFS tar index, the dm-verity hash tree and the PKCS#7
+  signature of its root hash, made by the publisher with `vm-manager layers sign`
+  ([docs/layer-signing.md](../docs/layer-signing.md)). The node runs no `mkfs.erofs`: the
+  layer's device is the published index followed by the layer's uncompressed tar, checked
+  once against the published tree and the signed root hash.
+- A pull fails for an image without signed layers, naming the layer:
+  `layer <digest> has no signed dm-verity root hash: image manifest <digest> has no
+  application/vnd.containerd.erofs.dmverity.v1 referrer`; a referrer missing a blob fails
+  with `incomplete dm-verity artifacts for layer <digest>: missing signature` (or the
+  index or tree), and data that does not match with `layer <digest>: dm-verity root hash
+  mismatch: data has <hex>, signed <hex>`. Native EROFS layers are refused.
+- When a layer is mounted, containerd hands the signature to dm-verity, so the kernel
+  checks it against its keys, and the [IPE](#ipe) policy executes from such devices.
+
+The default sandbox image (`registry.k8s.io/pause:3.10.2`) is unsigned, so a pod needs a
+signed copy of it (the CRI's `sandbox` image setting). Registry hosts (mirrors, a
+plain-HTTP registry) are configured through `hosts.toml` files under
+`/etc/containerd/certs.d/<host>/`, the `config_path` of the CRI and the transfer service.
+`e2e/kubernetes_sysext_test.go` checks the version, the plugins, the effective
+configuration and the refusal of an unsigned image; a signed pull needs a registry
+serving the referrers.
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
@@ -695,12 +748,13 @@ back as a new QEMU process.
 
 What the policy means for workloads and what it does not cover:
 
-- **Containers do not run.** A container's executables are image layers containerd unpacks
-  on the var partition, which the policy does not trust: no pod starts, kubeadm's static
-  pods and flannel included, and neither does a CAPI bootstrap's `/etc/kubeadm.sh`.
-  containerd and kubelet themselves run (they come from the sysext). Kubernetes nodes need
-  container images delivered as signed dm-verity layers before they can run pods again;
-  `e2e/kubernetes_cluster_test.go` skips an image with IPE until then.
+- **Containers run from signed layers only.** containerd mounts every image layer from a
+  dm-verity device opened with the publisher's signature ([containerd](#containerd)), and
+  refuses at pull an image without one: kubeadm's static pods, the sandbox image and the
+  CNI's images need signed copies, and a CAPI bootstrap's `/etc/kubeadm.sh` on the var
+  partition does not run. containerd and kubelet themselves run (they come from the
+  sysext). `e2e/kubernetes_cluster_test.go` skips an image with IPE until it brings a
+  registry with signed images.
 - **Interpreters.** IPE checks what the kernel executes and maps. `bash /var/tmp/x.sh` runs
   the image's bash, which then reads the script as data; only an interpreter that asks with
   `execveat(AT_EXECVE_CHECK)` lets IPE judge the script, and bash does not. Executing the
@@ -785,7 +839,8 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    `ARCHITECTURE`), `SYSEXT_SCOPE` includes `system`, `EXTENSION_RELOAD_MANAGER=1`.
 6. Binaries present; `kubeadm version`/`kubelet --version` (run from the extracted
    tree) report `<kv>`.
-7. Units, drop-ins, `containerd.toml` (parsed: `SystemdCgroup`, `bin_dirs`), preset,
+7. Units, drop-ins, `containerd.toml` (parsed: `SystemdCgroup`, `bin_dirs`, the EROFS
+   snapshotter and differ with signed dm-verity layers), preset,
    sysctl/tmpfiles files, and the base's modules-load/sysctl ordering drop-ins.
 8. Real merge: in an unprivileged user namespace (`unshare -Urm`, private mount
    namespace, `/run` on tmpfs for systemd's lock directory) the base tree is bind-mounted

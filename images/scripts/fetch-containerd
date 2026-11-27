@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Download and verify the containerd release of the kubernetes sysext and stage
+# it as a tree the sysext is built from (ExtraTrees= of
+# mkosi.images/kubernetes/mkosi.conf):
+#
+#   fetch-containerd <registry>/<repository>:<tag>@sha256:<digest> <cache> <tree>
+#     <cache>/manifest.json                       the pinned manifest, kept while it verifies
+#     <cache>/<layer digest>.tar.gz               its binaries, kept while they verify
+#     <tree>/usr/bin/{containerd,containerd-shim-runc-v2,ctr}
+#     <tree>/usr/lib/systemd/system/containerd.service
+#
+# The release is the Giant Swarm line of containerd
+# (https://github.com/giantswarm/containerd, FORK.md): an OCI artifact of
+# type application/vnd.giantswarm.containerd.binaries.v1 whose one layer is a
+# tar.gz of the static binaries. The reference pins it by tag and digest
+# (CONTAINERD_IMAGE in the Makefile): the manifest must hash to the digest and
+# name the tag as its version, the layer must hash to the digest the manifest
+# lists. The unit is upstream's containerd.service of the commit the manifest
+# names (org.opencontainers.image.revision); the sysext's drop-in points it at
+# the extension's configuration. The tree is recreated on every run.
+set -euo pipefail
+
+ref="${1:?<registry>/<repository>:<tag>@sha256:<digest>}" cache="${2:?cache dir}" tree="${3:?tree dir}"
+artifact_type=application/vnd.giantswarm.containerd.binaries.v1
+binaries=(containerd containerd-shim-runc-v2 ctr)
+fail() { echo "fetch-containerd: $*" >&2; exit 1; }
+log() { echo "fetch-containerd: $*"; }
+
+[[ "$ref" =~ ^([^/]+)/([^:@]+):([^@]+)@(sha256:[0-9a-f]{64})$ ]] || fail "$ref is not <registry>/<repository>:<tag>@sha256:<digest>"
+registry="${BASH_REMATCH[1]}" repository="${BASH_REMATCH[2]}" tag="${BASH_REMATCH[3]}" digest="${BASH_REMATCH[4]}"
+
+# verified <file> <sha256:hex>: the file is there and hashes to the digest.
+verified() { [[ -s "$1" ]] && echo "${2#sha256:}  $1" | sha256sum --quiet -c 2>/dev/null; }
+
+# Anonymous pull: the registry's bearer challenge names the token endpoint.
+token=""
+auth() {
+        local challenge realm service
+        challenge="$(curl -fsS -o /dev/null -D - "https://$registry/v2/" 2>/dev/null | tr -d '\r' | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate: *Bearer *//p')" || true
+        [[ -n "$challenge" ]] || return 0
+        realm="$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$challenge")"
+        service="$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$challenge")"
+        token="$(curl -fsSL --retry 3 -G "$realm" --data-urlencode "service=$service" \
+                --data-urlencode "scope=repository:$repository:pull" | jq -r '.token // .access_token')" \
+                || fail "no pull token for $repository from $realm"
+}
+
+# get <path> <out> [accept]: one registry API download.
+get() {
+        local hdr=()
+        [[ -n "$token" ]] && hdr+=(-H "Authorization: Bearer $token")
+        [[ -n "${3:-}" ]] && hdr+=(-H "Accept: $3")
+        curl -fsSL --retry 3 "${hdr[@]}" -o "$2" "https://$registry/v2/$repository/$1"
+}
+
+mkdir -p "$cache"
+manifest="$cache/manifest.json"
+if verified "$manifest" "$digest"; then
+        log "manifest $digest present and verified"
+else
+        auth
+        get "manifests/$digest" "$manifest.part" application/vnd.oci.image.manifest.v1+json || fail "cannot download the manifest of $ref"
+        verified "$manifest.part" "$digest" || { rm -f "$manifest.part"; fail "the manifest of $ref does not hash to $digest"; }
+        mv "$manifest.part" "$manifest"
+fi
+[[ "$(jq -r .artifactType "$manifest")" == "$artifact_type" ]] || fail "$ref is not a $artifact_type artifact"
+version="$(jq -r '.annotations["org.opencontainers.image.version"] // empty' "$manifest")"
+[[ "$version" == "$tag" ]] || fail "$ref: the manifest at $digest is version '$version', not $tag; a bump needs the tag's digest"
+revision="$(jq -r '.annotations["org.opencontainers.image.revision"] // empty' "$manifest")"
+[[ "$revision" =~ ^[0-9a-f]{40}$ ]] || fail "$ref: the manifest names no source revision"
+source="$(jq -r '.annotations["org.opencontainers.image.source"] // empty' "$manifest")"
+[[ "$source" =~ ^https://github\.com/([^/]+/[^/]+)$ ]] || fail "$ref: the manifest names no GitHub source"
+source="${BASH_REMATCH[1]}"
+[[ "$(jq '.layers | length' "$manifest")" == 1 ]] || fail "$ref: expected one layer"
+layer="$(jq -r '.layers[0].digest' "$manifest")"
+[[ "$layer" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "$ref: layer digest '$layer'"
+
+asset="$cache/${layer#sha256:}.tar.gz"
+if verified "$asset" "$layer"; then
+        log "layer $layer present and verified"
+else
+        rm -f "$cache"/*.tar.gz
+        [[ -n "$token" ]] || auth
+        get "blobs/$layer" "$asset.part" || fail "cannot download layer $layer of $ref"
+        verified "$asset.part" "$layer" || { rm -f "$asset.part"; fail "layer $layer of $ref does not hash to its digest"; }
+        mv "$asset.part" "$asset"
+        log "downloaded layer $layer ($(du -h "$asset" | cut -f1))"
+fi
+
+rm -rf "$tree"
+install -d "$tree/usr/bin" "$tree/usr/lib/systemd/system"
+unpacked="$cache/unpacked"
+rm -rf "$unpacked" && mkdir -p "$unpacked"
+tar -xzf "$asset" -C "$unpacked"
+for b in "${binaries[@]}"; do
+        [[ -f "$unpacked/bin/$b" ]] || fail "layer $layer has no bin/$b"
+        file -b "$unpacked/bin/$b" | /usr/bin/grep -q '^ELF 64-bit LSB .*x86-64.*statically linked' \
+                || fail "bin/$b is not a static x86-64 ELF executable: $(file -b "$unpacked/bin/$b")"
+        install -m0755 "$unpacked/bin/$b" "$tree/usr/bin/$b"
+done
+curl -fsSL --retry 3 -o "$tree/usr/lib/systemd/system/containerd.service" \
+        "https://raw.githubusercontent.com/$source/$revision/containerd.service" \
+        || fail "cannot download containerd.service of $source at $revision"
+/usr/bin/grep -q '^ExecStart=' "$tree/usr/lib/systemd/system/containerd.service" || fail "containerd.service of $source at $revision has no ExecStart="
+log "$tag ($digest, $source@$revision): ${binaries[*]/#//usr/bin/} containerd.service"

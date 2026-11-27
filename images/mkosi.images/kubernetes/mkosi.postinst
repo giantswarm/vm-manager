@@ -14,6 +14,20 @@ if [[ "$installed" != "$IMAGE_VERSION" ]]; then
         exit 1
 fi
 
+# containerd is the pinned release of the Giant Swarm line (the extra tree the
+# Makefile stages, CONTAINERD_VERSION through Environment=), never Arch's
+# package: refuse a build that ships another one.
+: "${CONTAINERD_VERSION:?CONTAINERD_VERSION is unset; run mkosi through make -C images}"
+if compgen -G "$BUILDROOT/var/lib/pacman/local/containerd-[0-9]*" >/dev/null; then
+        echo "kubernetes: Arch's containerd package was installed; containerd comes from CONTAINERD_IMAGE (Makefile)" >&2
+        exit 1
+fi
+containerd="$("$BUILDROOT/usr/bin/containerd" --version)"
+if [[ " $containerd " != *" $CONTAINERD_VERSION "* ]]; then
+        echo "kubernetes: containerd reports '$containerd', not $CONTAINERD_VERSION; run make -C images containerd" >&2
+        exit 1
+fi
+
 # cni-plugins installs the reference plugins to both /usr/lib/cni and
 # /opt/cni/bin. containerd.toml searches /usr/lib/cni only, where the CNI
 # sysext adds its plugins; /opt stays with the base system (writable per boot
