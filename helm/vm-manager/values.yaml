@@ -206,6 +206,40 @@ muster:
     auth:
       forwardToken: true
       requiredAudiences: []
+    # -- The connector's tool approval (the MCPServer's `spec.approval`). Every tool
+    # of this release is listed explicitly ("Allow all" preset: a platform management
+    # server), so the connector arrives reviewed. `rule` covers tools without their
+    # own entry, new ones included. Values: Allow | Ask | Block (Block hides and
+    # refuses). Override per tool in installation values; `null` renders none (`{}`
+    # does not: Helm merges it into the default) and the connector runs every tool,
+    # shown as not reviewed. On a governed platform muster asks an agent caller before
+    # every tool not on its safe list, whatever these settings say; on a trusted
+    # platform these settings apply.
+    # Needs a muster whose MCPServer CRD carries `spec.approval`. Details:
+    # https://github.com/giantswarm/agent-platform/blob/main/docs/tool-approval.md
+    approval:
+      rule: Allow  # @schema enum: [Allow, Ask, Block]
+      tools:  # @schema skipProperties: true; maxProperties: 512; additionalProperties: {type: string, enum: [Allow, Ask, Block]}
+        get_info: Allow
+        get_host: Allow
+        list_images: Allow
+        get_image: Allow
+        list_networks: Allow
+        get_network: Allow
+        list_vms: Allow
+        get_vm: Allow
+        get_vm_console: Allow
+        get_vm_metrics: Allow
+        get_vm_attestation: Allow
+        create_network: Allow
+        delete_network: Allow
+        create_vm: Allow
+        start_vm: Allow
+        stop_vm: Allow
+        reboot_vm: Allow
+        delete_vm: Allow
+        exec_vm: Allow
+        forward_port: Allow
 
 networkPolicy:
   # -- Create a Kubernetes NetworkPolicy for the pod.
