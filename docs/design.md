@@ -351,8 +351,10 @@ for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
 image policy's golden values recorded by `vm-manager image golden` (PCR 1 and 5 are quoted
 and recorded, not compared: see the open point below), and at `ready` PCR 13 equals the
 policy's `pcr13` entry for the VM's Kubernetes version (written by
-`images/scripts/verify-kubernetes`; golden 13 when the VM has none). At `ready` the
-verifier also replays the PCR 15 records of `userspace_log` (systemd's
+`images/scripts/verify-kubernetes`; golden 13 when the VM has none). The `ready` quote
+of a VM served layer certificates must cover PCR 15; without any it may leave PCR 15 out
+(an image whose vm-agent predates it), and the verdict says PCR 15 was not quoted. A quoted
+PCR 15 is always verified: the verifier replays the PCR 15 records of `userspace_log` (systemd's
 `/run/log/systemd/tpm2-measure.log`) to the quoted PCR 15. Every PCR 15 record is bound to
 its content before it is replayed: a systemd string record whose sha256 digest is the
 sha256 of its word, the word a `machine-id:`, `file-system:` or `layer-certificate:`

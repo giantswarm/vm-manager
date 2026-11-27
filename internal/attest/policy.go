@@ -103,8 +103,9 @@ type Policy struct {
 	KubernetesVersion string `json:"-"`
 	// LayerCertificates are the sha256 digests (layercert.Digests) of the
 	// installation layer certificates the IMDS serves the VM, in order; the
-	// ready quote's PCR 15 must measure exactly these. The PolicyProvider
-	// sets it; policy.json does not carry it.
+	// ready quote must cover PCR 15 when there are any, and a quoted PCR 15
+	// must measure exactly these. The PolicyProvider sets it; policy.json
+	// does not carry it.
 	LayerCertificates []string `json:"-"`
 }
 
@@ -239,12 +240,25 @@ func PhaseFor(stage imds.Stage) string {
 	return PhaseInitrd
 }
 
-// RequiredPCRs are the indexes a stage's quote must cover: 0-7 and 11, plus
-// 13 and 15 at the ready stage.
+// RequiredPCRs are the indexes every quote of a stage must cover: 0-7 and
+// 11, plus 13 at the ready stage. The ready quote of a VM served layer
+// certificates must also cover PCR 15 (Policy.RequiredPCRs).
 func RequiredPCRs(stage imds.Stage) []int {
 	pcrs := append(append([]int(nil), firmwarePCRs...), PCRUKI)
 	if stage == imds.StageReady {
-		pcrs = append(pcrs, PCRSysext, PCRSystemIdentity)
+		pcrs = append(pcrs, PCRSysext)
+	}
+	return pcrs
+}
+
+// RequiredPCRs are the indexes the VM's quote of a stage must cover:
+// RequiredPCRs, plus PCR 15 at the ready stage when the VM is served layer
+// certificates. Without certificates there is nothing PCR 15 must prove, so
+// the ready quote of an image whose agent does not quote it still verifies.
+func (p Policy) RequiredPCRs(stage imds.Stage) []int {
+	pcrs := RequiredPCRs(stage)
+	if stage == imds.StageReady && len(p.LayerCertificates) > 0 {
+		pcrs = append(pcrs, PCRSystemIdentity)
 	}
 	return pcrs
 }

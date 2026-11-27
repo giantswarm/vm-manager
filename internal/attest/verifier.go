@@ -15,7 +15,8 @@
 //     signing key (tpmquote.Parse);
 //  4. the signature verifies with ak_pub, the qualifying data is the nonce,
 //     the sha256 bank sent reproduces the quoted PCR digest and covers the
-//     PCRs the stage needs (0-7, 11; plus 13 and 15 at ready);
+//     PCRs the stage needs (0-7, 11; plus 13 at ready, and 15 at ready when
+//     the VM is served layer certificates, Policy.RequiredPCRs);
 //  5. the AK equals the one pinned for this VM (trust on first use: the
 //     first verified initrd quote enrolls it; a ready quote without an
 //     enrolled AK is rejected);
@@ -30,7 +31,10 @@
 //     firmware build the values were recorded under next to the one this
 //     server boots (Policy.GoldenFirmware, Options.Firmware), which tells a
 //     firmware change apart from a boot that differs on the same firmware;
-//  8. at the ready stage, the PCR 15 records of the userspace log
+//  8. at the ready stage, when the quote covers PCR 15 (required once the VM
+//     is served layer certificates; an image whose agent does not quote it
+//     verifies without it only when none are served, recorded in the
+//     message), the PCR 15 records of the userspace log
 //     (QuoteRequest.UserspaceLog) replay to the quoted PCR 15, every one of
 //     them bound to its content (a systemd string record whose sha256 digest
 //     is the sha256 of its word, the word a machine-id:, file-system: or
@@ -50,6 +54,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -198,8 +203,12 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 		return reject("pcr digest: %v", err)
 	}
 	res.PCRs = hexPCRs(values)
-	if missing := missingPCRs(q.PCRs, RequiredPCRs(req.Stage)); len(missing) > 0 {
-		return reject("quote covers pcrs %s but stage %s also needs %s", indexList(q.PCRs), req.Stage, indexList(missing))
+	if missing := missingPCRs(q.PCRs, policy.RequiredPCRs(req.Stage)); len(missing) > 0 {
+		reason := ""
+		if slices.Contains(missing, PCRSystemIdentity) {
+			reason = fmt.Sprintf(" (pcr 15: the vm is served %d layer certificates)", len(policy.LayerCertificates))
+		}
+		return reject("quote covers pcrs %s but stage %s also needs %s%s", indexList(q.PCRs), req.Stage, indexList(missing), reason)
 	}
 
 	if pinned, ok := v.pinned(vmID); ok && pinned != q.AKFingerprint {
@@ -247,7 +256,8 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	if len(unknown) > 0 {
 		return reject("no golden value for pcr %s in the image policy: record one with `vm-manager image golden` or run with --attestation-learn-golden", strings.Join(unknown, ","))
 	}
-	if req.Stage == imds.StageReady {
+	_, quoted15 := values[PCRSystemIdentity]
+	if req.Stage == imds.StageReady && quoted15 {
 		measured, err := measuredLayerCertificates(req.UserspaceLog, values[PCRSystemIdentity])
 		if err != nil {
 			return reject("pcr 15: %v", err)
@@ -263,7 +273,10 @@ func (v *Verifier) SubmitQuote(ctx context.Context, vmID string, req imds.QuoteR
 	if sysext != "" {
 		res.Message += ", pcr 13 kubernetes " + sysext
 	}
-	if n := len(res.LayerCertificates); n > 0 {
+	switch n := len(res.LayerCertificates); {
+	case req.Stage == imds.StageReady && !quoted15:
+		res.Message += ", pcr 15 not quoted (no layer certificates served)"
+	case n > 0:
 		res.Message += fmt.Sprintf(", pcr 15 %d layer certificates", n)
 	}
 	if len(learned) > 0 {

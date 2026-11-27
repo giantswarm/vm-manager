@@ -229,7 +229,7 @@ PCR digest matches the PCR values sent, and then the values:
 | 11 | `policy.json` `pcr11[<phase path>]` | the exact UKI (kernel, initrd, command line) and its boot phase |
 | 0, 2, 3, 4, 6, 7 | `policy.json` `golden.sha256` | firmware code, option ROMs, boot loader and UKI, Secure Boot policy |
 | 13 (ready stage) | `policy.json` `pcr13[<kubernetes version>]`, golden 13 for a VM without one | the exact Kubernetes sysext, or none |
-| 15 (ready stage) | replay of `userspace_log`, every record bound to its word (sha256 of a `machine-id:`, `file-system:` or `layer-certificate:` word, anything else rejected); its `layer-certificate:<sha256>` words against the VM's `layer_certificates`, in order | the installation layer certificates the initrd enrolled, exactly those served |
+| 15 (ready stage; required when the VM has `layer_certificates`) | replay of `userspace_log`, every record bound to its word (sha256 of a `machine-id:`, `file-system:` or `layer-certificate:` word, anything else rejected); its `layer-certificate:<sha256>` words against the VM's `layer_certificates`, in order | the installation layer certificates the initrd enrolled, exactly those served |
 | 1, 5 | recorded, not compared | SMBIOS tables with per-VM credentials, the boot entry, the GPT with per-install UUIDs |
 
 The attestation key is pinned per VM on the first verified initrd quote (trust on first

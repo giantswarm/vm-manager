@@ -104,11 +104,16 @@ func (e *env) toReady() {
 }
 
 // request builds what the agent posts: a fresh nonce, a quote over the
-// stage's PCRs with ak and the PCR values read from the TPM.
+// stage's PCRs (by default those the agent quotes, quote.Selection) with ak
+// and the PCR values read from the TPM.
 func (e *env) request(ak *quotetest.AK, stage imds.Stage, pcrs ...int) imds.QuoteRequest {
 	e.t.Helper()
 	if len(pcrs) == 0 {
-		pcrs = attest.RequiredPCRs(stage)
+		sel, err := quote.Selection(stage)
+		require.NoError(e.t, err)
+		for _, i := range sel {
+			pcrs = append(pcrs, int(i)) // #nosec G115 -- PCR indexes are small.
+		}
 	}
 	nonce, err := e.v.Nonce(e.ctx, vmID)
 	require.NoError(e.t, err)
@@ -617,13 +622,60 @@ func TestVerifierComparesLayerCertificates(t *testing.T) {
 	}
 }
 
-func TestVerifierRequiresPCR15AtReady(t *testing.T) {
+// TestVerifierPCR15OnlyRequiredWithCertificates covers the ready quote of an
+// image whose agent does not quote PCR 15 next to one that does.
+func TestVerifierPCR15OnlyRequiredWithCertificates(t *testing.T) {
+	withoutPCR15 := append([]int(nil), attest.RequiredPCRs(imds.StageReady)...)
+	require.NotContains(t, withoutPCR15, attest.PCRSystemIdentity)
+	served := []string{strings.Repeat("a", 64)}
+
+	for _, tc := range []struct {
+		name   string
+		served []string
+		pcrs   []int // nil quotes what the agent quotes, PCR 15 included
+		want   string
+		// verified is the message of an accepted quote.
+		verified string
+	}{
+		{name: "served, quoted", served: served, want: "missing " + served[0]},
+		{name: "served, not quoted", served: served, pcrs: withoutPCR15, want: "stage ready also needs 15 (pcr 15: the vm is served 1 layer certificates)"},
+		{name: "none served, quoted", verified: "verified: ak"},
+		{name: "none served, not quoted", pcrs: withoutPCR15, verified: "pcr 15 not quoted (no layer certificates served)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, false)
+			e.policy.LayerCertificates = tc.served
+			require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
+			e.toReady()
+
+			res := e.submit(e.request(e.ak, imds.StageReady, tc.pcrs...))
+			r, ok := e.v.Result(vmID, imds.StageReady)
+			require.True(t, ok)
+			assert.Empty(t, r.LayerCertificates)
+			if tc.want != "" {
+				assert.False(t, res.Verified)
+				assert.Contains(t, res.Message, tc.want)
+				return
+			}
+			assert.True(t, res.Verified, res.Message)
+			assert.Contains(t, res.Message, tc.verified)
+			_, has15 := r.PCRs[attest.PCRSystemIdentity]
+			assert.Equal(t, tc.pcrs == nil, has15, "the record shows whether pcr 15 was quoted")
+			if tc.pcrs == nil {
+				assert.NotContains(t, res.Message, "pcr 15 not quoted")
+			}
+		})
+	}
+
+	// A quoted PCR 15 without certificates served is still verified: a
+	// layer certificate word in it is one not served.
 	e := newEnv(t, false)
 	require.True(t, e.submit(e.request(e.ak, imds.StageInitrd)).Verified)
 	e.toReady()
-	res := e.submit(e.request(e.ak, imds.StageReady, 0, 1, 2, 3, 4, 5, 6, 7, 11, 13))
+	e.measure(layercert.Word(served[0]))
+	res := e.submit(e.request(e.ak, imds.StageReady))
 	assert.False(t, res.Verified)
-	assert.Contains(t, res.Message, "also needs 15")
+	assert.Contains(t, res.Message, "not served "+served[0])
 }
 
 func nilIfEmpty(s []string) []string {

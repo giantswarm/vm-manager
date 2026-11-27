@@ -131,7 +131,11 @@ func TestPolicyHelpers(t *testing.T) {
 	assert.Equal(t, PhaseInitrd, PhaseFor(imds.StageInitrd))
 	assert.Equal(t, PhaseReady, PhaseFor(imds.StageReady))
 	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11}, RequiredPCRs(imds.StageInitrd))
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, RequiredPCRs(imds.StageReady))
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13}, RequiredPCRs(imds.StageReady))
+	assert.Equal(t, RequiredPCRs(imds.StageReady), Policy{}.RequiredPCRs(imds.StageReady), "no layer certificates, no pcr 15")
+	certs := Policy{LayerCertificates: []string{hexA}}
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 15}, certs.RequiredPCRs(imds.StageReady))
+	assert.Equal(t, RequiredPCRs(imds.StageInitrd), certs.RequiredPCRs(imds.StageInitrd), "pcr 15 is a ready-stage measurement")
 	assert.Equal(t, []int{0, 2, 3, 4, 6, 7, 13}, GoldenIndexes, "pcr 1 (smbios, boot entry) and 5 (gpt) differ per vm and are not golden")
 
 	pcrs := map[int]string{}
