@@ -49,11 +49,11 @@ const (
 	// KubernetesComponent is the sysupdate component carrying the Kubernetes sysext.
 	KubernetesComponent = "kubernetes"
 	// CNIComponent is the sysupdate component carrying the CNI sysexts, one
-	// per CNI release, versioned "<cni>-<release>" ("flannel-1.9.1-flannel3").
+	// per CNI release, versioned "<cni>-<release>" ("cilium-1.20.5").
 	CNIComponent = "cni"
 	// DefaultCNI is the CNI whose newest release a VM gets when it names
 	// none; an image without it offers its first CNI version instead.
-	DefaultCNI = "flannel"
+	DefaultCNI = "cilium"
 	sumsFile   = "SHA256SUMS"
 )
 

@@ -178,16 +178,17 @@ assert [(x["platform"], x["snapshotter"], x["differ"]) for x in u] == [("linux/a
 content_cni() {
         local version="$1" name="$2" ext="$3" plugin found=()
         # 6. Plugins: what the entry stages, x86-64 executables in /usr/lib/cni,
-        #    the one directory containerd's bin_dirs lists, and nothing else.
+        #    the one directory containerd's bin_dirs lists; besides them only
+        #    sysctl drop-ins (cni.extra/<name>), nothing else.
         for plugin in "$ext"/usr/lib/cni/*; do
                 file -b "$plugin" | /usr/bin/grep -q '^ELF 64-bit LSB .*x86-64' || fail "${plugin#"$ext"} is not an x86-64 ELF executable"
                 found+=("${plugin##*/}")
         done
         [[ ${#found[@]} -gt 0 ]] || fail "no plugins in /usr/lib/cni"
         local other
-        other="$(cd "$ext/usr" && find . -type f ! -path './lib/cni/*' ! -path './lib/extension-release.d/*' -printf '%P ')"
-        [[ -z "$other" ]] || fail "files outside /usr/lib/cni: $other"
-        ok "plugins in /usr/lib/cni: ${found[*]}"
+        other="$(cd "$ext/usr" && find . -type f ! -path './lib/cni/*' ! -path './lib/extension-release.d/*' ! -path './lib/sysctl.d/*.conf' -printf '%P ')"
+        [[ -z "$other" ]] || fail "files outside /usr/lib/cni and /usr/lib/sysctl.d: $other"
+        ok "plugins in /usr/lib/cni: ${found[*]}; sysctl drop-ins: $(cd "$ext/usr" && find lib/sysctl.d -type f -printf '%f ' 2>/dev/null)"
 
         # 7. The plugins of the entry the version names (cni/<name>).
         local entry release="" plugins_spec="" p
@@ -201,6 +202,14 @@ content_cni() {
                                 [[ -x "$ext/usr/lib/cni/${p##*/}" ]] || fail "cni/${version%%-*} names plugin ${p##*/}, the extension lacks it"
                         done
                         ok "entry cni/${version%%-*} ($release): every plugin present"
+                        local extra f
+                        extra="$(dirname "$0")/../cni.extra/${version%%-*}"
+                        if [[ -d "$extra" ]]; then
+                                while IFS= read -r f; do
+                                        cmp -s "$extra/$f" "$ext/$f" || fail "cni.extra/${version%%-*}/$f is missing from the extension or differs"
+                                done < <(cd "$extra" && find . -type f -printf '%P\n')
+                                ok "cni.extra/${version%%-*}: every file present and identical"
+                        fi
                 else
                         echo "verify-sysext $component: skip: cni/${version%%-*} pins ${release}, $version is an earlier release"
                 fi

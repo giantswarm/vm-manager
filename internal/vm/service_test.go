@@ -159,7 +159,7 @@ func newHarnessWith(t *testing.T, prepare func(imageDir string, img *images.Imag
 		UKI:                filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.efi"),
 		Disk:               filepath.Join(h.imageDir, "giantswarm-vm-base_0.1.0.raw"),
 		KubernetesVersions: []string{"1.32.0", "1.31.2"},
-		CNIVersions:        []string{"flannel-1.10.0-flannel1", "flannel-1.9.1-flannel3", "cilium-1.18.4"},
+		CNIVersions:        []string{"cilium-1.20.5", "cilium-1.19.4", "calico-3.31.0"},
 	}
 	if prepare != nil {
 		prepare(h.imageDir, &img)
@@ -319,7 +319,7 @@ func TestCreateValidation(t *testing.T) {
 		{"unknown network", func(s *vm.Spec) { s.Network = "nope" }, apierr.ErrInvalid},
 		{"unknown image", func(s *vm.Spec) { s.Image = "nope" }, apierr.ErrInvalid},
 		{"unknown kubernetes version", func(s *vm.Spec) { s.KubernetesVersion = "9.9.9" }, apierr.ErrInvalid},
-		{"unknown cni version", func(s *vm.Spec) { s.CNIVersion = "flannel-0.0.1" }, apierr.ErrInvalid},
+		{"unknown cni version", func(s *vm.Spec) { s.CNIVersion = "cilium-0.0.1" }, apierr.ErrInvalid},
 		{"bad waitFor", func(s *vm.Spec) { s.WaitFor = "soon" }, apierr.ErrInvalid},
 		{"bad metadata key", func(s *vm.Spec) { s.Metadata = map[string]string{"a/b": "c"} }, apierr.ErrInvalid},
 		{"multiline ssh key", func(s *vm.Spec) { s.SSHAuthorizedKeys = []string{"a\nb"} }, apierr.ErrInvalid},
@@ -341,12 +341,12 @@ func TestCreateValidation(t *testing.T) {
 	require.ErrorIs(t, err, apierr.ErrConflict, "duplicate name")
 	assert.Equal(t, testImageRef, v.Image, "image reference is pinned")
 	assert.Equal(t, "1.32.0", v.KubernetesVersion, "highest kubernetes version is the default")
-	assert.Equal(t, "flannel-1.10.0-flannel1", v.CNIVersion, "newest flannel is the default cni")
+	assert.Equal(t, "cilium-1.20.5", v.CNIVersion, "newest cilium is the default cni")
 	s := h.spec("cilium")
-	s.CNIVersion = "cilium-1.18.4"
+	s.CNIVersion = "calico-3.31.0"
 	c, err := h.svc.Create(h.ctx, s)
 	require.NoError(t, err)
-	assert.Equal(t, "cilium-1.18.4", c.CNIVersion, "a cni the image offers is kept")
+	assert.Equal(t, "calico-3.31.0", c.CNIVersion, "a cni the image offers is kept")
 	assert.Equal(t, "good", v.Hostname)
 	assert.Equal(t, "host1", v.Region)
 	assert.Equal(t, testNetwork, v.Zone)
@@ -857,7 +857,7 @@ func TestAttestationGating(t *testing.T) {
 	assert.Equal(t, "host1", inst.Region)
 	assert.Equal(t, testNetwork, inst.Zone)
 	assert.Equal(t, "1.32.0", inst.KubernetesVersion)
-	assert.Equal(t, "flannel-1.10.0-flannel1", inst.CNIVersion)
+	assert.Equal(t, "cilium-1.20.5", inst.CNIVersion)
 	assert.Equal(t, []string{v.SSHPublicKey, "ssh-ed25519 AAAAuser user@laptop"}, inst.SSHAuthorizedKeys)
 	assert.Equal(t, map[string]string{"role": "control-plane"}, inst.Metadata)
 	assert.JSONEq(t, `{"ignition":{"version":"3.4.0"}}`, string(inst.UserData))

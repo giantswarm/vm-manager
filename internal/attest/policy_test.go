@@ -21,7 +21,7 @@ func TestParsePolicy(t *testing.T) {
 	valid := `{"image_id":"giantswarm-vm-base","image_version":"0.1.0","uki":"x.efi","roothash":"r","partitions":{"esp":"u"},
 		"pcr11":{"enter-initrd":"` + hexA + `","enter-initrd:leave-initrd:sysinit:ready":"` + hexB + `"},
 		"pcr13":{"1.36.4":"` + hexB + `"},"pcr15":"layer-certificates",
-		"sysexts":{"kubernetes":{"1.36.4":"` + hexA + `"},"cni":{"flannel-1.9.1-flannel3":"` + hexB + `"}},
+		"sysexts":{"kubernetes":{"1.36.4":"` + hexA + `"},"cni":{"cilium-1.19.4":"` + hexB + `"}},
 		"golden":{"sha256":{"0":"` + hexA + `","7":"` + hexB + `","13":"` + hexA + `"}}}`
 	tests := []struct {
 		name    string
@@ -41,8 +41,8 @@ func TestParsePolicy(t *testing.T) {
 		{name: "pcr13 value", raw: strings.Replace(valid, `"1.36.4":"`+hexB, `"1.36.4":"zz`, 1), wantErr: `pcr13["1.36.4"]: not hex`},
 		{name: "golden firmware", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"`+hexB+`","package":"ovmf-generic","version":"2025.11-3ubuntu7.2"},"golden":`, 1)},
 		{name: "golden firmware digest", raw: strings.Replace(valid, `"golden":`, `"golden_firmware":{"sha256":"abcd"},"golden":`, 1), wantErr: "golden_firmware.sha256: 2 bytes, want 32"},
-		{name: "sysexts value", raw: strings.Replace(valid, `"flannel-1.9.1-flannel3":"`+hexB, `"flannel-1.9.1-flannel3":"`+hexB[:8], 1), wantErr: `sysexts.cni["flannel-1.9.1-flannel3"]: 4 bytes, want 32`},
-		{name: "sysexts version", raw: strings.Replace(valid, `"flannel-1.9.1-flannel3":`, `"":`, 1), wantErr: "sysexts has an entry without a component or version"},
+		{name: "sysexts value", raw: strings.Replace(valid, `"cilium-1.19.4":"`+hexB, `"cilium-1.19.4":"`+hexB[:8], 1), wantErr: `sysexts.cni["cilium-1.19.4"]: 4 bytes, want 32`},
+		{name: "sysexts version", raw: strings.Replace(valid, `"cilium-1.19.4":`, `"":`, 1), wantErr: "sysexts has an entry without a component or version"},
 		{name: "pcr13 version", raw: strings.Replace(valid, `"1.36.4":`, `"":`, 1), wantErr: "pcr13 has an entry without a kubernetes version"},
 		{name: "pcr15 unknown", raw: strings.Replace(valid, `"pcr15":"layer-certificates"`, `"pcr15":"machine-id"`, 1), wantErr: `pcr15 "machine-id" is not "layer-certificates"`},
 		{name: "image predating pcr15", raw: strings.Replace(valid, `"pcr15":"layer-certificates",`, ``, 1)},
@@ -140,17 +140,17 @@ func TestSysextPCR(t *testing.T) {
 // golden.
 func TestExpectedSysexts(t *testing.T) {
 	sums := map[string]string{
-		"kubernetes_1.36.4.raw":           hexA,
-		"kubernetes_1.35.4.raw":           hexB,
-		"cni_flannel-1.9.1-flannel3.raw":  strings.Repeat("c", 64),
-		"cni_flannel-1.10.0-flannel1.raw": strings.Repeat("d", 64),
-		"cni_cilium-1.18.4.raw":           strings.Repeat("e", 64),
+		"kubernetes_1.36.4.raw": hexA,
+		"kubernetes_1.35.4.raw": hexB,
+		"cni_cilium-1.19.4.raw": strings.Repeat("c", 64),
+		"cni_cilium-1.20.5.raw": strings.Repeat("d", 64),
+		"cni_calico-3.31.0.raw": strings.Repeat("e", 64),
 	}
 	p := Policy{
 		PCR11: map[string]string{PhaseInitrd: hexA, PhaseReady: hexB},
 		Sysexts: map[string]map[string]string{
 			SysextKubernetes: {"1.36.4": hexA, "1.35.4": strings.ToUpper(hexB)},
-			SysextCNI:        {"flannel-1.9.1-flannel3": sums["cni_flannel-1.9.1-flannel3.raw"], "flannel-1.10.0-flannel1": sums["cni_flannel-1.10.0-flannel1.raw"], "cilium-1.18.4": sums["cni_cilium-1.18.4.raw"]},
+			SysextCNI:        {"cilium-1.19.4": sums["cni_cilium-1.19.4.raw"], "cilium-1.20.5": sums["cni_cilium-1.20.5.raw"], "calico-3.31.0": sums["cni_calico-3.31.0.raw"]},
 		},
 		Golden: map[string]map[int]string{Bank: {13: hexB}},
 	}
@@ -163,7 +163,7 @@ func TestExpectedSysexts(t *testing.T) {
 		return hex.EncodeToString(pcr)
 	}
 	for _, k := range []string{"1.36.4", "1.35.4"} {
-		for _, c := range []string{"flannel-1.9.1-flannel3", "flannel-1.10.0-flannel1", "cilium-1.18.4"} {
+		for _, c := range []string{"cilium-1.19.4", "cilium-1.20.5", "calico-3.31.0"} {
 			p.KubernetesVersion, p.CNIVersion = k, c
 			want, label, ok := p.expected(PCRSysext)
 			require.True(t, ok)
@@ -178,7 +178,7 @@ func TestExpectedSysexts(t *testing.T) {
 	assert.Equal(t, tpm("kubernetes_1.36.4.raw"), want, "kubernetes without cni")
 	assert.Equal(t, "kubernetes 1.36.4", label)
 
-	p.CNIVersion = "flannel-0.1.0"
+	p.CNIVersion = "cilium-0.1.0"
 	p.PCR13 = map[string]string{"1.36.4": hexA}
 	want, label, _ = p.expected(PCRSysext)
 	assert.Equal(t, hexB, want, "unpublished cni: golden, never the cni-less pcr13 entry")

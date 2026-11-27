@@ -21,7 +21,7 @@ it works is in the [README](../README.md); local development loops are in
 | systemd (optional) | `systemd` (any recent version) | transient units the VMs survive restarts in (`--launcher systemd`); without it VMs are child processes of `serve` |
 | storage provider (optional) | systemd 261 with `io.systemd.StorageProvider` | when the `fs` provider's socket answers under `/run/systemd/io.systemd.StorageProvider/`, VM disks are provider volumes; otherwise plain files below `<state-dir>/volumes/` |
 | ssh client | `openssh` | `exec_vm` and the e2e tests |
-| image build (optional) | `mkosi` >= 27, `erofs-utils`, `python-pefile`, `gnupg`, `go` 1.26+, `sfdisk` (util-linux) | only on the machine that builds images, see below |
+| image build (optional) | `mkosi` >= 27, `erofs-utils`, `python-pefile`, `gnupg`, `go` 1.26+, `sfdisk` (util-linux), `crane` (the CNI sysext's plugins) | only on the machine that builds images, see below |
 
 Any distribution with these packages works; the paths in the table are what the code
 probes. `vm-manager serve` starts on a host that lacks some of them and reports the gaps
