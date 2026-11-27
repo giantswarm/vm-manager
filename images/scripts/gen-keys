@@ -2,6 +2,9 @@
 # Generate the git-ignored development signing keys for the image build:
 #   verity.key/.crt        signs the dm-verity root hash (Verity=signed)
 #   pcr.key/.crt           signs the expected PCR 11 values in the UKI (.pcrsig)
+#   layer.key/.crt         test Giant Swarm layer certificate: the initrd enrolls
+#                          layer.crt into the .dm-verity keyring (LAYER_CERT of
+#                          the Makefile), layer.key signs test container layers
 #   gnupg/, import-pubring.pgp
 #                          PGP key for SHA256SUMS.gpg of sysupdate transfers; the
 #                          public keyring is baked into the image as
@@ -15,14 +18,19 @@ chmod 0700 "$keys"
 
 x509() {
         local name="$1" cn="$2"
+        shift 2
         [[ -s "$keys/$name.key" && -s "$keys/$name.crt" ]] && return 0
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
-                -subj "/CN=$cn/" \
+                -subj "/CN=$cn/" "$@" \
                 -keyout "$keys/$name.key" -out "$keys/$name.crt" 2>/dev/null
         echo "gen-keys: created $keys/$name.{key,crt}"
 }
 x509 verity "vm-manager dev verity signing key"
 x509 pcr "vm-manager dev PCR signing key"
+# A leaf with keyUsage=digitalSignature, what a layer certificate is (the
+# kernel itself checks neither).
+x509 layer "vm-manager dev layer signing key" \
+        -addext keyUsage=critical,digitalSignature -addext basicConstraints=critical,CA:FALSE
 
 if [[ ! -s "$keys/import-pubring.pgp" ]]; then
         export GNUPGHOME="$keys/gnupg"

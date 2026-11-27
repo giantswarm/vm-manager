@@ -33,7 +33,10 @@ docker run --rm --privileged \
     # stamping of vm-agent) refuses it with "dubious ownership".
     git config --global --add safe.directory /src
     rm -rf images/mkosi.cache
-    make -C images MKOSI="mkosi --workspace-dir=/workspace" all
+    # LAYER_CERT= : a release enrolls no test layer certificate; the Giant
+    # Swarm one is handed to this build by the release pipeline once it has
+    # one (images/README.md, Layer certificates).
+    make -C images MKOSI="mkosi --workspace-dir=/workspace" LAYER_CERT= all
     # Hand the outputs and the spent cache back to the host user.
     chown -R "$(stat -c %u:%g /src/images/Makefile)" /src/images/build /src/images/keys /src/images/mkosi.cache /src/bin 2>/dev/null || true
   '

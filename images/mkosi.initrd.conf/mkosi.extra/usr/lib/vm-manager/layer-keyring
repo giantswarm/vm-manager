@@ -1,0 +1,121 @@
+#!/bin/sh
+# Fills and seals the kernel's .dm-verity keyring (vm-layer-keyring.service,
+# initrd only). dm-verity verifies a root hash signature against the builtin,
+# secondary and platform keyrings first and then against .dm-verity, which it
+# consults only once the keyring is non-empty and sealed. With
+# dm_verity.keyring_unsealed=1 on the UKI's command line the keyring starts
+# out writable, and this is the one writer before it is sealed:
+#
+#  1. The Giant Swarm layer certificate the image was built with
+#     (/usr/lib/vm-manager/layer-certificates/*.crt, part of the initrd and so
+#     of the UKI that PCR 11 measures) is added. A build without one has none.
+#  2. On a vm-manager boot (the conditions of vm-agent-attest.service), the
+#     installation's certificates are read from the IMDS (/layer-certificates,
+#     concatenated PEM in the order create_vm was given them; "Key not
+#     available." is vm-manager's 404 for none). Each is converted to DER,
+#     added to .dm-verity, and measured into PCR 15 as
+#     layer-certificate:<lowercase hex sha256 of the DER>, in that order: the
+#     ready attestation replays those records and the verifier rejects a node
+#     whose certificates differ from the ones served (internal/attest).
+#  3. The keyring is sealed (restricted to reject every further key), also
+#     when it holds nothing.
+#
+# Every failure exits non-zero, and the unit stops the boot (fail closed): a
+# malformed certificate, an IMDS error other than an unset key, a key the
+# kernel refuses, a failed measurement or a failed seal. See
+# images/README.md, Layer certificates.
+set -eu
+
+keyring=%:.dm-verity
+builtin=/usr/lib/vm-manager/layer-certificates
+work=/run/vm-layer-keyring
+
+log() { echo "layer-keyring: $*"; }
+fail() { echo "layer-keyring: $*" >&2; exit 1; }
+
+# split_pem <pem file> writes every CERTIFICATE block of the file to its own
+# $work/<n>.pem, in order, and sets $count. Anything outside a block but blank
+# lines, another block type or an unterminated block fails.
+split_pem() {
+        count=0
+        block=""
+        while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in
+                "-----BEGIN CERTIFICATE-----")
+                        [ -z "$block" ] || fail "$1: certificate $count is not terminated"
+                        count=$((count + 1))
+                        block="$work/$count.pem"
+                        printf '%s\n' "$line" >"$block"
+                        ;;
+                "-----END CERTIFICATE-----")
+                        [ -n "$block" ] || fail "$1: END without BEGIN after certificate $count"
+                        printf '%s\n' "$line" >>"$block"
+                        block=""
+                        ;;
+                "")
+                        [ -z "$block" ] || fail "$1: blank line inside certificate $count"
+                        ;;
+                *)
+                        [ -n "$block" ] || fail "$1: text outside a CERTIFICATE block after certificate $count"
+                        printf '%s\n' "$line" >>"$block"
+                        ;;
+                esac
+        done <"$1"
+        [ -z "$block" ] || fail "$1: certificate $count is not terminated"
+}
+
+# enroll <pem> <name> converts one certificate to DER, adds it to the keyring
+# and sets $digest to the sha256 of the DER.
+enroll() {
+        openssl x509 -in "$1" -outform DER -out "$1.der" || fail "$2: not an X.509 certificate"
+        id="$(keyctl padd asymmetric "" "$keyring" <"$1.der")" || fail "$2: the kernel refused the certificate"
+        sum="$(sha256sum <"$1.der")"
+        digest="${sum%% *}"
+        log "$2: key $id, $(keyctl rdescribe "$id" | cut -d';' -f5-), sha256 $digest"
+}
+
+# The keyring exists once dm-verity is loaded; modprobe passes the module the
+# dm_verity.* options of the kernel command line.
+modprobe dm_verity
+keyctl describe "$keyring" >/dev/null || fail "no .dm-verity keyring; is dm_verity.keyring_unsealed=1 on the command line?"
+
+rm -rf "${work:?}"
+mkdir -m 0700 "$work"
+
+for crt in "$builtin"/*.crt; do
+        [ -f "$crt" ] || continue
+        split_pem "$crt"
+        [ "$count" -eq 1 ] || fail "$crt holds $count certificates, not one"
+        enroll "$work/1.pem" "Giant Swarm ${crt##*/}"
+done
+
+served=0
+if systemd-analyze condition \
+        'ConditionFirmware=smbios-field(sys_vendor = GiantSwarm)' \
+        'ConditionKernelCommandLine=!systemd.imds=no' \
+        'ConditionCredential=!vm.install-target' >/dev/null 2>&1; then
+        if /usr/lib/systemd/systemd-imds /layer-certificates >"$work/served" 2>"$work/imds.err"; then
+                split_pem "$work/served"
+                served=$count
+                [ "$served" -gt 0 ] || fail "the IMDS served /layer-certificates without a certificate"
+        else
+                case "$(cat "$work/imds.err")" in
+                "Key not available.") ;;
+                *) fail "cannot read /layer-certificates from the IMDS: $(cat "$work/imds.err")" ;;
+                esac
+        fi
+        n=1
+        while [ "$n" -le "$served" ]; do
+                enroll "$work/$n.pem" "installation certificate $n"
+                /usr/lib/systemd/systemd-pcrextend --pcr=15 "layer-certificate:$digest" ||
+                        fail "installation certificate $n: cannot extend PCR 15"
+                n=$((n + 1))
+        done
+        log "$served installation certificate(s) from the IMDS enrolled and measured into PCR 15"
+else
+        log "no vm-manager IMDS on this boot: no installation certificates"
+fi
+
+keyctl restrict_keyring "$keyring" || fail "cannot seal the .dm-verity keyring"
+log "sealed .dm-verity: $(keyctl list "$keyring" | head -n1)"
+rm -rf "${work:?}"
