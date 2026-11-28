@@ -4,11 +4,15 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,29 +31,41 @@ spec:
   - name: workload
     image: %[3]s
 `
-	podGiantSwarm   = "giant-swarm"
-	podInstallation = "installation"
-	podUnsigned     = "unsigned-layer"
+	podGiantSwarm        = "giant-swarm"
+	podInstallation      = "installation"
+	podInstallationAgain = "installation-again"
+	podRecompressed      = "recompressed"
+	podUnsigned          = "unsigned-layer"
+)
+
+// The snapshot labels containerd's erofs snapshotter records a signed layer's
+// root hash and signature digest in.
+const (
+	snapshotRootHashLabel        = "containerd.io/snapshot/erofs.dmverity.root-hash"
+	snapshotSignatureDigestLabel = "containerd.io/snapshot/erofs.dmverity.signature-digest"
 )
 
 // assertWorkloads runs the workload images on the worker: the pods of the
-// images signed with the Giant Swarm and the installation key run, the pod of
-// the image with a layer outside its signatures fails at pull with an event
-// naming that layer.
+// images whose layers are all signed run, also where they share a layer
+// signed in another way (each shared layer is one snapshot, unpacked with
+// one of its signatures), and the pod of the image with a layer outside its
+// signatures fails at pull with an event naming that layer.
 func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w workloads) {
 	t.Helper()
+	pods := slices.Sorted(maps.Keys(w.signed))
 	var manifest []string
-	for _, p := range [][2]string{{podGiantSwarm, w.giantSwarm}, {podInstallation, w.installation}, {podUnsigned, w.unsigned}} {
-		manifest = append(manifest, fmt.Sprintf(workloadPod, p[0], workerName, p[1]))
+	for _, pod := range pods {
+		manifest = append(manifest, fmt.Sprintf(workloadPod, pod, workerName, w.signed[pod]))
 	}
+	manifest = append(manifest, fmt.Sprintf(workloadPod, podUnsigned, workerName, w.unsigned))
 	cp.put(ctx, workloadsManifestPath, []byte(strings.Join(manifest, "---\n")))
 	cp.sh(ctx, kubectlInGuest+" apply -f "+workloadsManifestPath)
 
 	started := time.Now()
 	running := map[string]bool{}
 	var refusal string
-	for len(running) < 2 || refusal == "" {
-		for _, pod := range []string{podGiantSwarm, podInstallation} {
+	for len(running) < len(pods) || refusal == "" {
+		for _, pod := range pods {
 			if !running[pod] && cp.sh(ctx, kubectlInGuest+" get pod "+pod+" -o 'jsonpath={.status.phase} {.status.containerStatuses[0].ready}'") == "Running true" {
 				running[pod] = true
 				t.Logf("workload %s Running after %.1fs", pod, time.Since(started).Seconds())
@@ -76,6 +92,7 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 	assert.Contains(t, refusal, "dm-verity", "the pull of %s fails for the layer's missing signature", w.unsigned)
 	assert.Equal(t, "Pending", cp.sh(ctx, kubectlInGuest+" get pod "+podUnsigned+" -o 'jsonpath={.status.phase}'"), "the pod of %s does not start", w.unsigned)
 	t.Logf("workload images on %s:\n%s", workerName, worker.sh(ctx, "crictl images | grep -E 'IMAGE|vm-manager-e2e'"))
+	assertSharedLayers(ctx, t, worker, w.shared)
 
 	// The giant-swarm image's config names its user; containerd resolved it
 	// through the image's /etc/passwd, read from the layers' dm-verity
@@ -85,6 +102,34 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 	assert.Equal(t, workloadUID, uid, "the %s container runs as %s from the image's /etc/passwd", podGiantSwarm, workloadUser)
 	t.Logf("workload %s runs as %s: uid %s", podGiantSwarm, workloadUser, uid)
 	assertLayerDevices(ctx, t, worker)
+}
+
+// assertSharedLayers checks that each layer the running workloads share, with
+// different signatures, is one snapshot on the node, which carries one of
+// those signatures: the pods that brought the others run on it.
+func assertSharedLayers(ctx context.Context, t *testing.T, g *guest, shared []sharedLayer) {
+	t.Helper()
+	for _, sl := range shared {
+		out := g.sh(ctx, "ctr -n k8s.io snapshots --snapshotter erofs info "+sl.chainID)
+		var info struct {
+			Kind   string            `json:"Kind"`
+			Labels map[string]string `json:"Labels"`
+		}
+		if !assert.NoError(t, json.Unmarshal([]byte(out), &info), "snapshot %s of the layer shared with %s: %s", sl.chainID, sl.name, out) {
+			continue
+		}
+		signature := info.Labels[snapshotSignatureDigestLabel]
+		from, ok := sl.signatures[digest.Digest(signature)]
+		assert.True(t, ok, "shared layer, %s: snapshot %s carries signature %q, none of the images' %v", sl.name, sl.chainID, signature, slices.Collect(maps.Keys(sl.signatures)))
+		assert.Equal(t, "Committed", info.Kind, "shared layer, %s: snapshot %s", sl.name, sl.chainID)
+		t.Logf("shared layer, %s: one snapshot %s, root hash %s, signature %s: unpacked from %s",
+			sl.name, sl.chainID, info.Labels[snapshotRootHashLabel], signature, from)
+		for d, other := range sl.signatures {
+			if d.String() != signature {
+				t.Logf("shared layer, %s: running on it for %s", sl.name, other)
+			}
+		}
+	}
 }
 
 // assertLayerDevices checks that every containerd-erofs-* dm-verity device

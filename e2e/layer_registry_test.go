@@ -5,13 +5,17 @@ package e2e
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +37,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 	oras "oras.land/oras-go/v2"
@@ -110,6 +115,19 @@ type layerKey struct {
 }
 
 func (k layerKey) String() string { return "CN=" + k.cert.Subject.CommonName }
+
+// kms is k signing the way a KMS key does: pkg/layersign signs with a
+// crypto/ecdsa key deterministically (RFC 6979), so a layer signed again
+// has the same signature, but an ECDSA key in a KMS (Azure Key Vault) draws
+// a fresh nonce on every call, so every run gives the layer new signature
+// bytes.
+func (k layerKey) kms() layerKey { return layerKey{signer: kmsSigner{k.signer}, cert: k.cert} }
+
+type kmsSigner struct{ crypto.Signer }
+
+func (s kmsSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return s.Signer.Sign(rand.Reader, digest, opts)
+}
 
 // newLayerKey parses a PEM key and the PEM certificate of it.
 func newLayerKey(t *testing.T, keyPEM, certPEM []byte) layerKey {
@@ -258,9 +276,10 @@ func (r *layerRegistry) repository(t *testing.T, path string) *orasremote.Reposi
 }
 
 // mirrorSigned copies each gsoci image's linux/amd64 manifest under the same
-// path and signs it with key.
-func (r *layerRegistry) mirrorSigned(ctx context.Context, t *testing.T, refs []string, key layerKey) {
+// path and signs it with key. It returns what it signed, by reference.
+func (r *layerRegistry) mirrorSigned(ctx context.Context, t *testing.T, refs []string, key layerKey) map[string]layersign.Signed {
 	t.Helper()
+	all := make(map[string]layersign.Signed, len(refs))
 	started := time.Now()
 	opts := oras.DefaultCopyOptions
 	opts.WithTargetPlatform(&ocispec.Platform{OS: "linux", Architecture: "amd64"})
@@ -274,9 +293,11 @@ func (r *layerRegistry) mirrorSigned(ctx context.Context, t *testing.T, refs []s
 		desc, err := oras.Copy(ctx, src, tag, dst, tag, opts)
 		require.NoError(t, err, "copy %s", ref)
 		signed := r.sign(ctx, t, path, key)
+		all[ref] = signed
 		t.Logf("layer registry: %s linux/amd64 %s, %d layers signed by %s", ref, desc.Digest, len(signed.Layers), key)
 	}
 	t.Logf("layer registry: %d images mirrored and signed in %.1fs; layer_registry_seconds=%.1f", len(refs), time.Since(started).Seconds(), time.Since(started).Seconds())
+	return all
 }
 
 // sign signs path's single platform manifest with key.
@@ -294,43 +315,132 @@ func (r *layerRegistry) sign(ctx context.Context, t *testing.T, path string, key
 	return signed[0]
 }
 
-// workloads are the test's three workload images, as gsoci references.
+// workloads are the test's workload images, as gsoci references.
 type workloads struct {
-	// giantSwarm and installation have every layer signed, with the Giant
-	// Swarm and the installation key.
-	giantSwarm, installation string
-	// unsigned is giantSwarm with one layer more, which its referrer (the
-	// giantSwarm image's blobs) does not cover: unsignedLayer.
+	// signed are the images with every layer signed, by pod: each is the
+	// sandbox image's layer (or that tar) with layers of its own.
+	signed map[string]string
+	// shared are the layers the signed images share with each other or with
+	// the sandbox image, each signed in more than one way.
+	shared []sharedLayer
+	// unsigned is the giant-swarm image with one layer more, which its
+	// referrer (the giant-swarm image's blobs) does not cover: unsignedLayer.
 	unsigned      string
 	unsignedLayer string
 }
 
+// sharedLayer is a layer two images bring with different signatures: one
+// snapshot on the node, the chain ID's, serves both.
+type sharedLayer struct {
+	// name says how the signatures differ.
+	name string
+	// chainID names the layer's snapshot.
+	chainID string
+	// signatures describes each image's signature of the layer, by the
+	// signature blob's digest.
+	signatures map[digest.Digest]string
+}
+
 // buildWorkloads pushes and signs the workload images on top of the mirrored
-// sandbox image.
-func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantSwarm, installation layerKey) workloads {
+// sandbox image, which sandboxSigned is the Giant Swarm key's signature of.
+// They share the sandbox's layer as production images share base layers:
+//
+//   - giant-swarm: signed with the Giant Swarm key, like the sandbox;
+//   - installation: signed with the installation key, so the sandbox's layer
+//     has another key's signature;
+//   - installation-again: installation with a layer more, signed with the
+//     installation key in a run of its own, so the layers it shares with
+//     installation have the same key's other signatures (installation signs
+//     like a KMS key, layerKey.kms);
+//   - recompressed: the sandbox's tar compressed again, signed with the
+//     Giant Swarm key: the same tar under another layer digest has another
+//     index and root hash, as an index built by another erofs-utils has.
+func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, sandboxSigned layersign.Signed, giantSwarm, installation layerKey) workloads {
 	t.Helper()
 	sandbox, err := name.ParseReference(r.host+"/"+strings.TrimPrefix(sandboxImage, gsoci+"/"), name.Insecure)
 	require.NoError(t, err)
 	base, err := remote.Image(sandbox, remote.WithContext(ctx))
 	require.NoError(t, err, "the mirrored sandbox image")
 	w := workloads{
-		giantSwarm:   gsociRepository + "/vm-manager-e2e:giant-swarm",
-		installation: gsociRepository + "/vm-manager-e2e:installation",
-		unsigned:     gsociRepository + "/vm-manager-e2e:unsigned-layer",
+		signed:   map[string]string{},
+		unsigned: gsociRepository + "/vm-manager-e2e:unsigned-layer",
+	}
+	repo := r.repository(t, workloadRepository)
+	sandboxRepo := r.repository(t, strings.TrimPrefix(sandboxImage, gsoci+"/"))
+	push := func(pod string, img v1.Image, user string, key layerKey) (v1.Image, layersign.Signed) {
+		img = r.pushWorkload(ctx, t, img, pod, user)
+		w.signed[pod] = gsociRepository + "/vm-manager-e2e:" + pod
+		return img, r.sign(ctx, t, workloadRepository+":"+pod, key)
+	}
+	gsImage, gsSigned := push(podGiantSwarm, base, workloadUser, giantSwarm)
+	installationImage, installationSigned := push(podInstallation, base, "", installation)
+	_, againSigned := push(podInstallationAgain, installationImage, "", installation)
+	recompressedImage, recompressedSigned := push(podRecompressed, recompressed(t, base), "", giantSwarm)
+
+	diffIDs := func(img v1.Image) []digest.Digest {
+		cfg, err := img.ConfigFile()
+		require.NoError(t, err)
+		var ids []digest.Digest
+		for _, id := range cfg.RootFS.DiffIDs {
+			ids = append(ids, digest.Digest(id.String()))
+		}
+		return ids
+	}
+	layerDigests := func(img v1.Image) []digest.Digest {
+		layers, err := img.Layers()
+		require.NoError(t, err)
+		var ds []digest.Digest
+		for _, l := range layers {
+			d, err := l.Digest()
+			require.NoError(t, err)
+			ds = append(ds, digest.Digest(d.String()))
+		}
+		return ds
+	}
+	// signature is how signed signs layer: its root hash and signature blob.
+	signature := func(from *orasremote.Repository, image string, signed layersign.Signed, layer digest.Digest, key layerKey) (digest.Digest, string, string) {
+		raw, err := content.FetchAll(ctx, from, signed.Referrer)
+		require.NoError(t, err)
+		var referrer ocispec.Manifest
+		require.NoError(t, json.Unmarshal(raw, &referrer))
+		for _, l := range referrer.Layers {
+			if l.MediaType == layersign.SignatureMediaType && l.Annotations[layersign.AnnotationSourceLayerDigest] == layer.String() {
+				root := l.Annotations[layersign.AnnotationRootHash]
+				return l.Digest, root, fmt.Sprintf("%s by %s as layer %s, root hash %s, signature %s", image, key, layer, root, l.Digest)
+			}
+		}
+		require.Failf(t, "no signature", "%s's referrer %s signs no layer %s", image, signed.Referrer.Digest, layer)
+		return "", "", ""
 	}
 
-	gsImage := r.pushWorkload(ctx, t, base, "giant-swarm", workloadUser)
-	gsSigned := r.sign(ctx, t, workloadRepository+":giant-swarm", giantSwarm)
-	r.pushWorkload(ctx, t, standalone(t, base), "installation", "")
-	r.sign(ctx, t, workloadRepository+":installation", installation)
+	sandboxLayer := layerDigests(base)[0]
+	sandboxChain := identity.ChainID(diffIDs(base))
+	sandboxSig, sandboxRoot, sandboxText := signature(sandboxRepo, sandboxImage, sandboxSigned, sandboxLayer, giantSwarm)
+	installationSig, installationRoot, installationText := signature(repo, w.signed[podInstallation], installationSigned, sandboxLayer, installation)
+	require.NotEqual(t, sandboxSig, installationSig, "the installation key signs the sandbox's layer differently")
+	require.Equal(t, sandboxRoot, installationRoot, "the same layer has the same root hash")
+	w.shared = append(w.shared, sharedLayer{name: "different keys", chainID: sandboxChain.String(),
+		signatures: map[digest.Digest]string{sandboxSig: sandboxText, installationSig: installationText}})
+
+	ownLayer := layerDigests(installationImage)[1]
+	ownChain := identity.ChainID(diffIDs(installationImage))
+	firstSig, firstRoot, firstText := signature(repo, w.signed[podInstallation], installationSigned, ownLayer, installation)
+	againSig, againRoot, againText := signature(repo, w.signed[podInstallationAgain], againSigned, ownLayer, installation)
+	require.NotEqual(t, firstSig, againSig, "the installation key signs like a KMS key, differently in every run")
+	require.Equal(t, firstRoot, againRoot, "the same layer has the same root hash")
+	w.shared = append(w.shared, sharedLayer{name: "same key, separate runs", chainID: ownChain.String(),
+		signatures: map[digest.Digest]string{firstSig: firstText, againSig: againText}})
+
+	recompressedLayer := layerDigests(recompressedImage)[0]
+	require.NotEqual(t, sandboxLayer, recompressedLayer, "the recompressed layer has a digest of its own")
+	require.Equal(t, sandboxChain, identity.ChainID(diffIDs(recompressedImage)[:1]), "the recompressed layer is the sandbox's tar")
+	recompressedSig, recompressedRoot, recompressedText := signature(repo, w.signed[podRecompressed], recompressedSigned, recompressedLayer, giantSwarm)
+	require.NotEqual(t, sandboxRoot, recompressedRoot, "the recompressed layer's index, and so its root hash, is another")
+	w.shared = append(w.shared, sharedLayer{name: "another index, another root hash", chainID: sandboxChain.String(),
+		signatures: map[digest.Digest]string{sandboxSig: sandboxText, recompressedSig: recompressedText}})
 
 	unsigned := r.pushWorkload(ctx, t, gsImage, "unsigned-layer", "")
-	layers, err := unsigned.Layers()
-	require.NoError(t, err)
-	top, err := layers[len(layers)-1].Digest()
-	require.NoError(t, err)
-	w.unsignedLayer = top.String()
-	repo := r.repository(t, workloadRepository)
+	w.unsignedLayer = layerDigests(unsigned)[len(layerDigests(unsigned))-1].String()
 	raw, err := content.FetchAll(ctx, repo, gsSigned.Referrer)
 	require.NoError(t, err)
 	var referrer ocispec.Manifest
@@ -342,8 +452,16 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantS
 		ManifestAnnotations: referrer.Annotations,
 	})
 	require.NoError(t, err, "the unsigned-layer image's referrer")
-	t.Logf("workloads: %s signed by %s, %s (no layer of the sandbox's) by %s, %s with layer %s outside its referrer",
-		w.giantSwarm, giantSwarm, w.installation, installation, w.unsigned, w.unsignedLayer)
+	for _, pod := range slices.Sorted(maps.Keys(w.signed)) {
+		t.Logf("workload %s: %s", pod, w.signed[pod])
+	}
+	for _, sl := range w.shared {
+		t.Logf("shared layer, %s: snapshot %s", sl.name, sl.chainID)
+		for _, d := range slices.Sorted(maps.Keys(sl.signatures)) {
+			t.Logf("  %s", sl.signatures[d])
+		}
+	}
+	t.Logf("workload %s with layer %s outside its referrer", w.unsigned, w.unsignedLayer)
 	return w
 }
 
@@ -370,10 +488,10 @@ func (r *layerRegistry) pushWorkload(ctx context.Context, t *testing.T, base v1.
 	return img
 }
 
-// standalone is base's runtime in a layer of its own on no base layer, with
-// base's config: a node keeps one signature per layer, so an image signed
-// with another key than the sandbox's shares no layer with it.
-func standalone(t *testing.T, base v1.Image) v1.Image {
+// recompressed is base with its one layer compressed again, with base's
+// config: the same tar, so the same diff ID and chain ID, under another
+// layer digest.
+func recompressed(t *testing.T, base v1.Image) v1.Image {
 	t.Helper()
 	layers, err := base.Layers()
 	require.NoError(t, err)
@@ -381,22 +499,10 @@ func standalone(t *testing.T, base v1.Image) v1.Image {
 	rc, err := layers[0].Uncompressed()
 	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	tr := tar.NewReader(rc)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		hdr.ModTime = time.Unix(1, 0) // a layer digest of its own
-		require.NoError(t, tw.WriteHeader(hdr))
-		_, err = io.Copy(tw, tr) // #nosec G110 -- the mirrored sandbox image, a few hundred KiB
-		require.NoError(t, err)
-	}
-	require.NoError(t, tw.Close())
-	layer, err := tarballLayer(buf.Bytes())
+	tarBytes, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(tarBytes)), nil },
+		tarball.WithCompressionLevel(gzip.BestCompression))
 	require.NoError(t, err)
 	cfg, err := base.ConfigFile()
 	require.NoError(t, err)
