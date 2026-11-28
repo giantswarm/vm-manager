@@ -437,10 +437,11 @@ gsoci.azurecr.io/giantswarm`, `networking.podSubnet: 10.244.0.0/16`, the SANs ab
 the worker `JoinConfiguration` with `discovery.bootstrapToken` (`apiServerEndpoint:
 <cp ip>:6443`, the token and `caCertHashes` from `kubeadm token create
 --print-join-command` on the control plane) and the same `nodeRegistration`. Measured on
-the development host (several runs): the control plane is Ready with flannel and every pod
-running 85 to 115 s after its `create_vm` (kubeadm init about 55 s of that, image pulls
-included; installed boot to `READY=1` 69 s); the worker is Ready 46 to 52 s after its
-`create_vm` (kubeadm join 1.2 s); the whole test takes 2.5 to 3 min.
+the hosted e2e runner, on the IPE image with Cilium and every image signed: the control plane
+is Ready with every pod running 93 to 125 s after its `create_vm` (kubeadm init 17 to 24 s,
+installed boot to `READY=1` 34 to 48 s); the worker is Ready 71 to 121 s after its
+`create_vm` (kubeadm join about 2 s), most of it pulling Cilium; mirroring and signing the
+nine images on the host takes 22 to 60 s.
 
 What sysinstall/firstboot do not cover: writing CAPI's files and units (Ignition) and
 proving integrity before secrets are released (`vm-agent attest`).
