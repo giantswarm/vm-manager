@@ -15,7 +15,7 @@ require (
 	github.com/google/go-tpm-tools v0.4.11
 	github.com/google/uuid v1.6.0
 	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.2
 	github.com/mark3labs/mcp-go v1.6.0
 	github.com/mark3labs/mcp-go/otel v0.54.0
 	github.com/mdlayher/vsock v1.4.0
