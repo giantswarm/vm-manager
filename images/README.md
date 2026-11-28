@@ -519,6 +519,12 @@ Image layers run only from signed dm-verity devices (`containerd.toml`):
   mismatch: data has <hex>, signed <hex>`. Native EROFS layers are refused.
 - When a layer is mounted, containerd hands the signature to dm-verity, so the kernel
   checks it against its keys, and the [IPE](#ipe) policy executes from such devices.
+- Images that share a layer share its snapshot, however their referrers sign it: Giant
+  Swarm's key and an installation's, a KMS key that signs differently on every run, or
+  another root hash (an index of another erofs-utils, the same tar compressed again).
+  The node keeps the layer as the first image unpacked it, with that image's signature,
+  which the kernel checks against exactly those bytes at every mount. Every image's
+  referrer must still cover each of its layers, unpacked already or not.
 
 The sandbox image is pinned to gsoci's (`gsoci.azurecr.io/giantswarm/pause:3.10.2`, the
 CRI's `pinned_images.sandbox`), where Giant Swarm publishes it with signed layers; the
@@ -528,7 +534,9 @@ plain-HTTP registry) are configured through `hosts.toml` files under
 `e2e/kubernetes_sysext_test.go` checks the version, the plugins, the effective
 configuration and the refusal of an unsigned image; `e2e/kubernetes_cluster_test.go`
 runs a cluster from signed copies of gsoci's images in a mirror (signatures through its
-referrers API), signed workloads and the refusal of a layer outside its signatures.
+referrers API), signed workloads that share the sandbox's layer under other keys, other
+signatures of one key and another root hash, and the refusal of a layer outside its
+signatures.
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);

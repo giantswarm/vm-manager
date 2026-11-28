@@ -42,10 +42,14 @@ layer that is no OCI or Docker tar layer (native EROFS `application/vnd.erofs.la
 encrypted, or anything else) and a digest that is not sha256 or sha512 fail the whole
 image before any work, so nothing a node would unpack goes unsigned or unchecked.
 
-Signing the same image with the same key again gives the same blobs, which the registry
-deduplicates; only the referrer manifest is new. A layer shared between images with the
-same digest has the same root hash. The root hash depends on the *compressed* layer
-digest (through the index UUID): a mirror that recompresses a layer must sign it again.
+Signing the same image with the same key file again gives the same blobs, which the
+registry deduplicates; only the referrer manifest is new. An ECDSA key in a KMS signs
+differently on every run, so there only the index and tree repeat. A layer shared between
+images with the same digest has the same root hash. The root hash depends on the
+*compressed* layer digest (through the index UUID): a mirror that recompresses a layer
+must sign it again. A node needs neither the same signature nor the same root hash for a
+layer images share: it keeps the layer as the first image unpacked it and runs the
+others on it ([images/README.md](../images/README.md#containerd)).
 
 ## Keys
 

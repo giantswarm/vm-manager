@@ -153,11 +153,15 @@ var serverLine = regexp.MustCompile(`(?m)^(\s*server:\s*)https://\S+`)
 // The image enforces IPE: containers run only from signed dm-verity layers
 // (images/README.md, containerd). The nodes pull from gsoci.azurecr.io as
 // production does, through a mirror on the e2e host (layerRegistry) holding
-// copies signed with the Giant Swarm layer key. On the worker, a pod of an
-// image signed with that key and one signed with the installation's key
-// (layer_certificates) run; a pod of an image with a layer its signatures do
-// not cover fails at pull, naming the layer; a file of the running signed
-// pod's layer is refused as a kernel module, firmware and kexec image.
+// copies signed with the Giant Swarm layer key. On the worker, pods of
+// images built on the sandbox image's layer run: one signed with that key,
+// one with the installation's key (layer_certificates), one with the
+// installation's key again in a run of its own (signing like a KMS key,
+// with new signature bytes) and one of the sandbox's tar compressed again
+// (another index and root hash); each shared layer is one snapshot on the
+// node. A pod of an image with a layer its signatures do not cover fails at
+// pull, naming the layer; a file of the running signed pod's layer is
+// refused as a kernel module, firmware and kexec image.
 func TestKubernetesCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTestTimeout)
 	defer cancel()
@@ -170,7 +174,7 @@ func TestKubernetesCluster(t *testing.T) {
 	_, testKey := generateSSHKey(t, dir)
 	giantSwarmKey := giantSwarmLayerKey(t, image)
 	installationCert := layercerttest.New(t, "vm-manager e2e installation layers")
-	installationKey := newLayerKey(t, []byte(installationCert.KeyPEM), []byte(installationCert.PEM))
+	installationKey := newLayerKey(t, []byte(installationCert.KeyPEM), []byte(installationCert.PEM)).kms()
 
 	t.Setenv("VM_MANAGER_BOOT_TIMEOUT", clusterBootTimeout.String())
 	// Attestation verifies by default; the shared image dir carries no golden
@@ -186,8 +190,8 @@ func TestKubernetesCluster(t *testing.T) {
 	// Giant Swarm key, and the workload images.
 	cilium := renderCilium(ctx, t, helm, version)
 	reg := startLayerRegistry(t, dir)
-	reg.mirrorSigned(ctx, t, clusterImages(t, version, cilium), giantSwarmKey)
-	loads := reg.buildWorkloads(ctx, t, giantSwarmKey, installationKey)
+	mirrored := reg.mirrorSigned(ctx, t, clusterImages(t, version, cilium), giantSwarmKey)
+	loads := reg.buildWorkloads(ctx, t, mirrored[sandboxImage], giantSwarmKey, installationKey)
 
 	c := &cluster{t: t, m: m, key: testKey, version: version, layerCertificates: []string{installationCert.PEM}, files: []map[string]any{reg.hostsTOML()}}
 	t.Cleanup(c.teardown)
