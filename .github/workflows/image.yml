@@ -2,7 +2,11 @@ name: image
 
 # T2 of docs/design.md "Testing strategy": build the guest image and the
 # kubernetes sysext with mkosi and run the offline verification, then publish
-# images/build/ as the `guest-image` artifact that e2e.yml boots.
+# images/build/ as the `guest-image` artifact that e2e.yml boots, and the
+# build's development keys that sign test container images as the short-lived
+# `guest-image-test-keys`. This workflow builds for CI only: the release image
+# comes from the CircleCI guest-image job, which builds no layer key (LAYER_CERT=)
+# and uploads no key.
 #
 # The build runs inside an archlinux container: the image is Arch (mkosi 27,
 # systemd 261, erofs-utils, ukify, systemd-measure), the hosted Ubuntu runner
@@ -41,6 +45,10 @@ concurrency:
 env:
   # What e2e.yml downloads. Keep in sync with e2e.yml.
   ARTIFACT: guest-image
+  # This build's test Giant Swarm layer key for the e2e job: layer.key signs
+  # the container images of TestKubernetesCluster, layer.crt is the
+  # certificate the initrd enrolls. Keep in sync with e2e.yml.
+  KEYS_ARTIFACT: guest-image-test-keys
 
 jobs:
   build:
@@ -123,3 +131,13 @@ jobs:
           compression-level: 0
           # Long enough for e2e.yml to reuse main's image between merges.
           retention-days: ${{ github.event_name == 'push' && 30 || 7 }}
+
+      - name: Upload the test keys
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.KEYS_ARTIFACT }}
+          path: |
+            images/keys/layer.key
+            images/keys/layer.crt
+          if-no-files-found: error
+          retention-days: 1

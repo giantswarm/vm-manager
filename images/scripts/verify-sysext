@@ -113,7 +113,7 @@ content_kubernetes() {
         [[ "$("$ext/usr/bin/kubectl" version --client -o json | python3 -c 'import json, sys; print(json.load(sys.stdin)["clientVersion"]["gitVersion"])')" == "v$version" ]] \
                 || fail "kubectl reports $("$ext/usr/bin/kubectl" version --client 2>&1 | head -1), image says $version"
         [[ -x "$ext/usr/lib/cni/bridge" ]] || fail "/usr/lib/cni/bridge missing"
-        # containerd prints "containerd github.com/containerd/containerd/v2 v2.4.2-gs.2 <commit>";
+        # containerd prints "containerd github.com/containerd/containerd/v2 v2.4.2-gs.4 <commit>";
         # Arch builds crictl without its version string.
         ok "kubeadm/kubelet/kubectl v$version; containerd $("$ext/usr/bin/containerd" --version | /usr/bin/grep -oE ' v[0-9][^ ]*' | head -1 | tr -d ' '), $("$ext/usr/bin/runc" --version | head -1), CNI plugins in /usr/lib/cni, crictl, preflight tools"
 

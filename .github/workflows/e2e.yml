@@ -10,8 +10,9 @@ name: e2e
 #   schedule (nightly)        full suite: also TestIgnition, TestKubernetesVersions
 #                             (one VM per sysext version), TestAttestation (three
 #                             servers, ~2 min) and TestKubernetesCluster (two
-#                             nodes, pulls from registry.k8s.io, ~3 min; skipped
-#                             for an image with IPE, which runs no container)
+#                             IPE nodes with Cilium, pulling gsoci's images
+#                             through a mirror on the runner that holds them
+#                             signed with the build's key)
 #   workflow_dispatch         full by default, `suite: fast` for the subset
 #
 # The image comes from image.yml: built in this run when the PR touches the
@@ -61,6 +62,10 @@ concurrency:
 env:
   # The artifact image.yml uploads. Keep in sync with image.yml.
   ARTIFACT: guest-image
+  # The build's development keys that sign TestKubernetesCluster's images,
+  # next to the image directory as in a local build (images/keys). Keep in
+  # sync with image.yml.
+  KEYS_ARTIFACT: guest-image-test-keys
   # Everything the image build depends on; a PR touching none of it reuses
   # main's image.
   IMAGE_PATHS: '^(images/|cmd/vm-agent/|internal/agent/|\.github/workflows/(image|e2e)\.yml$)'
@@ -149,7 +154,7 @@ jobs:
     # build is skipped when main's image is reused.
     if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ needs.plan.outputs.suite == 'full' && 60 || 40 }}
+    timeout-minutes: ${{ needs.plan.outputs.suite == 'full' && 80 || 40 }}
     env:
       SUITE: ${{ needs.plan.outputs.suite }}
       # Short (unix socket paths) and on the runner's large data disk: each
@@ -173,15 +178,18 @@ jobs:
           echo "cpus: $(nproc), kvm-capable: $(grep -c -E 'vmx|svm' /proc/cpuinfo)"
           free -h
 
-      - name: Install QEMU, swtpm and OVMF
-        # All three from the Ubuntu archive. internal/tpm passes swtpm's
+      - name: Install QEMU, swtpm, OVMF and erofs-utils
+        # All four from the Ubuntu archive. internal/tpm passes swtpm's
         # `terminate` ctrl option (0.8+) so an emulator ends with the QEMU it
         # served; 26.04 ships swtpm 0.10, so no PPA is needed. Its QEMU 10.2
         # runs with the io_uring main loop off: vm-manager denies the QEMU
         # process io_uring_setup (seccomp), which lost TPM commands (#84).
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf
+          # erofs-utils: TestKubernetesCluster signs the images it mirrors
+          # (pkg/layersign runs mkfs.erofs); it renders Cilium with the
+          # runner's helm.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 swtpm ovmf erofs-utils
           # Ubuntu confines swtpm with AppArmor (usr.bin.swtpm): sockets and
           # state outside its allowed paths, like the per-test directories
           # under /mnt/e2e, fail with "Could not open UnixIO socket:
@@ -195,7 +203,7 @@ jobs:
           swtpm --version
           systemctl --version | head -1
           ls -l /usr/share/OVMF/
-          if [ "$SUITE" = full ]; then kubectl version --client; fi
+          if [ "$SUITE" = full ]; then kubectl version --client; helm version --short; mkfs.erofs --version; fi
 
       - name: Scratch space on the data disk
         run: |
@@ -210,12 +218,31 @@ jobs:
           name: ${{ env.ARTIFACT }}
           path: ${{ env.E2E_ROOT }}/image
 
+      - name: Download the test keys built in this run
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.KEYS_ARTIFACT }}
+          path: ${{ env.E2E_ROOT }}/keys
+
       - name: Download the image of run ${{ needs.plan.outputs.run_id }} on main
         if: needs.build.result == 'skipped'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ env.ARTIFACT }}
           path: ${{ env.E2E_ROOT }}/image
+          run-id: ${{ needs.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the test keys of run ${{ needs.plan.outputs.run_id }}
+        if: needs.build.result == 'skipped'
+        # Kept for a day only; without them TestKubernetesCluster fails and
+        # the other tests do not need them.
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.KEYS_ARTIFACT }}
+          path: ${{ env.E2E_ROOT }}/keys
           run-id: ${{ needs.plan.outputs.run_id }}
           github-token: ${{ github.token }}
 
@@ -243,7 +270,7 @@ jobs:
           VM_MANAGER_E2E_KEEP: "1"
           TMPDIR: ${{ env.E2E_ROOT }}
         run: |
-          args=(-tags e2e -count=1 -timeout 35m -v)
+          args=(-tags e2e -count=1 -timeout 60m -v)
           if [ "$SUITE" = fast ]; then
             args+=(-run 'TestInstallBoot|TestNetworkIMDS|TestPersistentEtc|TestKubernetesSysext|TestIPE')
           fi

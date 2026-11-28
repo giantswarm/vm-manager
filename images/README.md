@@ -520,13 +520,15 @@ Image layers run only from signed dm-verity devices (`containerd.toml`):
 - When a layer is mounted, containerd hands the signature to dm-verity, so the kernel
   checks it against its keys, and the [IPE](#ipe) policy executes from such devices.
 
-The default sandbox image (`registry.k8s.io/pause:3.10.2`) is unsigned, so a pod needs a
-signed copy of it (the CRI's `sandbox` image setting). Registry hosts (mirrors, a
+The sandbox image is pinned to gsoci's (`gsoci.azurecr.io/giantswarm/pause:3.10.2`, the
+CRI's `pinned_images.sandbox`), where Giant Swarm publishes it with signed layers; the
+upstream default `registry.k8s.io/pause` is unsigned. Registry hosts (mirrors, a
 plain-HTTP registry) are configured through `hosts.toml` files under
 `/etc/containerd/certs.d/<host>/`, the `config_path` of the CRI and the transfer service.
 `e2e/kubernetes_sysext_test.go` checks the version, the plugins, the effective
-configuration and the refusal of an unsigned image; a signed pull needs a registry
-serving the referrers.
+configuration and the refusal of an unsigned image; `e2e/kubernetes_cluster_test.go`
+runs a cluster from signed copies of gsoci's images in a mirror (signatures through its
+referrers API), signed workloads and the refusal of a layer outside its signatures.
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
