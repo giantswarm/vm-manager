@@ -804,16 +804,27 @@ What the policy means for workloads and what it does not cover:
 - **Containers run from signed layers only.** containerd mounts every image layer from a
   dm-verity device opened with the publisher's signature ([containerd](#containerd)), and
   refuses at pull an image without one: kubeadm's static pods, the sandbox image and the
-  CNI's images need signed copies, and a CAPI bootstrap's `/etc/kubeadm.sh` on the var
-  partition does not run. containerd and kubelet themselves run (they come from the
-  sysext). `e2e/kubernetes_cluster_test.go` skips an image with IPE until it brings a
-  registry with signed images.
+  CNI's images need signed copies. containerd and kubelet themselves run (they come from
+  the sysext), and so does a CAPI bootstrap, which runs `ExecStart=/bin/bash
+  /etc/kubeadm.sh` since CAPI 1.14 (see Interpreters). `e2e/kubernetes_cluster_test.go`
+  runs a cluster with Cilium on IPE nodes from signed copies of gsoci's images: a pod of an
+  image signed with the Giant Swarm test key and one signed with an installation test key
+  run, an image with an unsigned layer fails at pull naming the layer, and a file of a
+  running pod's layer is refused as a kernel module, as firmware and as a kexec image.
 - **Interpreters.** IPE checks what the kernel executes and maps. `bash /var/tmp/x.sh` runs
   the image's bash, which then reads the script as data; only an interpreter that asks with
   `execveat(AT_EXECVE_CHECK)` lets IPE judge the script, and bash does not. Executing the
   script itself (`/var/tmp/x.sh`) is denied.
 - **JIT and other anonymous executable memory** is denied: a runtime that generates code
-  (a JIT, older libffi closures) fails under the policy.
+  fails under the policy, and so do older libffi closures. On every node:
+  - JVMs do not run, `-Xint` included: HotSpot generates its interpreter at start too.
+  - Node.js runs only with `--jitless`, which also leaves out WebAssembly.
+  - .NET runs only as NativeAOT.
+  - LuaJIT runs only with `-joff`.
+  - Go, Rust, C and C++ binaries and CPython run.
+
+  Routes to executable memory that skip IPE are
+  [giantswarm/vm-manager#267](https://github.com/giantswarm/vm-manager/issues/267).
 - **The kernel command line of a later boot.** With Secure Boot off, systemd-stub takes a
   command line a boot loader entry on the ESP passes over the UKI's own; root can write the
   ESP. Such a boot runs the same UKI (PCR 4 and 11 do not change) without `lsm=…ipe`; the
