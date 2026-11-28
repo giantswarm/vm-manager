@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	ggcrregistry "github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -320,7 +321,7 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantS
 
 	gsImage := r.pushWorkload(ctx, t, base, "giant-swarm", workloadUser)
 	gsSigned := r.sign(ctx, t, workloadRepository+":giant-swarm", giantSwarm)
-	r.pushWorkload(ctx, t, base, "installation", "")
+	r.pushWorkload(ctx, t, standalone(t, base), "installation", "")
 	r.sign(ctx, t, workloadRepository+":installation", installation)
 
 	unsigned := r.pushWorkload(ctx, t, gsImage, "unsigned-layer", "")
@@ -341,7 +342,7 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, giantS
 		ManifestAnnotations: referrer.Annotations,
 	})
 	require.NoError(t, err, "the unsigned-layer image's referrer")
-	t.Logf("workloads: %s signed by %s, %s by %s, %s with layer %s outside its referrer",
+	t.Logf("workloads: %s signed by %s, %s (no layer of the sandbox's) by %s, %s with layer %s outside its referrer",
 		w.giantSwarm, giantSwarm, w.installation, installation, w.unsigned, w.unsignedLayer)
 	return w
 }
@@ -366,6 +367,45 @@ func (r *layerRegistry) pushWorkload(ctx context.Context, t *testing.T, base v1.
 	ref, err := name.ParseReference(r.host+"/"+workloadRepository+":"+tag, name.Insecure)
 	require.NoError(t, err)
 	require.NoError(t, remote.Write(ref, img, remote.WithContext(ctx)), "push %s", ref)
+	return img
+}
+
+// standalone is base's runtime in a layer of its own on no base layer, with
+// base's config: a node keeps one signature per layer, so an image signed
+// with another key than the sandbox's shares no layer with it.
+func standalone(t *testing.T, base v1.Image) v1.Image {
+	t.Helper()
+	layers, err := base.Layers()
+	require.NoError(t, err)
+	require.Len(t, layers, 1, "the sandbox image has one layer")
+	rc, err := layers[0].Uncompressed()
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		hdr.ModTime = time.Unix(1, 0) // a layer digest of its own
+		require.NoError(t, tw.WriteHeader(hdr))
+		_, err = io.Copy(tw, tr) // #nosec G110 -- the mirrored sandbox image, a few hundred KiB
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	layer, err := tarballLayer(buf.Bytes())
+	require.NoError(t, err)
+	cfg, err := base.ConfigFile()
+	require.NoError(t, err)
+	cfg = cfg.DeepCopy()
+	cfg.RootFS.DiffIDs, cfg.History = nil, nil
+	img, err := mutate.ConfigFile(empty.Image, cfg)
+	require.NoError(t, err)
+	img, err = mutate.AppendLayers(img, layer)
+	require.NoError(t, err)
 	return img
 }
 
