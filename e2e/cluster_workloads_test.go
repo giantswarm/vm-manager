@@ -169,6 +169,11 @@ func assertUntrustedFirst(ctx context.Context, t *testing.T, g *guest, u untrust
 		require.NoError(t, err, "crictl pull %s", u.untrusted)
 	})
 	message := strings.TrimSpace(refusal.Stderr)
+	for _, line := range strings.Split(message, "\n") {
+		if strings.Contains(line, "level=error") {
+			message = line
+		}
+	}
 	t.Logf("untrusted key first: pull of %s refused: %s", u.untrusted, message)
 	require.NotEqual(t, 0, refusal.ExitCode, "the pull of %s, signed by a key the node does not trust, fails: %s", u.untrusted, refusal.Stdout)
 	assert.Contains(t, message, "layer "+u.layer+": dm-verity signature "+u.untrustedSignature.String()+" not accepted by the kernel",
@@ -186,8 +191,8 @@ func assertUntrustedFirst(ctx context.Context, t *testing.T, g *guest, u untrust
 	assert.Empty(t, g.sh(ctx, "ctr -n k8s.io snapshots --snapshotter erofs ls | grep -F "+u.chainID+" || true"),
 		"no snapshot of the refused layer, committed or active")
 	assert.Equal(t, before, layerDeviceNames(ctx, g), "the refused pull leaves the node's containerd-erofs devices as they were")
-	t.Logf("untrusted key first: snapshot %s absent, dm-verity devices created and resumed by the pull: %d of %d, all removed; containerd-erofs devices before and after: %d",
-		u.chainID, len(refused.resumedDM()), len(refused.dm), len(before))
+	t.Logf("untrusted key first: snapshot %s absent; dm-verity devices the pull created: %d, resumed: %d, left: %d; containerd-erofs devices before and after: %d",
+		u.chainID, len(refused.dm), len(refused.resumedDM()), len(refused.open()), len(strings.Fields(before)))
 
 	started := time.Now()
 	accepted := blockUevents(ctx, t, g, "trusted", func() { g.sh(ctx, "crictl --timeout 2m pull "+u.trusted) })
@@ -197,33 +202,43 @@ func assertUntrustedFirst(ctx context.Context, t *testing.T, g *guest, u untrust
 	assert.Empty(t, accepted.open(), "every device the pull created for a signature check is removed")
 	assert.Equal(t, before, layerDeviceNames(ctx, g), "the pull leaves the node's containerd-erofs devices as they were")
 	t.Logf("untrusted key first: then %s pulled in %.1fs; the kernel accepted the signature of each new layer; dm-verity device created to removed: %s",
-		u.trusted, pullSeconds, durations(checks))
-	t.Logf("untrusted key first: signature checks, loop device attached to detached: refused %s; accepted %s; kernel_signature_check_ms=%.1f",
-		durations(refused.loops()), durations(accepted.loops()), meanMillis(accepted.loops()))
+		u.trusted, pullSeconds, millis(lifetimes(checks)))
+	spans := accepted.checkSpans()
+	t.Logf("untrusted key first: signature check, loop device attached to detached: refused %s; accepted %s; kernel_signature_check_ms=%.1f",
+		millis(refused.refusedSpan()), millis(spans), mean(spans))
 }
 
-// durations lists each device's time from added to removed.
-func durations(uses []deviceUse) string {
-	var out []string
+// lifetimes are the devices' times from added to removed, in milliseconds.
+func lifetimes(uses []deviceUse) []float64 {
+	var out []float64
 	for _, d := range uses {
-		out = append(out, fmt.Sprintf("%s %.1f ms", d.name, (d.removed-d.added)*1000))
+		out = append(out, (d.removed-d.added)*1000)
 	}
-	if len(out) == 0 {
+	return out
+}
+
+// millis lists durations in milliseconds.
+func millis(ms []float64) string {
+	if len(ms) == 0 {
 		return "none"
+	}
+	var out []string
+	for _, m := range ms {
+		out = append(out, fmt.Sprintf("%.1f ms", m))
 	}
 	return strings.Join(out, ", ")
 }
 
-// meanMillis is the mean time from added to removed, in milliseconds.
-func meanMillis(uses []deviceUse) float64 {
-	if len(uses) == 0 {
+// mean is the mean of ms, 0 for none.
+func mean(ms []float64) float64 {
+	if len(ms) == 0 {
 		return 0
 	}
 	var total float64
-	for _, d := range uses {
-		total += (d.removed - d.added) * 1000
+	for _, m := range ms {
+		total += m
 	}
-	return total / float64(len(uses))
+	return total / float64(len(ms))
 }
 
 // assertUntrustedFirstSnapshot checks that the layer of u is one snapshot
@@ -254,18 +269,19 @@ var ueventLine = regexp.MustCompile(`^KERNEL\[([0-9.]+)\]\s+(\w+)\s+(\S+) \((\w+
 // once the monitor printed it, it has printed every kernel uevent before it.
 const ueventSentinel = "/devices/virtual/mem/null"
 
-// deviceUse is a block device's use while blockUevents watched: when it was
-// added (or, for a loop device, attached), resumed (the first change of a dm
-// device) and removed (detached); -1 when not seen.
+// deviceUse is a dm device's use while blockUevents watched: when it was
+// added, resumed (its first change) and removed; -1 when not seen.
 type deviceUse struct {
 	name                    string
 	added, resumed, removed float64
 }
 
-// uevents are the dm and loop devices used while blockUevents watched, in
-// the order they were added.
+// uevents are the dm devices used while blockUevents watched, in the order
+// they were added, and the times of the loop devices' change uevents (a loop
+// device changes when it is attached and when it is detached).
 type uevents struct {
-	dm, loop []deviceUse
+	dm          []deviceUse
+	loopChanges []float64
 }
 
 // resumedDM are the dm devices that were created and resumed: opened.
@@ -290,22 +306,44 @@ func (u uevents) open() []string {
 	return out
 }
 
-// loops are the loop devices attached and detached.
-func (u uevents) loops() []deviceUse {
-	var out []deviceUse
-	for _, l := range u.loop {
-		if l.removed >= 0 {
-			out = append(out, l)
+// checkSpans are the signature checks of the resumed dm devices, in
+// milliseconds: from attaching the loop device under the layer (its last
+// change before the dm device was added) to detaching it (its first change
+// after the dm device was removed).
+func (u uevents) checkSpans() []float64 {
+	var out []float64
+	for _, d := range u.resumedDM() {
+		attached, detached := -1.0, -1.0
+		for _, at := range u.loopChanges {
+			if at <= d.added {
+				attached = at
+			}
+			if at >= d.removed && detached < 0 {
+				detached = at
+			}
+		}
+		if attached >= 0 && detached >= 0 {
+			out = append(out, (detached-attached)*1000)
 		}
 	}
 	return out
+}
+
+// refusedSpan is a check the kernel refused, which creates no dm device:
+// from the first loop change to the last, in milliseconds.
+func (u uevents) refusedSpan() []float64 {
+	if len(u.dm) > 0 || len(u.loopChanges) < 2 {
+		return nil
+	}
+	return []float64{(u.loopChanges[len(u.loopChanges)-1] - u.loopChanges[0]) * 1000}
 }
 
 // blockUevents records the kernel's block device uevents on g while do runs.
 // A dm device is added when its first table loads, which happens only after
 // its target accepted the table (for dm-verity with a signature: after the
 // kernel verified it), changes when it is resumed and is removed. A loop
-// device changes when it is attached and again when it is detached.
+// device changes when it is attached and when it is detached, more than once
+// each.
 func blockUevents(ctx context.Context, t *testing.T, g *guest, name string, do func()) uevents {
 	t.Helper()
 	log := "/run/vm-manager-e2e/uevents-" + name
@@ -325,7 +363,7 @@ func blockUevents(ctx context.Context, t *testing.T, g *guest, name string, do f
 	}, 10*time.Second, 100*time.Millisecond, "the monitor prints the uevents up to the sentinel")
 
 	var u uevents
-	dm, loop := map[string]int{}, map[string]int{}
+	dm := map[string]int{}
 	for _, line := range strings.Split(out, "\n") {
 		m := ueventLine.FindStringSubmatch(strings.TrimSpace(line))
 		if m == nil || m[4] != "block" {
@@ -348,12 +386,7 @@ func blockUevents(ctx context.Context, t *testing.T, g *guest, name string, do f
 				u.dm[i].removed = at
 			}
 		case strings.HasPrefix(dev, "loop") && action == "change":
-			if i, seen := loop[dev]; seen && u.loop[i].removed < 0 {
-				u.loop[i].removed = at
-			} else {
-				loop[dev] = len(u.loop)
-				u.loop = append(u.loop, deviceUse{name: dev, added: at, resumed: -1, removed: -1})
-			}
+			u.loopChanges = append(u.loopChanges, at)
 		}
 	}
 	return u
