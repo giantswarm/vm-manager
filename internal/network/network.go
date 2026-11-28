@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,11 +24,6 @@ import (
 const (
 	// SocketName is the unix socket QEMU connects to, inside the network dir.
 	SocketName = "qemu.sock"
-	// netdevID is the QEMU netdev/device pairing id; one NIC per VM.
-	netdevID = "net0"
-	// reconnectMS is how fast QEMU re-dials the socket after vm-manager
-	// restarts.
-	reconnectMS = 1000
 	// mtu is the guest MTU announced over DHCP.
 	mtu = 1500
 	// loopback is what the host alias address translates to.
@@ -48,22 +42,6 @@ type Attachment struct {
 	IP   netip.Addr `json:"ip"`
 	// SocketPath is the network's QEMU unix socket.
 	SocketPath string `json:"socketPath"`
-}
-
-// QEMUArgs returns the -netdev/-device pair the runtime appends to the QEMU
-// command line. QEMU dials the socket as a client and re-dials it every
-// reconnect-ms while it is gone, so a vm-manager restart does not unplug the
-// NIC.
-func (a Attachment) QEMUArgs() []string {
-	return []string{
-		"-netdev", fmt.Sprintf("stream,id=%s,addr.type=unix,addr.path=%s,reconnect-ms=%d", netdevID, qemuEscape(a.SocketPath), reconnectMS),
-		"-device", fmt.Sprintf("virtio-net-pci,netdev=%s,mac=%s", netdevID, a.MAC),
-	}
-}
-
-// qemuEscape doubles commas, QEMU's option separator.
-func qemuEscape(s string) string {
-	return strings.ReplaceAll(s, ",", ",,")
 }
 
 // Lease is one VM's address on a network.

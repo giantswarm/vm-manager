@@ -119,6 +119,9 @@ type Harness struct {
 	// for CID.
 	Notify *qemu.NotifyListener
 	Ready  <-chan qemu.Notification
+	// Journal receives the guest's journal; each phase's goes to
+	// <name>-journal.log next to its console.
+	Journal *GuestJournal
 
 	tpmState string
 	tpms     *tpm.Manager
@@ -168,6 +171,11 @@ func New(t *testing.T) *Harness {
 	t.Cleanup(func() { _ = nl.Close() })
 	h.Notify = nl
 	h.Ready = nl.Subscribe(h.CID)
+
+	j, err := listenJournal(h.CID, log)
+	require.NoError(t, err, "vsock journal listener")
+	t.Cleanup(func() { _ = j.Close() })
+	h.Journal = j
 
 	t.Logf("e2e state dir %s, vsock cid %d, machine id %s, image %s %s", dir, h.CID, h.MachineID, image.Version, image.Dir)
 	return h
@@ -329,9 +337,10 @@ func (h *Harness) StartTPM(ctx context.Context) *tpm.Instance {
 }
 
 // Spec is the VM description shared by both phases: the target disk, user
-// networking, the vTPM, the firmware pair, the notify credential and the
-// machine ID. name selects the serial log (<name>.log) and QMP socket.
-// Callers add the phase's own credentials and, for PhaseInstall, NoReboot.
+// networking, the vTPM, the firmware pair, the notify and journal
+// credentials and the machine ID. name selects the serial log (<name>.log),
+// the journal (<name>-journal.log) and QMP socket. Callers add the phase's
+// own credentials and, for PhaseInstall, NoReboot.
 func (h *Harness) Spec(phase qemu.Phase, tp *tpm.Instance, name string) qemu.Spec {
 	spec := qemu.Spec{
 		ID:        "e2e-" + name,
@@ -362,6 +371,10 @@ func (h *Harness) Spec(phase qemu.Phase, tp *tpm.Instance, name string) qemu.Spe
 		SerialLog: filepath.Join(h.Dir, name+".log"),
 		QMPSocket: filepath.Join(h.Dir, name+".qmp"),
 	}
+	spec.Credentials[credentialJournalForward] = h.Journal.Credential()
+	for _, unit := range journalDebugUnits {
+		spec.Credentials[credentialUnitDropin+unit] = journalDebugDropin
+	}
 	if phase == qemu.PhaseInstall {
 		spec.UKI = h.Image.UKI
 		spec.Installer = h.Image.DDI
@@ -385,6 +398,7 @@ func (h *Harness) Start(ctx context.Context, spec qemu.Spec) *qemu.Instance {
 			drained = true
 		}
 	}
+	h.Journal.SetPath(journalPath(spec.SerialLog))
 	inst, err := h.rt.Start(ctx, spec)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { _ = inst.Kill() })
@@ -457,11 +471,16 @@ func (h *Harness) Console(inst *qemu.Instance) string {
 }
 
 // ConsoleTail is the last consoleTailLines lines of the serial log,
-// labelled, for failure messages.
+// labelled, for failure messages, and where the guest's journal is.
 func (h *Harness) ConsoleTail(inst *qemu.Instance) string {
 	h.t.Helper()
-	return fmt.Sprintf("--- last %d console lines of %s ---\n%s\n--- end console ---",
-		consoleTailLines, inst.Spec().SerialLog, tail(h.Console(inst), consoleTailLines))
+	return fmt.Sprintf("--- last %d console lines of %s ---\n%s\n--- end console; guest journal in %s ---",
+		consoleTailLines, inst.Spec().SerialLog, tail(h.Console(inst), consoleTailLines), journalPath(inst.Spec().SerialLog))
+}
+
+// journalPath is the guest journal file next to a serial log <name>.log.
+func journalPath(serialLog string) string {
+	return strings.TrimSuffix(serialLog, ".log") + "-journal.log"
 }
 
 // tail keeps the last n lines of s, without carriage returns.

@@ -67,7 +67,14 @@ referrers API, as production nodes do on gsoci. It needs `kubectl`, `helm` and `
 host, reaches gsoci from the host only, and raises `VM_MANAGER_BOOT_TIMEOUT` for its
 server because `READY=1` waits for the kubeadm unit.
 On failure the per-test state directory (consoles, TPM state, disks, the server log) is
-kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
+kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too. The tests
+that drive QEMU directly (`TestInstallBoot`, `TestInstallBootSystemdBoot`, `TestIPE`) also
+keep each boot's guest journal as `<phase>-journal.log` next to its console `<phase>.log`:
+the harness passes `journal.forward_to_socket` (journald.conf(5) `ForwardToSocket=`) with
+a vsock address it listens on and renders the export stream like `journalctl -o
+short-monotonic`, from the first second of the initrd, so a boot that never reaches ssh
+still explains itself. systemd-networkd and systemd-networkd-wait-online log at debug
+level there (`systemd.unit-dropin.*` credentials, systemd-debug-generator(8)).
 
 ## Layout
 
@@ -298,8 +305,8 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   `sysexts` with the sha256 per Kubernetes and CNI sysext, `golden.sha256`). A server in learn mode logs a warning
   at startup and reports learned PCRs on the VM.
 - **e2e leftovers.** `VM_MANAGER_E2E_KEEP=1 make e2e` keeps every test's state directory
-  (consoles, TPM state, disks, the server's log) and prints the path; without it only
-  failing tests keep theirs.
+  (consoles, guest journals, TPM state, disks, the server's log) and prints the path;
+  without it only failing tests keep theirs.
 - **A boot outside vm-manager.** `make -C images smoke-boot` (systemd-vmspawn, no IMDS:
   the IMDS, attestation and Kubernetes units skip themselves) and `PROFILE=debug` for
   root autologin on the console. Any firmware that boots the image needs its certificate in
@@ -399,8 +406,9 @@ summary lists the results and the `*_seconds=` budget lines.
 Rerun: `gh run rerun <id> --failed`, or `gh workflow run e2e.yml --ref <branch> -f suite=fast`
 (`-f image_run_id=<id>` to reuse a specific image) and `gh workflow run image.yml --ref <branch>`.
 Failures: `gh run view <id> --log-failed`, then the `e2e-logs-<suite>` artifact (`gh run download
-<id> -n e2e-logs-fast`) for the serial consoles (`<phase>.log`, `vms/<id>/console.log`) and the
-server logs of the failed test's `vmm-e2e-*` directory. A PR that conflicts with `main` gets no
+<id> -n e2e-logs-fast`) for the serial consoles (`<phase>.log`, `vms/<id>/console.log`), the
+guest journals (`<phase>-journal.log`) and the server logs of the failed test's `vmm-e2e-*`
+directory. A PR that conflicts with `main` gets no
 `pull_request` runs at all (GitHub cannot create its merge commit): rebase first.
 
 ## Testing against the agent platform (agentlab)
