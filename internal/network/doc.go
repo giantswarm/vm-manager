@@ -51,12 +51,14 @@
 //
 // # What the runtime passes to QEMU
 //
-// [Attachment.QEMUArgs] yields the two arguments the QEMU runtime appends:
+// The VM service turns an [Attachment] into the NIC of the VM's QEMU spec
+// (internal/runtime/qemu renders it):
 //
 //	-netdev stream,id=net0,addr.type=unix,addr.path=<state>/networks/<name>/qemu.sock,reconnect-ms=1000
-//	-device virtio-net-pci,netdev=net0,mac=02:xx:aa:bb:cc:dd
+//	-device virtio-net-pci,netdev=net0,mac=02:xx:aa:bb:cc:dd,status=off
 //
-// The guest sees a plain virtio NIC and configures it with DHCP; the reply
+// The guest sees a plain virtio NIC whose link is always up and configures it
+// with DHCP; the reply
 // carries the gateway as router and DNS server, the subnet mask, the MTU and
 // Spec.DNSSearchDomain. DNS names are resolved by the host's resolver.
 //

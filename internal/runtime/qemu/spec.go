@@ -80,6 +80,20 @@ const (
 	cmdlineExtraPrefix     = "io.systemd.stub.kernel-cmdline-extra="
 )
 
+// netDeviceOptions are what every virtio-net-pci device gets besides its
+// netdev and MAC. status=off withholds VIRTIO_NET_F_STATUS, the link state
+// the device reports: nothing in vm-manager changes a NIC's link (a stream
+// netdev that reconnects to a restarted vm-manager marks only its own side
+// down), and without the feature the guest's virtio_net raises the carrier
+// in probe and ndo_open. With it, the first open raises the carrier later,
+// from a config-change work item, and that races systemd-networkd's
+// RTM_GETLINK after it brings the link up: Linux answers GETLINK without
+// RTNL, so a reply filled before the carrier came up can arrive after the
+// carrier-up notification, networkd records a carrier loss no later message
+// corrects, the link never configures and the boot waits for
+// network-online.target.
+const netDeviceOptions = ",status=off"
+
 // virtioSerialMax is VIRTIO_BLK_ID_BYTES, the longest serial virtio-blk
 // reports to the guest.
 const virtioSerialMax = 20
@@ -249,7 +263,7 @@ func Command(spec Spec) ([]string, error) {
 	for _, n := range spec.Netdevs {
 		args = append(args,
 			"-netdev", n.Backend+",id="+n.ID,
-			"-device", "virtio-net-pci,netdev="+n.ID+",mac="+n.MAC,
+			"-device", "virtio-net-pci,netdev="+n.ID+",mac="+n.MAC+netDeviceOptions,
 		)
 	}
 	args = append(args, "-device", "vhost-vsock-pci,id=vsock0,guest-cid="+strconv.FormatUint(uint64(spec.VsockCID), 10))

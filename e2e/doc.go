@@ -27,4 +27,6 @@
 //
 // On failure the per-test state directory (serial consoles, TPM state, target
 // disk) is kept and its path printed; VM_MANAGER_E2E_KEEP=1 keeps it always.
+// The tests that drive QEMU directly also keep each boot's guest journal there
+// (<phase>-journal.log, see GuestJournal).
 package e2e

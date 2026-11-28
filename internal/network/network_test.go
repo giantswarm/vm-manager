@@ -144,17 +144,6 @@ func TestAttach(t *testing.T) {
 	assert.Equal(t, macFor("tiny", e.IP).String(), leases[1].MAC)
 }
 
-func TestAttachmentQEMUArgs(t *testing.T) {
-	a := Attachment{VMID: "vm-1", MAC: "02:6b:0a:2a:00:02", SocketPath: "/var/lib/vm-manager/networks/dev/qemu.sock"}
-	assert.Equal(t, []string{
-		"-netdev", "stream,id=net0,addr.type=unix,addr.path=/var/lib/vm-manager/networks/dev/qemu.sock,reconnect-ms=1000",
-		"-device", "virtio-net-pci,netdev=net0,mac=02:6b:0a:2a:00:02",
-	}, a.QEMUArgs())
-
-	a.SocketPath = "/tmp/a,b/qemu.sock"
-	assert.Contains(t, a.QEMUArgs()[1], "addr.path=/tmp/a,,b/qemu.sock", "commas are doubled for QEMU's option parser")
-}
-
 func TestRestore(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
