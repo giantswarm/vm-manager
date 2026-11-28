@@ -159,9 +159,12 @@ var serverLine = regexp.MustCompile(`(?m)^(\s*server:\s*)https://\S+`)
 // installation's key again in a run of its own (signing like a KMS key,
 // with new signature bytes) and one of the sandbox's tar compressed again
 // (another index and root hash); each shared layer is one snapshot on the
-// node. A pod of an image with a layer its signatures do not cover fails at
-// pull, naming the layer; a file of the running signed pod's layer is
-// refused as a kernel module, firmware and kexec image.
+// node. An image signed by a key the node does not trust, pulled first, fails
+// at pull naming its layer, which the kernel refused, and an image signed with
+// the Giant Swarm key that shares the layer then pulls and runs; no dm-verity
+// device of either pull stays. A pod of an image with a layer its signatures
+// do not cover fails at pull, naming the layer; a file of the running signed
+// pod's layer is refused as a kernel module, firmware and kexec image.
 func TestKubernetesCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTestTimeout)
 	defer cancel()
@@ -175,6 +178,10 @@ func TestKubernetesCluster(t *testing.T) {
 	giantSwarmKey := giantSwarmLayerKey(t, image)
 	installationCert := layercerttest.New(t, "vm-manager e2e installation layers")
 	installationKey := newLayerKey(t, []byte(installationCert.KeyPEM), []byte(installationCert.PEM)).kms()
+	// A key whose certificate no node trusts: neither the Giant Swarm key nor
+	// in layer_certificates.
+	untrustedCert := layercerttest.New(t, "vm-manager e2e untrusted layers")
+	untrustedKey := newLayerKey(t, []byte(untrustedCert.KeyPEM), []byte(untrustedCert.PEM))
 
 	t.Setenv("VM_MANAGER_BOOT_TIMEOUT", clusterBootTimeout.String())
 	// Attestation verifies by default; the shared image dir carries no golden
@@ -191,7 +198,7 @@ func TestKubernetesCluster(t *testing.T) {
 	cilium := renderCilium(ctx, t, helm, version)
 	reg := startLayerRegistry(t, dir)
 	mirrored := reg.mirrorSigned(ctx, t, clusterImages(t, version, cilium), giantSwarmKey)
-	loads := reg.buildWorkloads(ctx, t, mirrored[sandboxImage], giantSwarmKey, installationKey)
+	loads := reg.buildWorkloads(ctx, t, mirrored[sandboxImage], giantSwarmKey, installationKey, untrustedKey)
 
 	c := &cluster{t: t, m: m, key: testKey, version: version, layerCertificates: []string{installationCert.PEM}, files: []map[string]any{reg.hostsTOML()}}
 	t.Cleanup(c.teardown)

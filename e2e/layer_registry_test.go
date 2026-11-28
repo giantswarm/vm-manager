@@ -327,6 +327,31 @@ type workloads struct {
 	// referrer (the giant-swarm image's blobs) does not cover: unsignedLayer.
 	unsigned      string
 	unsignedLayer string
+	// untrustedFirst is an image signed by a key the nodes do not trust and
+	// one of signed that shares its layer.
+	untrustedFirst untrustedFirst
+}
+
+// untrustedFirst is an image signed by a key the nodes do not trust, with a
+// layer of its own, and an image signed with the Giant Swarm key that is that
+// image with a layer more, so it shares the layer. Pulled in that order on a
+// node that has neither, the kernel refuses the first image's signature of
+// the layer before it becomes a snapshot, and the second image unpacks the
+// layer with its own signature.
+type untrustedFirst struct {
+	// untrusted is the image signed by the untrusted key; untrustedText
+	// describes its signature of layer, untrustedSignature.
+	untrusted          string
+	untrustedSignature digest.Digest
+	untrustedText      string
+	// layer is the untrusted image's own layer, chainID its snapshot.
+	layer   string
+	chainID string
+	// trusted is the image signed with the Giant Swarm key, a pod of
+	// workloads.signed; trustedSignature is its signature of layer.
+	trusted          string
+	trustedSignature digest.Digest
+	trustedText      string
 }
 
 // sharedLayer is a layer two images bring with different signatures: one
@@ -354,8 +379,10 @@ type sharedLayer struct {
 //     like a KMS key, layerKey.kms);
 //   - recompressed: the sandbox's tar compressed again, signed with the
 //     Giant Swarm key: the same tar under another layer digest has another
-//     index and root hash, as an index built by another erofs-utils has.
-func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, sandboxSigned layersign.Signed, giantSwarm, installation layerKey) workloads {
+//     index and root hash, as an index built by another erofs-utils has;
+//   - after-refusal: the image of untrustedFirst signed with the Giant Swarm
+//     key, on top of untrusted-key, signed with the untrusted key.
+func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, sandboxSigned layersign.Signed, giantSwarm, installation, untrusted layerKey) workloads {
 	t.Helper()
 	sandbox, err := name.ParseReference(r.host+"/"+strings.TrimPrefix(sandboxImage, gsoci+"/"), name.Insecure)
 	require.NoError(t, err)
@@ -439,6 +466,21 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, sandbo
 	w.shared = append(w.shared, sharedLayer{name: "another index, another root hash", chainID: sandboxChain.String(),
 		signatures: map[digest.Digest]string{sandboxSig: sandboxText, recompressedSig: recompressedText}})
 
+	untrustedImage := r.pushWorkload(ctx, t, base, podUntrusted, "")
+	untrustedRef := gsociRepository + "/vm-manager-e2e:" + podUntrusted
+	untrustedSigned := r.sign(ctx, t, workloadRepository+":"+podUntrusted, untrusted)
+	_, afterSigned := push(podAfterRefusal, untrustedImage, "", giantSwarm)
+	untrustedLayer := layerDigests(untrustedImage)[1]
+	untrustedSig, untrustedRoot, untrustedText := signature(repo, untrustedRef, untrustedSigned, untrustedLayer, untrusted)
+	afterSig, afterRoot, afterText := signature(repo, w.signed[podAfterRefusal], afterSigned, untrustedLayer, giantSwarm)
+	require.NotEqual(t, untrustedSig, afterSig, "the untrusted key signs the layer differently")
+	require.Equal(t, untrustedRoot, afterRoot, "the same layer has the same root hash")
+	w.untrustedFirst = untrustedFirst{
+		untrusted: untrustedRef, untrustedSignature: untrustedSig, untrustedText: untrustedText,
+		layer: untrustedLayer.String(), chainID: identity.ChainID(diffIDs(untrustedImage)).String(),
+		trusted: w.signed[podAfterRefusal], trustedSignature: afterSig, trustedText: afterText,
+	}
+
 	unsigned := r.pushWorkload(ctx, t, gsImage, "unsigned-layer", "")
 	w.unsignedLayer = layerDigests(unsigned)[len(layerDigests(unsigned))-1].String()
 	raw, err := content.FetchAll(ctx, repo, gsSigned.Referrer)
@@ -462,6 +504,7 @@ func (r *layerRegistry) buildWorkloads(ctx context.Context, t *testing.T, sandbo
 		}
 	}
 	t.Logf("workload %s with layer %s outside its referrer", w.unsigned, w.unsignedLayer)
+	t.Logf("untrusted key first: snapshot %s\n  %s\n  %s", w.untrustedFirst.chainID, untrustedText, afterText)
 	return w
 }
 

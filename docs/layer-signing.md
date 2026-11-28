@@ -49,7 +49,10 @@ images with the same digest has the same root hash. The root hash depends on the
 *compressed* layer digest (through the index UUID): a mirror that recompresses a layer
 must sign it again. A node needs neither the same signature nor the same root hash for a
 layer images share: it keeps the layer as the first image unpacked it and runs the
-others on it ([images/README.md](../images/README.md#containerd)).
+others on it ([images/README.md](../images/README.md#containerd)). A layer is kept only
+after the node's kernel accepted its signature: an image signed by a key the node does
+not trust yet fails at pull, naming the layer, and leaves nothing that would break the
+images sharing it.
 
 ## Keys
 
