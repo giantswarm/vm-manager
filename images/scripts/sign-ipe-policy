@@ -1,37 +1,53 @@
 #!/usr/bin/env bash
-# Sign the IPE policy for the base image:
+# Generate and sign the IPE policy for the base image's initrd:
 #
-#   sign-ipe-policy <policy> <version> <keys> <tree>
+#   sign-ipe-policy <policy> <version> <roothash-file> <keys> <out>
 #
-# writes <tree>/etc/ipe/giantswarm-vm.p7b, which ExtraTrees= of
-# mkosi.images/base/mkosi.conf copies into the root file system. The policy's
-# @VERSION@ becomes the image version (IPE wants major.minor.rev). The
-# signature is the inline PKCS#7 the kernel's securityfs interface expects
-# (Documentation/admin-guide/LSM/ipe.rst), made with the verity key: the
-# kernel checks it against the platform keyring, where vm-manager's UEFI db
-# enrollment of keys/verity.crt puts the certificate. systemd names the
-# policy after the file, so the file stem is the policy_name.
+# The policy pins every operation but EXECUTE to the base root's verity root
+# hash, so it is made after a first mkosi run wrote <roothash-file> (the
+# .roothash split artifact) and before the second one builds the UKI. It
+# writes <out>/tree/usr/lib/vm-manager/ipe/<name>.p7b, which ExtraTrees= of
+# mkosi.initrd.conf/mkosi.conf copies into the initrd, and <out>/roothash, the
+# hash it pinned, which the Makefile compares with the second run's. The
+# policy's @VERSION@ becomes the image version (IPE wants major.minor.rev),
+# @ROOTHASH@ the root hash. The signature is the inline PKCS#7 the kernel's
+# securityfs interface expects (Documentation/admin-guide/LSM/ipe.rst), made
+# with the verity key: the kernel checks it against the platform keyring,
+# where vm-manager's UEFI db enrollment of keys/verity.crt puts the
+# certificate. systemd names the policy after the file, so the file stem is
+# the policy_name.
 set -euo pipefail
 
-policy="${1:?usage: sign-ipe-policy <policy> <version> <keys> <tree>}" version="${2:?version}" keys="${3:?keys dir}" tree="${4:?tree dir}"
+usage="usage: sign-ipe-policy <policy> <version> <roothash-file> <keys> <out>"
+policy="${1:?$usage}" version="${2:?version}" roothash_file="${3:?roothash file}" keys="${4:?keys dir}" out="${5:?out dir}"
 
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "sign-ipe-policy: version '$version' is not major.minor.rev, which IPE requires" >&2
+        exit 1
+fi
+roothash="$(tr -d '\n' <"$roothash_file")"
+if [[ ! "$roothash" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "sign-ipe-policy: $roothash_file holds '$roothash', not a sha256 root hash" >&2
         exit 1
 fi
 
 name="$(sed -n 's/^policy_name=\([^ ]*\) .*/\1/p' "$policy")"
 [[ -n "$name" ]] || { echo "sign-ipe-policy: no policy_name= header in $policy" >&2; exit 1; }
 
-out="$tree/etc/ipe/$name.p7b"
+p7b="$out/tree/usr/lib/vm-manager/ipe/$name.p7b"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-sed "s/@VERSION@/$version/" "$policy" >| "$tmp"
+sed -e "s/@VERSION@/$version/" -e "s/@ROOTHASH@/$roothash/g" "$policy" >| "$tmp"
+if /usr/bin/env grep -q '@[A-Z]*@' "$tmp"; then
+        echo "sign-ipe-policy: $policy has a placeholder left after substitution" >&2
+        exit 1
+fi
 
-mkdir -p "$(dirname "$out")"
+mkdir -p "$(dirname "$p7b")"
 openssl smime -sign -in "$tmp" -signer "$keys/verity.crt" -inkey "$keys/verity.key" \
-        -noattr -nodetach -nosmimecap -binary -outform der -out "$out"
+        -noattr -nodetach -nosmimecap -binary -outform der -out "$p7b"
 # The kernel parses exactly what was signed: prove the content round-trips.
-openssl smime -verify -noverify -inform der -in "$out" -binary 2>/dev/null | cmp -s - "$tmp" ||
-        { echo "sign-ipe-policy: $out does not carry the policy verbatim" >&2; exit 1; }
-echo "sign-ipe-policy: $out (policy $name, version $version)"
+openssl smime -verify -noverify -inform der -in "$p7b" -binary 2>/dev/null | cmp -s - "$tmp" ||
+        { echo "sign-ipe-policy: $p7b does not carry the policy verbatim" >&2; exit 1; }
+printf '%s\n' "$roothash" >| "$out/roothash"
+echo "sign-ipe-policy: $p7b (policy $name, version $version, root $roothash)"

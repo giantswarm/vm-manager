@@ -80,6 +80,10 @@ const (
 	// between the words).
 	consoleBootManager = `"Linux Boot Manager"`
 	consoleMultiUser   = "Multi-User System"
+	// READY=1 and SSH run ahead of the serial console: the guest's UART
+	// drains what PID 1 wrote to it on its own schedule, so a line the
+	// boot already passed may reach get_vm_console seconds later.
+	consoleWithin = 30 * time.Second
 )
 
 // TestNetworkIMDS drives a real vm-manager serve process through its MCP
@@ -161,6 +165,7 @@ func TestNetworkIMDS(t *testing.T) {
 	// The console is the installed boot's: the firmware picked the boot
 	// manager entry bootctl installed (the installer phase is a -kernel
 	// direct boot) and the boot reached multi-user before READY=1.
+	waitConsole(ctx, t, m, v.ID, consoleWithin, consoleBootManager, consoleMultiUser)
 	var console api.ConsoleResponse
 	m.call(ctx, api.ToolGetVMConsole, map[string]any{"id": v.ID, "lines": 10000}, &console)
 	assert.Equal(t, v.ID, console.ID)

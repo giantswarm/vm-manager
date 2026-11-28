@@ -18,6 +18,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/attest"
+	"github.com/giantswarm/vm-manager/internal/layercert/layercerttest"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -28,6 +29,7 @@ const (
 	attestLearnVM  = "attest-learn-e2e"
 	attestGoldenVM = "attest-golden-e2e"
 	attestTamperVM = "attest-tamper-e2e"
+	attestLayerVM  = "attest-layers-e2e"
 	// attestUnit is the agent's unit in the initrd and in the system.
 	attestUnit = "vm-agent-attest.service"
 	// policyFile is the image policy the server reads next to the artifacts.
@@ -100,11 +102,10 @@ func TestAttestation(t *testing.T) {
 	require.FileExists(t, filepath.Join(imageDir, policyFile), "run `make -C images verify`")
 	userData := ignitionConfig(t)
 
-	create := func(t *testing.T, m *mcpClient, name string, waitFor vm.WaitFor) vm.VM {
+	create := func(t *testing.T, m *mcpClient, name string, waitFor vm.WaitFor, layerCertificates ...string) vm.VM {
 		t.Helper()
 		started := time.Now()
-		var v vm.VM
-		m.call(ctx, api.ToolCreateVM, map[string]any{
+		args := map[string]any{
 			"name":                name,
 			"hostname":            name,
 			"network":             attestNetwork,
@@ -112,7 +113,12 @@ func TestAttestation(t *testing.T) {
 			"user_data":           userData,
 			"require_attestation": true,
 			"wait_for":            string(waitFor),
-		}, &v)
+		}
+		if len(layerCertificates) > 0 {
+			args["layer_certificates"] = layerCertificates
+		}
+		var v vm.VM
+		m.call(ctx, api.ToolCreateVM, args, &v)
 		t.Logf("create_vm_seconds=%.1f (%s, wait_for %s): id %s state %s kubernetes %q", time.Since(started).Seconds(), name, waitFor, v.ID, v.State, v.KubernetesVersion)
 		return v
 	}
@@ -180,6 +186,37 @@ func TestAttestation(t *testing.T) {
 		assert.Empty(t, att.Ready.Learned, "golden values present: nothing to learn at ready")
 		assert.NotContains(t, att.Initrd.Message, learnedNote)
 		remove(t, m, v.ID)
+	})
+
+	// The installation's layer certificates (images/README.md, Layer
+	// certificates): the initrd enrolls them next to the image's own into the
+	// sealed .dm-verity keyring and measures them into PCR 15, the ready
+	// quote records them, and a node that measures one more is rejected.
+	t.Run("layer certificates: enrolled, sealed and measured; another measured one is rejected", func(t *testing.T) {
+		certs := []layercerttest.Cert{layercerttest.New(t, "e2e layer certificate 1"), layercerttest.New(t, "e2e layer certificate 2")}
+		v := create(t, m, attestLayerVM, vm.WaitReady, certs[0].PEM, certs[1].PEM)
+		require.Equal(t, vm.StateReady, v.State, "create_vm with layer_certificates: lastError %q\n%s", v.LastError, srv.logTail())
+		t.Cleanup(func() { remove(t, m, v.ID) })
+		served := []string{certs[0].Digest, certs[1].Digest}
+		assertVerified(t, getAttestation(ctx, t, m, v.ID), served...)
+
+		g := &guest{m: m, id: v.ID}
+		g.waitSSH(ctx)
+		assertLayerKeyring(t, func(command string) string { return g.sh(ctx, command) },
+			gsLayerCertificateCN, "e2e layer certificate 1", "e2e layer certificate 2")
+
+		other := layercerttest.New(t, "e2e layer certificate not served")
+		res, err := g.run(ctx, "/usr/lib/systemd/systemd-pcrextend --pcr=15 layer-certificate:"+other.Digest+
+			" && vm-agent attest --stage=ready --timeout=60s")
+		require.NoError(t, err)
+		t.Logf("vm-agent attest --stage=ready after measuring %s from the root: exit %d\n%s%s", other.Digest, res.ExitCode, res.Stdout, res.Stderr)
+		assert.Equal(t, 2, res.ExitCode, "the agent reports the verifier's rejection")
+		att := getAttestation(ctx, t, m, v.ID)
+		require.NotNil(t, att.Ready)
+		t.Logf("ready verdict: %s", att.Ready.Message)
+		assert.False(t, att.Ready.Verified, "a node whose certificates differ from those served is rejected")
+		assert.Contains(t, att.Ready.Message, "not served "+other.Digest, "the rejection names the extra digest")
+		assert.Equal(t, append(served, other.Digest), att.Ready.LayerCertificates, "the verdict records what the node measured")
 	})
 
 	tamperedOVMF, tamperErr := findTamperedOVMF()
@@ -258,8 +295,9 @@ func getAttestation(ctx context.Context, t *testing.T, m *mcpClient, id string) 
 
 // assertVerified checks a ready VM's attestation: both stages verified by
 // the same key, each verdict naming the key and the PCR 11 phase path of its
-// stage, user-data released, the golden PCRs quoted at ready.
-func assertVerified(t *testing.T, att vm.Attestation) {
+// stage, user-data released, the golden PCRs and PCR 15 quoted at ready, and
+// the layer certificates measured into PCR 15 the served ones (digests).
+func assertVerified(t *testing.T, att vm.Attestation, layerCertificates ...string) {
 	t.Helper()
 	require.NotNil(t, att.Initrd, "initrd stage recorded")
 	require.NotNil(t, att.Ready, "ready stage recorded")
@@ -276,6 +314,12 @@ func assertVerified(t *testing.T, att vm.Attestation) {
 	assert.True(t, att.Ready.At.After(att.Initrd.At), "the ready quote follows the initrd quote")
 	for _, index := range attest.GoldenIndexes {
 		assert.Len(t, att.Ready.PCRs[index], 64, "ready quote carries PCR %d", index)
+	}
+	assert.Len(t, att.Ready.PCRs[attest.PCRSystemIdentity], 64, "the image measures layer certificates (policy pcr15): the ready quote carries PCR 15")
+	if len(layerCertificates) == 0 {
+		assert.Empty(t, att.Ready.LayerCertificates, "no layer certificates served, none measured")
+	} else {
+		assert.Equal(t, layerCertificates, att.Ready.LayerCertificates, "the served layer certificates measured, in order")
 	}
 }
 

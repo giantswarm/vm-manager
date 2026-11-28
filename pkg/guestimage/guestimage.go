@@ -34,9 +34,8 @@ import (
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
-	"oras.land/oras-go/v2/registry/remote/auth"
-	"oras.land/oras-go/v2/registry/remote/credentials"
-	"oras.land/oras-go/v2/registry/remote/retry"
+
+	"github.com/giantswarm/vm-manager/internal/registry"
 )
 
 const (
@@ -350,41 +349,7 @@ func fileExists(path string) bool {
 }
 
 func repository(reference string, opts Options) (*remote.Repository, error) {
-	repo, err := remote.NewRepository(reference)
-	if err != nil {
-		return nil, fmt.Errorf("reference %q: %w", reference, err)
-	}
-	repo.PlainHTTP = opts.PlainHTTP
-	client := &auth.Client{Client: retry.DefaultClient, Cache: auth.NewCache()}
-	if store := dockerCredentials(); store != nil {
-		client.Credential = credentials.Credential(store)
-	}
-	repo.Client = client
-	return repo, nil
-}
-
-// dockerCredentials returns the Docker config credential store when a config
-// file exists ($DOCKER_CONFIG/config.json or ~/.docker/config.json), else nil
-// for anonymous access — the store is never created, so a read-only root
-// file system is fine.
-func dockerCredentials() credentials.Store {
-	configDir := os.Getenv("DOCKER_CONFIG")
-	if configDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		configDir = filepath.Join(home, ".docker")
-	}
-	path := filepath.Join(configDir, "config.json")
-	if !fileExists(path) {
-		return nil
-	}
-	store, err := credentials.NewStore(path, credentials.StoreOptions{})
-	if err != nil {
-		return nil
-	}
-	return store
+	return registry.Repository(reference, opts.PlainHTTP)
 }
 
 func (o Options) logger() *slog.Logger {

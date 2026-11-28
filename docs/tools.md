@@ -68,6 +68,10 @@ It allocates a disk on the storage provider, a vTPM, a network lease and a vsock
 ```json
 {
   "properties": {
+    "cni_version": {
+      "description": "CNI sysext \"cilium-<release>\" served as /cni-version, the only CNI plugins besides the reference ones; default: the newest cilium. See get_image",
+      "type": "string"
+    },
     "cpus": {
       "description": "Virtual CPUs, default 2",
       "type": "number"
@@ -87,6 +91,13 @@ It allocates a disk on the storage provider, a vTPM, a network lease and a vsock
     "kubernetes_version": {
       "description": "Kubernetes sysext version served as /kubernetes-version; default: the newest the image offers. See get_image",
       "type": "string"
+    },
+    "layer_certificates": {
+      "description": "Installation layer certificates, PEM X.509, at most 16; served in order as /layer-certificates, which the ready attestation must measure exactly",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "memory_mib": {
       "description": "Memory in MiB, default 2048, at least 256",
@@ -265,7 +276,7 @@ Also the hostname, kernel, CPUs and memory; access to /dev/kvm and /dev/vhost-vs
 ## `get_image`
 
 ```text
-Describe one VM image: its artifacts, the Kubernetes versions it offers as a sysext and its PCR policy.
+Describe one VM image: its artifacts, the Kubernetes and CNI versions it offers as sysexts and its PCR policy.
 
 list_images has the references.
 ```

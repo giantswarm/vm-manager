@@ -184,6 +184,7 @@ func assertIgnitionApplied(ctx context.Context, t *testing.T, g *guest) {
 // unit survived the reboot.
 func assertIgnitionIdle(ctx context.Context, t *testing.T, m *mcpClient, id string) {
 	t.Helper()
+	waitConsole(ctx, t, m, id, consoleWithin, "Ignition Complete", consoleMultiUser)
 	var console api.ConsoleResponse
 	m.call(ctx, api.ToolGetVMConsole, map[string]any{"id": id, "lines": 10000}, &console)
 	assert.Contains(t, console.Console, "Ignition Complete", "a later boot still reaches ignition-complete.target; last lines:\n%s", tail(console.Console, 20))

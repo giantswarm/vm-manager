@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,13 +30,16 @@ const (
 // vm-manager does, and proves the integrity policy (images/README.md, IPE):
 // the kernel trusts the certificate (platform keyring), opened the root's
 // verity device with its signature, and PID 1 loaded and activated the
-// signed policy in enforce mode; a copy of an image binary outside the
+// signed policy the initrd handed it in /run/ipe, in enforce mode, with every
+// operation but EXECUTE pinned to this image's root hash; the initrd sealed the
+// .dm-verity keyring with the image's layer certificate, kexec is off and
+// modules must be signed (assertLayerKeyring); a copy of an image binary outside the
 // verity root does not execute, from the var partition, the /etc overlay,
 // /run or /tmp alike; nobody holds CAP_MAC_ADMIN, so root can neither switch
 // enforcement off nor load a policy. Then it plants what would undo IPE on
-// the next boot (the policy hidden, a manager drop-in restoring
-// CAP_MAC_ADMIN), reboots and finds both dropped by the initrd, the policy
-// active and the bounding set unchanged; the clean shutdown in between runs
+// the next boot (a mask in /etc/ipe hiding the initrd's policy, a manager
+// drop-in restoring CAP_MAC_ADMIN), reboots and finds both dropped by the
+// initrd, the policy active and the bounding set unchanged; the clean shutdown in between runs
 // systemd-shutdown from the exitrd, which the policy must allow.
 func TestIPE(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -58,9 +63,20 @@ func TestIPE(t *testing.T) {
 	assert.Equal(t, "1", sh("cat "+ipePolicyDir+"/active"), "policy %s active\n%s", ipePolicy, h.ConsoleTail(inst))
 	assert.Equal(t, h.Image.Version, sh("cat "+ipePolicyDir+"/version"), "policy version")
 	assert.Equal(t, "1", sh("cat "+ipeFS+"/enforce"), "IPE enforces")
+	roothash, err := os.ReadFile(filepath.Join(h.Image.Dir, imageID+"_"+h.Image.Version+".roothash"))
+	require.NoError(t, err)
+	policy := sh("cat " + ipePolicyDir + "/policy")
+	for _, op := range []string{"KMODULE", "FIRMWARE", "KEXEC_IMAGE", "KEXEC_INITRAMFS", "POLICY", "X509_CERT"} {
+		assert.Contains(t, policy, "op="+op+" dmverity_roothash=sha256:"+strings.TrimSpace(string(roothash))+" action=ALLOW", "%s pinned to the root", op)
+	}
+	assert.Equal(t, ipePolicy+".p7b", sh("ls /run/ipe"), "the initrd's policy, the only one in /run/ipe")
+	assert.Equal(t, "none", sh("test -e /etc/ipe || echo none"), "the root carries no policy in /etc/ipe")
 	t.Logf("platform keyring:\n%s", sh("keyctl show %:.platform"))
 	assert.Contains(t, sh("keyctl show %:.platform"), "asymmetric", "the image certificate on the platform keyring")
 	assert.Contains(t, sh("dmsetup table root"), "root_hash_sig_key_desc", "the root's verity device carries its signature, verified by the kernel")
+	// No IMDS (systemd.imds=no): the initrd enrolled the image's Giant Swarm
+	// layer certificate alone and sealed the keyring.
+	assertLayerKeyring(t, sh, gsLayerCertificateCN)
 
 	// Nothing outside the signed dm-verity root runs, from any writable file
 	// system the guest has.
@@ -82,7 +98,7 @@ func TestIPE(t *testing.T) {
 	// for root.
 	assertNoMACAdmin(t, sh("grep ^CapBnd: /proc/1/status /proc/self/status"))
 	assert.Contains(t, sh("{ echo 0 > "+ipeFS+"/enforce; } 2>&1 || true"), "Operation not permitted", "switching enforcement off")
-	assert.Contains(t, sh("{ cat /etc/ipe/"+ipePolicy+".p7b > "+ipeFS+"/new_policy; } 2>&1 || true"), "Operation not permitted", "loading a policy")
+	assert.Contains(t, sh("{ cat /run/ipe/"+ipePolicy+".p7b > "+ipeFS+"/new_policy; } 2>&1 || true"), "Operation not permitted", "loading a policy")
 	assert.Equal(t, "1", sh("cat "+ipeFS+"/enforce"), "IPE still enforces")
 
 	// The processes the kernel starts itself do not hold it either: a
@@ -101,14 +117,16 @@ func TestIPE(t *testing.T) {
 	assert.Equal(t, "1", sh("cat "+ipeFS+"/enforce"), "IPE still enforces after the helper")
 	assert.Empty(t, unexpectedFailures(sh("systemctl --failed --no-legend --plain")), "failed units\n%s", h.ConsoleTail(inst))
 
-	// What root could leave in /etc for the next boot.
-	sh("rm /etc/ipe/" + ipePolicy + ".p7b && mkdir -p /etc/systemd/system.conf.d && " +
+	// What root could leave in /etc for the next boot: PID 1 reads /etc/ipe
+	// before /run/ipe, so a symlink to /dev/null would mask the policy.
+	sh("mkdir -p /etc/ipe && ln -s /dev/null /etc/ipe/" + ipePolicy + ".p7b && mkdir -p /etc/systemd/system.conf.d && " +
 		"printf '[Manager]\\nCapabilityBoundingSet=\\nCapabilityBoundingSet=~\\n' > /etc/systemd/system.conf.d/99-ipe-e2e.conf")
 	stopInstalled(ctx, t, h, inst)
 
 	inst = bootInstalled(ctx, t, h, "reboot")
 	assert.Equal(t, "1", sh("cat "+ipePolicyDir+"/active"), "policy active after a boot that hid it\n%s", h.ConsoleTail(inst))
-	assert.Equal(t, "present", sh("test -s /etc/ipe/"+ipePolicy+".p7b && echo present"), "the image's policy is back in /etc/ipe")
+	assert.Equal(t, "dropped", sh("test -e /etc/ipe || echo dropped"), "the planted mask in /etc/ipe")
+	assert.Equal(t, "present", sh("test -s /run/ipe/"+ipePolicy+".p7b && echo present"), "the initrd's policy in /run/ipe")
 	assert.Equal(t, "dropped", sh("test -e /etc/systemd/system.conf.d/99-ipe-e2e.conf || echo dropped"), "the planted manager drop-in")
 	assertNoMACAdmin(t, sh("grep ^CapBnd: /proc/1/status"))
 	assert.Contains(t, sh("journalctl -b -o cat --no-pager -u persistent-etc.service"), "persistent-etc: /etc/ipe is the image's", "the initrd reported the dropped override")

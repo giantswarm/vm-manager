@@ -1,9 +1,63 @@
 # containerd configuration of the kubernetes sysext, loaded through
 # containerd.service.d/10-vm-manager.conf. Only deviations from
-# `containerd config default` of the shipped containerd (2.3, config version 4)
-# are listed; the default sandbox image (registry.k8s.io/pause:3.10.2) is the
-# one kubeadm 1.36 expects.
+# `containerd config default` of the shipped containerd (the Giant Swarm line,
+# 2.4, config version 4) are listed.
 version = 4
+
+# Image layers run from signed dm-verity devices only (images/README.md,
+# "containerd"). The CRI unpacks into the EROFS snapshotter; the EROFS differ
+# writes each layer as its EROFS tar index followed by the layer's
+# uncompressed tar. The index, the dm-verity hash tree and the PKCS#7
+# signature of its root hash come from the image's
+# application/vnd.containerd.erofs.dmverity.v1 referrer, fetched with the
+# pull's own resolver on both CRI pull paths. A pull fails
+# for a layer without a signed referrer, naming it, and for data that does
+# not match the signed root hash; native EROFS layers are refused. The node
+# runs no mkfs.erofs. The kernel checks the signature before a layer becomes
+# a snapshot (the pull fails for one it refuses, naming the layer) and when it
+# opens a layer's dm-verity device for a mount, and the IPE policy executes
+# from signed devices only.
+[plugins.'io.containerd.cri.v1.images']
+  snapshotter = 'erofs'
+
+  # Per-registry hosts.toml files (mirrors, a plain-HTTP registry), written
+  # to /etc at boot.
+  [plugins.'io.containerd.cri.v1.images'.registry]
+    config_path = '/etc/containerd/certs.d'
+
+  # The sandbox image from gsoci, where Giant Swarm publishes it with signed
+  # layers, instead of the unsigned registry.k8s.io/pause; the release
+  # kubeadm 1.36 expects.
+  [plugins.'io.containerd.cri.v1.images'.pinned_images]
+    sandbox = 'gsoci.azurecr.io/giantswarm/pause:3.10.2'
+
+[plugins.'io.containerd.differ.v1.erofs']
+  enable_tar_index = true
+  enable_dmverity = true
+  enable_dmverity_referrers = true
+
+[plugins.'io.containerd.snapshotter.v1.erofs']
+  dmverity_mode = 'on'
+  enable_dmverity_referrers = true
+
+# The EROFS differ applies layers wherever the diff service picks one (the
+# CRI's local pull path), walking only for media types it does not handle;
+# the snapshotter mounts no layer without its signed dm-verity metadata,
+# whatever applied it.
+[plugins.'io.containerd.service.v1.diff-service']
+  default = ['erofs', 'walking']
+
+# The transfer service (the CRI's default pull path) unpacks linux/amd64
+# images into the EROFS snapshotter with the EROFS differ, and only there:
+# this replaces the default list, whose overlayfs entry would unpack without
+# dm-verity.
+[plugins.'io.containerd.transfer.v1.local']
+  config_path = '/etc/containerd/certs.d'
+
+  [[plugins.'io.containerd.transfer.v1.local'.unpack_config]]
+    platform = 'linux/amd64'
+    snapshotter = 'erofs'
+    differ = 'erofs'
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd]
   default_runtime_name = 'runc'
@@ -17,8 +71,10 @@ version = 4
       SystemdCgroup = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  # First match wins: plugins a CNI DaemonSet installs into /opt/cni/bin
-  # (writable per boot, systemd.volatile=overlay) take precedence over the
-  # reference plugins shipped in this extension.
-  bin_dirs = ['/opt/cni/bin', '/usr/lib/cni']
+  # Only directories inside sysexts: /usr/lib/cni holds the reference plugins
+  # of this extension and the plugins of the VM's CNI sysext (cni_<cni>-
+  # <release>.raw, /cni-version), merged into one directory by systemd-sysext.
+  # /opt/cni/bin is not searched: IPE executes nothing from /opt, and a plugin
+  # a CNI DaemonSet still copies there is ignored.
+  bin_dirs = ['/usr/lib/cni']
   conf_dir = '/etc/cni/net.d'

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Post-installation for the cni sysext. $BUILDROOT is the merged overlay view
+# (base tree below, this image's changes on top); only /usr and /opt of the
+# upper layer end up in the extension.
+set -euo pipefail
+
+# The staged tree must be the release the image version names: refuse an
+# extension whose name lies about its content (a tree left by another
+# CNI_VERSION, or none at all).
+shopt -s nullglob
+plugins=("$BUILDROOT"/usr/lib/cni/*)
+[[ ${#plugins[@]} -gt 0 ]] || { echo "cni: no plugins in /usr/lib/cni; build through make -C images cni (fetch-cni-plugins stages build/cni/tree)" >&2; exit 1; }
+for p in "${plugins[@]}"; do
+        [[ -x "$p" ]] || { echo "cni: ${p#"$BUILDROOT"} is not executable" >&2; exit 1; }
+done

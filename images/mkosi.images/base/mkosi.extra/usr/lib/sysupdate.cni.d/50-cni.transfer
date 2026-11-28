@@ -1,0 +1,22 @@
+# CNI sysext, one per CNI release, pulled as a separate sysupdate component by
+# vm-kubernetes.service (/usr/lib/vm-manager/kubernetes) right after the
+# Kubernetes one:
+#   systemd-sysupdate --component=cni update <cni>-<release>
+# with the version from the IMDS key /cni-version; the directory is served
+# unfiltered. SHA256SUMS.gpg is verified against
+# /etc/systemd/import-pubring.pgp. As for kubernetes, the unit removes
+# superseded cni_*.raw itself so that exactly one CNI release is merged.
+[Transfer]
+Verify=yes
+
+[Source]
+Type=url-file
+Path=http://169.254.169.254/giantswarm/v1/sysupdate/cni/
+MatchPattern=cni_@v.raw
+
+[Target]
+Type=regular-file
+Path=/var/lib/extensions
+MatchPattern=cni_@v.raw
+Mode=0644
+InstancesMax=2

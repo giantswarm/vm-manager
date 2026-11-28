@@ -1,4 +1,4 @@
-# images/ — giantswarm-vm-base and the kubernetes sysext
+# images/ — giantswarm-vm-base, the kubernetes and the cni sysexts
 
 mkosi 27 project that builds the guest image described in
 [docs/design.md](../docs/design.md) ("Guest image", "Boot flow"): Arch Linux,
@@ -10,9 +10,10 @@ the whole boot (see [IPE](#ipe)).
 Everything runs unprivileged (mkosi's own sandbox and user namespaces), no sudo anywhere.
 
 ```
-make -C images                                 # keys, base image + kubernetes sysext (one mkosi run), verify
+make -C images                                 # keys, base image + kubernetes and cni sysexts (two mkosi runs, see IPE), verify
 make -C images keys base verify-base smoke-boot  # base-only cycle (~5 min cold, ~1 min warm)
 make -C images kubernetes verify-kubernetes    # sysext only, base tree reused (~20 s warm)
+make -C images cni verify-cni                  # CNI sysext only (CNI_VERSION), base tree reused
 make -C images PROFILE=debug base smoke-boot   # root autologin + empty root password
 make -C images clean                           # drop build/, keep keys/
 ```
@@ -28,8 +29,10 @@ make -C images clean                           # drop build/, keep keys/
 | `mkosi.initrd.conf/` | additions to mkosi's default initrd (`InitrdProfiles=network`): the giantswarm hwdb record compiled into the initrd's `hwdb.bin`, a `systemd-repart.service` drop-in, `persistent-etc.service` with its script `usr/lib/vm-manager/persistent-etc` (see [Persistent state](#persistent-state)), the Ignition binary (`ExtraTrees=../build/ignition/tree`) and the `ignition-*` units, see [Ignition](#ignition) |
 | `mkosi.profiles/debug/` | `Autologin=yes`, `RootPassword=hashed:` (unlocked, empty) for local iteration; the default build has neither |
 | `mkosi.version` | `ImageVersion=` (0.1.0). Bump it per release; sysupdate orders versions with `strverscmp`. It is the IPE policy's version too |
-| `ipe/giantswarm-vm.policy` | the IPE policy, signed by `make ipe` into `build/ipe/tree/etc/ipe/giantswarm-vm.p7b` for the base tree (see [IPE](#ipe)) |
-| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy, with the verity key), `verify` (base), `verify-kubernetes` (every published version), `smoke-boot` |
+| `ipe/giantswarm-vm.policy` | the IPE policy, generated for the root's verity root hash and signed between the two mkosi runs of `make base`/`images` into `build/ipe/tree/usr/lib/vm-manager/ipe/giantswarm-vm.p7b` for the initrd (see [IPE](#ipe)) |
+| `scripts/` | `gen-keys`, `build-ignition` (pinned upstream tag into `build/ignition/`), `fetch-kubernetes-packages` (one release's kubeadm/kubelet/kubectl from the Arch Linux Archive into `build/pkgs/<kv>/`, signatures checked), `hwdb-update` (mkosi postinst), `publish-sysupdate <component>` (accumulates versions), `sign-ipe-policy` (the IPE policy for a root hash, with the verity key), `fetch-containerd` (the pinned containerd release of the Giant Swarm line, digest-checked, into `build/containerd/tree/`), `fetch-cni-plugins` (one CNI release's plugins, exported by digest from the image its `cni/<name>` entry pins, staged with `cni.extra/<name>/` into `build/cni/tree/`), `build-e2e-sysext` (the e2e tests' signed firmware sysext into `build/e2e/`), `verify` (base), `verify-sysext <component>` (every published version of `kubernetes` or `cni`), `smoke-boot` |
+| `cni/` | one entry per CNI (`cilium`): the pinned release, image and digest the cni sysext's plugins come from, see [CNI sysext](#cni-sysext) |
+| `cni.extra/` | per CNI, the files the cni sysext adds to its plugins (`cilium`: the sysctl drop-in of `cilium-sysctlfix`), see [Cilium](#cilium) |
 | `keys/` (git-ignored) | development signing keys, see below |
 | `build/` (git-ignored) | outputs |
 
@@ -37,7 +40,8 @@ Make targets: `images` (one `mkosi --dependency=kubernetes build` for base tree,
 and disk image), `base` (plain `mkosi build`: base tree and disk image), `kubernetes`
 (`mkosi --format=none --bootable=no --dependency=kubernetes build`: sysext on the
 existing base tree, without `--force`, which would delete the disk image outputs of the
-skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot`, `clean`.
+skipped main image), `cni` / `cni-all` / `cni-<version>` (the same for `CNI_VERSIONS`),
+`verify` = `verify-base` + `verify-kubernetes` + `verify-cni`, `smoke-boot`, `clean`.
 
 ## What is built
 
@@ -53,8 +57,9 @@ skipped main image), `verify` = `verify-base` + `verify-kubernetes`, `smoke-boot
 | `build/giantswarm-vm-base_<v>.root-x86-64{,-verity,-verity-sig}.raw` | split partitions (`SplitArtifacts=partitions`) |
 | `build/giantswarm-vm-base_<v>.repart.d/` | the repart definitions that were used |
 | `build/sysupdate/base/` | what vm-manager serves at `.../sysupdate/base/`: `<id>_<v>_<root-partuuid>.root.raw`, `<id>_<v>_<verity-partuuid>.verity.raw`, `<id>_<v>.verity-sig.raw`, `<id>_<v>.efi`, `SHA256SUMS`, `SHA256SUMS.gpg` |
-| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}}`; `make verify-kubernetes` adds `pcr13: {<kubernetes version>: hex}` for every published version (and drops entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with `pcr13[<version>]` or golden 13 |
+| `build/policy.json` | written by `make verify-base`: `{image_id, image_version, uki, roothash, partitions, pcr11: {phase_path: hex}, pcr15: "layer-certificates"}`, where `pcr15` declares that the initrd measures the installation layer certificates into PCR 15, so vm-manager requires PCR 15 in the ready quote; `make verify-kubernetes` and `make verify-cni` add `sysexts: {kubernetes: {<kv>: <sha256 of kubernetes_<kv>.raw>}, cni: {<cni>-<release>: <sha256 of cni_<cni>-<release>.raw>}}` for every published version (and drop entries of versions no longer in `SHA256SUMS`); `vm-manager image golden` adds `golden: {sha256: {"0": hex, "2": hex, "3": hex, "4": hex, "6": hex, "7": hex, "13": hex}}` (the golden PCRs of a known-good boot; PCR 1 and 5 differ per VM, see [Attestation](#attestation)), which a re-run of `make verify-base` keeps for the same image version. vm-manager's attestation verifier (`internal/attest`) compares PCR 11 with `pcr11[<phase path>]`, PCRs 0, 2-4, 6, 7 with `golden` and, at the ready stage, PCR 13 with the value it computes from the `sysexts` entries of the VM's Kubernetes and CNI versions (see [PCR 13](#pcr-13)) or golden 13 |
 | `build/base/` | the OS tree (input for the main image and for the sysext) |
+| `build/e2e/ipe-e2e.raw` | `make images` or `make e2e-sysext` (`scripts/build-e2e-sysext`): the e2e tests' sysext, `/usr/lib/firmware/regulatory.db` (a placeholder the base root lacks) signed with the verity key, for the IPE firmware proof; neither served nor pushed |
 | `build/ignition/` | `make ignition`: `tree/usr/bin/ignition` (copied into the initrd), `version`, `stamp-<tag>` |
 
 `make kubernetes` (one version, `KUBERNETES_VERSION`), `make kubernetes-all` (every version of
@@ -149,9 +154,9 @@ cache, `make images verify` (everything, warm) ~30 s.
   `vm-kubernetes.service`, `vm-report-upload.timer`, and disables
   `systemd-sysupdate*.timer`, `systemd-homed`,
   `machines.target`. `systemd-pcrphase*` are the systemd defaults.
-- `/etc/ipe/giantswarm-vm.p7b`, the signed IPE policy PID 1 loads, and
-  `system.conf.d/50-vm-manager-ipe.conf`, the bounding set without `CAP_MAC_ADMIN` that
-  locks it (see [IPE](#ipe)).
+- `system.conf.d/50-vm-manager-ipe.conf`, the bounding set without `CAP_MAC_ADMIN` that
+  locks the IPE policy, which the initrd carries (see [IPE](#ipe)); the root has no
+  `/etc/ipe`.
 - Kernel command line: `console=ttyS0,115200 systemd.imds.import=yes systemd.firstboot=off
   lsm=landlock,lockdown,yama,integrity,ipe,bpf systemd.verity_root_options=root-hash-signature=auto`
   plus `roothash=<hash>` added by mkosi.
@@ -252,7 +257,7 @@ Two units of the same name, `vm-agent-attest.service`, one per stage:
 | Where | Ordering | Runs |
 |---|---|---|
 | initrd (`mkosi.initrd.conf/mkosi.extra`) | `initrd.target.wants/`; `After=basic.target network-online.target systemd-imds-early-network.service systemd-imds-import.service tpm2.target systemd-tpm2-setup-early.service systemd-pcrphase-initrd.service`, `Before=ignition-fetch.service ignition-complete.target`; `ignition-fetch.service.d/10-vm-agent-attest.conf` adds `Wants=`+`After=vm-agent-attest.service` to the fetch stage | `vm-agent attest --stage=initrd --timeout=90s`: nonce, quote of PCRs 0-7 and 11, posted with the firmware and userspace event logs. Every installed boot, not only the first: vm-manager gates user-data again on every boot |
-| root (`mkosi.images/base/mkosi.extra`, preset-enabled) | `WantedBy=multi-user.target`, `Before=multi-user.target`; `After=network-online.target systemd-imds-import.service systemd-tpm2-setup.service vm-kubernetes.service systemd-pcrphase.service` | `vm-agent attest --stage=ready --timeout=90s`: PCRs 0-7, 11 and 13 once the sysext is merged and measured and PCR 11 carries the full phase path; `READY=1` follows it |
+| root (`mkosi.images/base/mkosi.extra`, preset-enabled) | `WantedBy=multi-user.target`, `Before=multi-user.target`; `After=network-online.target systemd-imds-import.service systemd-tpm2-setup.service vm-kubernetes.service systemd-pcrphase.service` | `vm-agent attest --stage=ready --timeout=90s`: PCRs 0-7, 11, 13 and 15 once the sysext is merged and measured and PCR 11 carries the full phase path; `READY=1` follows it |
 
 Why the ordering matters: `systemd-pcrphase-initrd.service` extends PCR 11 with
 `enter-initrd` when it starts and with `leave-initrd` when it stops, which happens at the
@@ -280,7 +285,7 @@ stage retries until its 2-minute timeout and the boot lands in `emergency.target
 without it user-data was released when the boot started and the boot proceeds with the
 failed unit on record. `get_vm_attestation` shows both stages either way.
 
-Golden values: `policy.json` from `make verify` has `pcr11` and `pcr13` only; the
+Golden values: `policy.json` from `make verify` has `pcr11` and `sysexts` only; the
 release pipeline adds the golden values of the release's container image before it
 publishes the artifact (`hack/guest-image-golden.sh`). The
 firmware PCRs a golden value can pin across VMs are 0 (firmware code), 2 and 3 (option
@@ -314,7 +319,7 @@ fills for `systemd.volatile=`.
 | `/var` | ext4 from `/dev/disk/by-partlabel/var` (systemd-repart labels a partition after its type when the definition sets no `Label=`), `systemd-fsck` before, `systemd-growfs` after (`x-systemd.growfs` is fstab-only) | partition 8 of the installed disk |
 | `/etc` | overlayfs, `lowerdir=` the image's `/etc`, `upperdir=`/`workdir=` on var | `/var/lib/etc-overlay/{upper,work}` |
 | `/root` | bind mount (systemd's `tmpfiles.d/provision.conf` writes `/root/.ssh/authorized_keys` from `ssh.authorized_keys.root`) | `/var/roothome` |
-| `/opt` | bind mount (CNI DaemonSets install into `/opt/cni/bin`) | `/var/opt` |
+| `/opt` | bind mount (CNI DaemonSets still copy into `/opt/cni/bin`; containerd does not search it) | `/var/opt` |
 
 - `systemd-firstboot` (host, first boot) writes `/etc/hostname` and friends into the
   overlay, PID 1 commits the `system.machine_id` credential to `/etc/machine-id`, sshd's
@@ -407,18 +412,25 @@ read-only base root at boot. It is built as `Overlay=yes` on top of `build/base`
 only the delta is packed, and signed with the same `keys/verity.crt` the base image
 trusts in `/usr/lib/verity.d/` (mkosi installs it there).
 
-Content (Arch packages `kubeadm kubelet kubectl containerd runc crictl cni-plugins
-conntrack-tools socat ethtool iptables`): `/usr/bin/{kubeadm,kubelet,kubectl,containerd,
-containerd-shim-runc-v2,ctr,runc,crictl,conntrack,socat,ethtool,iptables,...}`, the
-reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
+Content (Arch packages `kubeadm kubelet kubectl runc crictl cni-plugins
+conntrack-tools socat ethtool iptables`, and [containerd](#containerd) from the Giant
+Swarm line): `/usr/bin/{kubeadm,kubelet,kubectl,containerd,containerd-shim-runc-v2,ctr,
+runc,crictl,conntrack,socat,ethtool,iptables,...}`, the reference CNI plugins in
+`/usr/lib/cni`, and from `mkosi.extra/`:
 
 - `containerd.service.d/10-vm-manager.conf`: `--config /usr/lib/vm-manager/containerd.toml`
-  (a sysext cannot ship `/etc`): `SystemdCgroup=true`, CNI `bin_dirs=['/opt/cni/bin',
-  '/usr/lib/cni']`, `conf_dir=/etc/cni/net.d`. `/opt` is deliberately *not* in the
-  extension (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): `/opt` is a
-  bind mount of `/var/opt` (see [Persistent state](#persistent-state)), so CNI DaemonSets
-  can install into `/opt/cni/bin` and keep it across reboots, which a sysext overlay on
-  `/opt` would make read-only.
+  (a sysext cannot ship `/etc`), and `systemd-modules-load` of the extension's
+  `modules-load.d/containerd.conf` (`erofs`, `dm_verity`, `loop`) before containerd starts.
+  `containerd.toml`: the [EROFS snapshotter with signed dm-verity layers](#containerd),
+  `SystemdCgroup=true`, CNI `bin_dirs=['/usr/lib/cni']`,
+  `conf_dir=/etc/cni/net.d`. `bin_dirs` lists only directories inside sysexts:
+  `/usr/lib/cni` holds the reference plugins of this extension and the plugins of the
+  VM's [CNI sysext](#cni-sysext), merged into one directory. `/opt/cni/bin` is not
+  searched: IPE executes nothing from `/opt`. `/opt` is still *not* in the extension
+  (`mkosi.postinst` removes the package's `/opt/cni/bin` copy): it is a bind mount of
+  `/var/opt` (see [Persistent state](#persistent-state)), so the copy a CNI DaemonSet
+  still makes into `/opt/cni/bin` succeeds (and is ignored) instead of failing on a
+  read-only sysext overlay.
 - `kubelet.service.d/20-vm-manager.conf`: `KUBELET_ARGS=--container-runtime-endpoint=unix:///run/containerd/containerd.sock`
   (Arch's unit sources it from `/etc/kubernetes/kubelet.env`, which is not shippable),
   `Wants=/After=network-online.target containerd.service`. `10-kubeadm.conf` comes from
@@ -432,7 +444,7 @@ reference CNI plugins in `/usr/lib/cni`, and from `mkosi.extra/`:
   kubelet package brings `ip_forward` and `br_netfilter`), `tmpfiles.d/kubernetes.conf`
   (`/etc/cni/net.d`, `/opt/cni/bin`). The links a CNI creates are left to it by the base
   image's `network/70-kubernetes-cni.network` (see [Image content](#image-content-mkosiimagesbasemkosiextra)); the
-  cluster e2e checks `networkctl list` reports `cni0`, `flannel.1` and the pod veths as
+  cluster e2e checks `networkctl list` reports the CNI's links and the pod veths as
   unmanaged.
 - `usr/lib/extension-release.d/extension-release.kubernetes_<kv>`: `ID=arch`
   (the base has neither `SYSEXT_LEVEL` nor `VERSION_ID`, rolling release, so ID alone
@@ -462,19 +474,86 @@ ones; "volatile" keeps it out of the incremental cache manifest, so the cached b
 survives a version switch), and the subimage pins `kubeadm=%v kubelet=%v kubectl=%v`: a
 release the directory lacks fails the build instead of silently installing what the
 repositories offer, and `mkosi.postinst` still refuses an installed kubeadm that is not
-`<kv>`. `containerd`, `runc`, `crictl` and `cni-plugins` come from the current repositories
+`<kv>`. `runc`, `crictl` and `cni-plugins` come from the current repositories
 (the same set for every release: both sysexts of this repository state carry
-containerd 2.3.5, runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1; `verify-kubernetes` prints
-what a sysext holds).
+runc 1.5.1, crictl 1.36.0, cni-plugins 1.9.1), containerd is the release `CONTAINERD_IMAGE`
+pins (below); `verify-sysext kubernetes` prints what a sysext holds.
+
+### containerd
+
+containerd is not Arch's package but the Giant Swarm line of containerd
+([giantswarm/containerd](https://github.com/giantswarm/containerd), its `FORK.md`):
+upstream's release plus the EROFS snapshotter's signed dm-verity layers. A release is an
+OCI artifact (`application/vnd.giantswarm.containerd.binaries.v1`) whose one layer holds
+the static `bin/containerd`, `bin/containerd-shim-runc-v2` and `bin/ctr`.
+`CONTAINERD_IMAGE` in the Makefile pins it by tag and digest, and Renovate bumps both
+together (`renovate-custom.json5`). `make containerd` (`scripts/fetch-containerd`, part
+of `images` and `kubernetes`) downloads the manifest and the layer, refuses either unless
+it hashes to its pinned digest and the manifest names the tag as its version, and stages
+the binaries into `/usr/bin` and upstream's `containerd.service` of the release's commit
+(`org.opencontainers.image.revision`) into `build/containerd/tree/`, an extra tree of the
+sysext. `mkosi.postinst` refuses a build whose `containerd --version` is not the pinned
+version, or that installed Arch's `containerd`.
+
+Image layers run only from signed dm-verity devices (`containerd.toml`):
+
+- The CRI unpacks into the `erofs` snapshotter, and so does the transfer service, the
+  CRI's default pull path (`unpack_config`: `linux/amd64`, snapshotter and differ
+  `erofs`, replacing the default list whose `overlayfs` entry would unpack without
+  dm-verity). The diff service, the CRI's `use_local_image_pull` path, tries the `erofs`
+  differ first.
+- The differ runs in tar-index mode with dm-verity (`enable_tar_index`, `enable_dmverity`)
+  and `enable_dmverity_referrers`; the snapshotter has `dmverity_mode = "on"` and
+  `enable_dmverity_referrers`. A pull then fetches the image's
+  `application/vnd.containerd.erofs.dmverity.v1` referrer with the pull's own resolver
+  and credentials: per layer the EROFS tar index, the dm-verity hash tree and the PKCS#7
+  signature of its root hash, made by the publisher with `vm-manager layers sign`
+  ([docs/layer-signing.md](../docs/layer-signing.md)). The node runs no `mkfs.erofs`: the
+  layer's device is the published index followed by the layer's uncompressed tar, checked
+  once against the published tree and the signed root hash.
+- A pull fails for an image without signed layers, naming the layer:
+  `layer <digest> has no signed dm-verity root hash: image manifest <digest> has no
+  application/vnd.containerd.erofs.dmverity.v1 referrer`; a referrer missing a blob fails
+  with `incomplete dm-verity artifacts for layer <digest>: missing signature` (or the
+  index or tree), and data that does not match with `layer <digest>: dm-verity root hash
+  mismatch: data has <hex>, signed <hex>`. Native EROFS layers are refused.
+- Before a layer becomes a snapshot, containerd has the kernel check its signature: it
+  opens the layer's dm-verity device with the signature and removes it again. A
+  signature the kernel refuses, such as one by a key that is neither Giant Swarm's nor
+  in `layer_certificates`, fails the pull with `layer <digest>: dm-verity signature
+  <digest> not accepted by the kernel: …` and the kernel's reason, and nothing is kept.
+  The check costs one short-lived loop and dm-verity device per layer new to the node.
+- When a layer is mounted, containerd hands the signature to dm-verity, so the kernel
+  checks it against its keys, and the [IPE](#ipe) policy executes from such devices.
+- Images that share a layer share its snapshot, however their referrers sign it: Giant
+  Swarm's key and an installation's, a KMS key that signs differently on every run, or
+  another root hash (an index of another erofs-utils, the same tar compressed again).
+  The node keeps the layer as the first image unpacked it, with that image's signature,
+  which the kernel accepted then and checks against exactly those bytes at every mount,
+  so an image signed by an untrusted key, pulled first, cannot break the images that
+  share its layers. Every image's referrer must still cover each of its layers,
+  unpacked already or not.
+
+The sandbox image is pinned to gsoci's (`gsoci.azurecr.io/giantswarm/pause:3.10.2`, the
+CRI's `pinned_images.sandbox`), where Giant Swarm publishes it with signed layers; the
+upstream default `registry.k8s.io/pause` is unsigned. Registry hosts (mirrors, a
+plain-HTTP registry) are configured through `hosts.toml` files under
+`/etc/containerd/certs.d/<host>/`, the `config_path` of the CRI and the transfer service.
+`e2e/kubernetes_sysext_test.go` checks the version, the plugins, the effective
+configuration and the refusal of an unsigned image; `e2e/kubernetes_cluster_test.go`
+runs a cluster from signed copies of gsoci's images in a mirror (signatures through its
+referrers API), signed workloads that share the sandbox's layer under other keys, other
+signatures of one key and another root hash, and the refusal of a layer outside its
+signatures.
 
 Adding a release: append it to `KUBERNETES_VERSIONS` (or pass `make kubernetes
 KUBERNETES_VERSION=<kv>` once), `make kubernetes-all verify-kubernetes` (or `make`);
 `build/sysupdate/kubernetes/` then serves the new file next to the old ones,
 `SHA256SUMS` is regenerated over all of them and re-signed, `build/policy.json` gains
-`pcr13.<kv>`, and vm-manager's catalog (`internal/images`, `get_image`) lists it. Retiring a
+`sysexts.kubernetes.<kv>`, and vm-manager's catalog (`internal/images`, `get_image`) lists it. Retiring a
 release: remove it from the list, delete `build/sysupdate/kubernetes/kubernetes_<kv>.raw`,
 publish any version (`make kubernetes`) so the manifest no longer names it, and
-`verify-kubernetes` drops its `pcr13` entry. `make kubernetes` for a version rebuilds only
+`verify-kubernetes` drops its `sysexts.kubernetes` entry. `make kubernetes` for a version rebuilds only
 that sysext (`make clean` if the base tree changed) and replaces only that version's file.
 
 How the VM receives it: vm-manager serves `build/sysupdate/kubernetes/` at
@@ -499,13 +578,21 @@ address nobody serves, as the harness-driven `TestInstallBoot` showed) runs
 3. `systemd-sysupdate --component=kubernetes update <kv>` (the transfer is
    `/usr/lib/sysupdate.kubernetes.d/50-kubernetes.transfer`, `Verify=yes` against
    `/etc/systemd/import-pubring.pgp`, target `/var/lib/extensions/kubernetes_@v.raw`);
-   a present file is a no-op, so a reboot downloads nothing.
-4. `systemd-sysext refresh` merges it (the verity signature is checked against
+   a present file is a no-op, so a reboot downloads nothing. The image disables
+   `systemd-sysupdate-notify-sysext.socket`: through it every installed update would
+   make systemd-sysext refresh on its own, merging the Kubernetes extension alone before
+   the CNI one is pulled, and the processes `Upholds=` starts from that first merge
+   would keep its loop and verity device after the second.
+4. `systemd-sysext refresh` merges it, once (the verity signature is checked against
    `/usr/lib/verity.d/verity.crt`; the kernel's "Required key not available" lines in the
    journal are the keyring attempt before that). `EXTENSION_RELOAD_MANAGER=1` makes the
    refresh a daemon-reload, after which `Upholds=` of `multi-user.target` starts
-   `containerd.service` and `kubelet.service`. The unit checks that
-   `systemd-sysext status` lists exactly `kubernetes_<kv>` on `/usr`.
+   `containerd.service` and `kubelet.service`. The unit fails unless what systemd-sysext
+   reports is exactly the VM's images: `systemd-sysext status --json=short` merged
+   `kubernetes_<kv>` and `cni_<cni>-<release>` (when `/cni-version` is set) on `/usr` and
+   nothing else, `systemd-sysext list --json=short` finds no other image in any extension
+   directory, and every `/usr/lib/extension-release.d/extension-release.*` belongs to a
+   merged image (`jq`, an explicit base package, reads the JSON).
 5. PCR 13 is extended, see below.
 6. The node stack is made usable: `systemd-modules-load.service` and
    `systemd-sysctl.service` are restarted, because on a boot that downloaded the
@@ -555,41 +642,138 @@ place it. The unit therefore measures after the merge with
 `systemd-pcrextend --pcr=13 "<line>"`, where `<line>` is what `sha256sum
 kubernetes_<kv>.raw` prints in `/var/lib/extensions`, i.e. the file's line in the
 published `SHA256SUMS`: `<sha256>  kubernetes_<kv>.raw` (two spaces, no newline).
-The PCR 13 rule, implemented by `scripts/verify-kubernetes` (step 10, Python) and
-`attest.SysextPCR` (Go), both checked against the TPM by the e2e:
+The same unit measures the CNI sysext right after (`<sha256>  cni_<cni>-<release>.raw`).
+The PCR 13 rule, implemented by `attest.SysextPCR` (Go) and checked against the TPM by
+the e2e:
 
     PCR13 = 0 (32 zero bytes)
     PCR13 = sha256(PCR13 || sha256("os-separator"))     systemd-pcrosseparator.service, initrd
     PCR13 = sha256(PCR13 || sha256("<sha256>  kubernetes_<kv>.raw"))   vm-kubernetes.service
+    PCR13 = sha256(PCR13 || sha256("<sha256>  cni_<cni>-<release>.raw"))   vm-kubernetes.service, when /cni-version is set
 
 `systemd-pcrosseparator.service` (initrd, `ConditionSecurity=measured-os`) is the only
 other PCR 13 event of a boot; both events are in `/run/log/systemd/tpm2-measure.log`,
-`systemd-analyze pcrs 13` shows the result. `verify-kubernetes` writes the value to
-`build/policy.json` as `"pcr13": {"<kv>": "<hex>"}` (kept across `verify-base` runs, one
-entry per sysext version built); vm-manager compares it at the ready stage against the
-VM's Kubernetes version and falls back to `golden.sha256.13` for a VM without one
-(`internal/attest`). The trust chain for the content itself stays the verity signature
+`systemd-analyze pcrs 13` shows the result. <a id="pcr-13"></a>Each event is a separate
+extension, so the policy records one value per sysext, not per pair: `verify-sysext`
+writes the published sha256 of every file to `build/policy.json` as
+`"sysexts": {"kubernetes": {"<kv>": "<sha256>"}, "cni": {"<cni>-<release>": "<sha256>"}}`
+(kept across `verify-base` runs), and vm-manager computes the expected PCR 13 of a VM
+from the entries of its Kubernetes and CNI versions, in that order, at the ready stage:
+every Kubernetes x CNI combination verifies without an entry per pair. A VM whose
+versions lack an entry falls back to `pcr13[<kv>]` (written by images built before
+`sysexts`, only without a CNI) and then to `golden.sha256.13` (`internal/attest`). The trust chain for the content itself stays the verity signature
 (`/usr/lib/verity.d/verity.crt`) plus `SHA256SUMS.gpg` for the download; PCR 13 binds
 the attested boot to the exact artifact.
+
+## CNI sysext
+
+`mkosi.images/cni/` builds `cni_<cni>-<release>.raw`, one systemd-sysext DDI per CNI
+release, like the kubernetes sysext: an overlay delta on the base tree, erofs (zstd),
+dm-verity signed with the image's verity key, `SYSEXT_SCOPE=system`. Its content is the
+CNI's plugin binaries in `/usr/lib/cni`, the one directory containerd's `bin_dirs` lists,
+and the host configuration the CNI's own init containers would write with binaries IPE
+refuses (`cni.extra/<cni>/`). systemd-sysext merges the plugins next to the reference
+plugins (`bridge`, `host-local`, `loopback`, `portmap`, ...) of the kubernetes sysext, so
+under IPE every plugin containerd runs comes from a signed verity device. A CNI bump
+rebuilds this extension only, never a kubernetes one.
+
+The CNIs are the entries of `cni/`. An entry pins the image tag `release`, the `image`
+and the tag's `digest` (Renovate bumps tag and digest together, `renovate-custom.json5`)
+and the `plugins`, files of the image's `linux/amd64` variant, each
+`<path in the image>[:<name>]`; the sysext version is `<entry>-<release without v>`
+(`cilium-1.20.5`), `CNI_VERSIONS` in the Makefile lists one per entry, the first is the
+default of `make cni` and of `make images`. `scripts/fetch-cni-plugins` refuses a tag
+that no longer names the pinned digest, exports the plugins with `crane` (which checks
+the digest of every manifest and layer it reads) into `build/cni/<version>/<digest>/` and
+stages them and `cni.extra/<entry>/` into `build/cni/tree/`, the subimage's `ExtraTrees=`.
+
+Adding a CNI release: Renovate's bump of the entry, or a new entry `cni/<name>` with its
+`cni.extra/<name>/`, then `make cni CNI_VERSION=<name>-<release> verify-cni` (or `make`).
+Before merging, compare the new release's agent DaemonSet: what its host-binary init
+containers write belongs in `cni.extra/<name>/`, and a new one needs its chart value
+below. Nothing else changes: publishing, the sysupdate transfer
+(`sysupdate.cni.d/50-cni.transfer`, `cni_@v.raw`), the catalog and the PCR 13 policy are
+per component, not per CNI.
+
+The guest: vm-manager offers the published versions (`get_image` `cniVersions`),
+`create_vm` takes `cni_version` (default: the newest `cilium-*` release, only for a VM
+with a Kubernetes version) and serves it as `/cni-version`; `vm-kubernetes.service` pulls
+it with `systemd-sysupdate --component=cni update <version>` right after the Kubernetes
+sysext, merges both, restarts `systemd-sysctl.service` and measures both into PCR 13 (see
+[PCR 13](#pcr-13)).
+
+### Cilium
+
+`cni/cilium` takes `cilium-cni` from the Cilium agent image `giantswarm/cilium-app`
+deploys, `gsoci.azurecr.io/giantswarm/cilium` (the chart's `image.tag` and
+`image.digest`); `cilium-1.20.5` is the Cilium of cilium-app v1.9.0. The agent
+DaemonSet's init containers that only run the agent image (`config`, `mount-bpf-fs`,
+`clean-cilium-state`) run from its container layers. Three reach into the host:
+
+- `install-cni-binaries` copies `cilium-cni` into `cni.binPath` (`/opt/cni/bin`, the
+  chart default, kept). The copy succeeds and is ignored: containerd runs the sysext's
+  `/usr/lib/cni/cilium-cni`.
+- `mount-cgroup` copies `cilium-mount` into `cni.binPath` and runs it on the host through
+  `nsenter`, which IPE refuses (var partition). There is nothing to mount: systemd mounts
+  the cgroup2 hierarchy at `/sys/fs/cgroup`, and the agent uses it there.
+- `apply-sysctl-overwrites` does the same with `cilium-sysctlfix`, which writes
+  `/etc/sysctl.d/99-zzz-override_cilium.conf` and restarts `systemd-sysctl.service`. The
+  sysext ships that file's content for its release as
+  `/usr/lib/sysctl.d/99-zzz-override_cilium.conf` (`cni.extra/cilium/`): `rp_filter` 0
+  for `lxc*`, `cilium_*` and `all`. `vm-kubernetes.service` restarts
+  `systemd-sysctl.service` after the merge, and systemd's udev rule applies the per-link
+  keys to every link the agent creates later.
+
+A cluster on these nodes sets these values of the cilium-app chart, which drop the two
+init containers IPE would fail:
+
+```yaml
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+sysctlfix:
+  enabled: false
+```
 
 ## IPE
 
 The kernel's [Integrity Policy Enforcement](https://docs.kernel.org/admin-guide/LSM/ipe.html)
-LSM makes the read-only root an executable boundary as well: a VM runs, maps executable and
-loads into the kernel only what comes from a dm-verity device whose root hash signature the
-kernel verified itself. That is the base image's root and the Kubernetes sysext (IPE judges
-an overlay file by its real inode, so the sysext's binaries in the `/usr` overlay qualify).
-Nothing on the var partition, in the upper layer of the `/etc` overlay, on `/run`, `/tmp` or
-`/root`, and no anonymous executable memory runs; no kernel module, firmware, kexec image,
-IMA policy or X.509 certificate comes from there either. Root is no exception, and cannot
-switch it off.
+LSM makes the read-only root an executable boundary as well: a VM runs and maps executable
+only what comes from a dm-verity device whose root hash signature the kernel verified itself.
+That is the base image's root, the Kubernetes and CNI sysexts (IPE judges an overlay file by
+its real inode, so the sysexts' binaries in the `/usr` overlay qualify), and later signed
+container layers. What the kernel loads into itself (kernel modules, firmware, kexec images
+and initramfs, IMA policies, X.509 certificates) comes from the base root alone, named by its
+root hash: a key that signs a sysext or a layer earns that device the right to execute,
+nothing more, so a sysext's own kernel modules or firmware would not load. Nothing on the
+var partition, in the upper layer of the `/etc` overlay, on `/run`, `/tmp` or `/root`, and no
+anonymous executable memory runs. Root is no exception, and cannot switch it off.
+
+Container images reach that boundary as signed dm-verity layers: containerd opens each layer
+as an EROFS tar index under dm-verity, with a root hash signature that
+`vm-manager layers sign` publishes next to the image
+([docs/layer-signing.md](../docs/layer-signing.md)).
 
 The policy, [`ipe/giantswarm-vm.policy`](ipe/giantswarm-vm.policy):
 
     policy_name=giantswarm-vm policy_version=<image version>
     DEFAULT action=DENY
     op=EXECUTE dmverity_signature=TRUE action=ALLOW
-    op=FIRMWARE … op=KMODULE … op=KEXEC_IMAGE … op=KEXEC_INITRAMFS … op=POLICY … op=X509_CERT  (the same)
+    op=KMODULE dmverity_roothash=sha256:<the root's verity root hash> action=ALLOW
+    op=FIRMWARE … op=KEXEC_IMAGE … op=KEXEC_INITRAMFS … op=POLICY … op=X509_CERT  (the same)
+
+The A and B root partitions hold the same image, so one root hash covers both; a sysupdate
+replaces a UKI and its root together, and the new UKI's initrd carries the policy for the new
+root. Because the policy names the root it cannot live inside it: it ships in the initrd,
+and `make base`/`images` build the disk image twice (`mkosi-ipe` in the
+[Makefile](Makefile)). The first mkosi run yields the root hash (`<id>_<v>.roothash`),
+`scripts/sign-ipe-policy` fills it in and signs the policy into `build/ipe/tree`, which the
+initrd's `ExtraTrees=` takes (empty in the first run), and the second run builds the same
+root and the UKI with that initrd. The root is reproducible: mkosi clamps every mtime to
+`SOURCE_DATE_EPOCH` (the last commit's time, exported by the Makefile) and passes it to
+systemd-repart and `mkfs.erofs`, and `Seed=` fixes the UUIDs and the verity salt; the build
+fails if the second root hash differs from the one the policy names.
 
 The global default is DENY, so an operation a newer kernel adds stays denied until the
 policy allows it. No rule trusts the initramfs (`boot_verified`): the initrd runs before the
@@ -604,34 +788,51 @@ How it holds together:
 | IPE started | UKI command line | `lsm=` is the kernel's `CONFIG_LSM` (`landlock,lockdown,yama,integrity,bpf`) plus `ipe`: Arch builds IPE in but does not start it |
 | The root verified by the kernel | UKI command line, initrd | `systemd.verity_root_options=root-hash-signature=auto`: systemd-veritysetup opens the root with the signature from the verity signature partition, which udev's `dissect_image` builtin puts on the root partition. Stock udev dissects only the disk systemd-boot reported; `85-vm-manager-dissect-image.rules` in the initrd dissects every other GPT disk too, the installer disk of a `-kernel` boot included. `dmsetup table root` shows `root_hash_sig_key_desc` |
 | The sysext verified by the kernel | systemd-sysext | Hands the signature to the kernel first and falls back to `/usr/lib/verity.d` in userspace only when the kernel refuses; with the certificate on `.platform` it does not refuse |
-| The policy | `/etc/ipe/giantswarm-vm.p7b` | Signed inline (PKCS#7) with the verity key by `scripts/sign-ipe-policy`. PID 1 loads and activates every `/etc/ipe/*.p7b` right after the switch to the real root, before it starts anything there |
+| The policy | initrd: `/usr/lib/vm-manager/ipe/giantswarm-vm.p7b`, then `/run/ipe/giantswarm-vm.p7b` | Signed inline (PKCS#7) with the verity key by `scripts/sign-ipe-policy`, part of the measured UKI. The initrd's `vm-ipe-policy.service`, required by `initrd.target` and ordered after `persistent-etc` and Ignition, makes it the only file in `/run/ipe` (the switch root moves `/run` to the real root) and drops `/sysroot/etc/ipe`. PID 1 loads and activates every policy in `/etc/ipe`, `/run/ipe` and `/usr/lib/ipe` when it starts on the real root, before it starts anything there; the initrd's own PID 1 found `/run/ipe` empty, so the initrd runs without a policy |
 | Locked | `/usr/lib/systemd/system.conf.d/50-vm-manager-ipe.conf`, UKI command line | `CapabilityBoundingSet=~CAP_MAC_ADMIN`, applied by PID 1 after it loaded the policy, and `sysctl.kernel.usermodehelper.{bset,inheritable}` without it for the processes the kernel starts itself (core_pattern pipes, modprobe, the hotplug and request-key helpers), set before init and never raised again: no process holds `CAP_MAC_ADMIN` for the rest of the boot, and every write below `/sys/kernel/security/ipe/` needs it. Nobody can set `enforce` to 0, load a policy or activate one |
-| Locked across boots | `persistent-etc` (initrd) | Drops whatever the `/etc` overlay's upper layer holds for `ipe/`, `systemd/system.conf` and `systemd/system.conf.d` (a file, a whiteout, a symlink in place of `/etc/systemd`) before it mounts the overlay, so a boot cannot hide the policy or hand the capability back for the next |
-| Fail closed | PID 1 | A policy the kernel refuses (no certificate in db: a variable store created without it, another firmware) stops PID 1 with `Failed to load IPE policy`, `Freezing execution`; the root, opened without a kernel-verified signature (the kernel logs `Root hash verification failed (-ENOKEY)`), would run nothing under the policy anyway |
+| Locked across boots | `persistent-etc`, `vm-ipe-policy` (initrd) | `persistent-etc` drops whatever the `/etc` overlay's upper layer holds for `ipe/`, `systemd/system.conf` and `systemd/system.conf.d` (a file, a whiteout, a symlink in place of `/etc/systemd`) before it mounts the overlay, and `vm-ipe-policy` drops `/etc/ipe` again after Ignition, so a boot cannot mask the policy (PID 1 reads `/etc/ipe` before `/run/ipe`; a `giantswarm-vm.p7b` there, or a symlink to `/dev/null`, would win) or hand the capability back for the next |
+| Fail closed | initrd, PID 1 | An initrd without its policy stops in `emergency.target` (`vm-ipe-policy.service` fails) instead of switching to a root without one. A policy the kernel refuses (no certificate in db: a variable store created without it, another firmware) stops PID 1 with `Failed to load IPE policy`, `Freezing execution`; the root, opened without a kernel-verified signature (the kernel logs `Root hash verification failed (-ENOKEY)`), would run nothing under the policy anyway |
 
-On a running VM: `cat /sys/kernel/security/ipe/policies/giantswarm-vm/{active,version}`,
+On a running VM: `cat /sys/kernel/security/ipe/policies/giantswarm-vm/{active,version,policy}`, `ls /run/ipe`,
 `cat /sys/kernel/security/ipe/enforce`, `keyctl show %:.platform`,
 `dmsetup table --target verity`, `cat /proc/sys/kernel/usermodehelper/bset`; denials are audit
 records in the journal (`IPE_ACCESS ipe_op=EXECUTE … path="/var/tmp/x" … rule="DEFAULT action=DENY"`).
 `e2e/ipe_test.go` proves all of it, including a core_pattern helper refused when it tries to
 switch enforcement off and a reboot after root hid the policy and planted a drop-in that
-restores the capability; `e2e/persistent_etc_test.go` a reboot from inside the guest coming
+restores the capability; `e2e/kubernetes_sysext_test.go` that a file of the Kubernetes sysext
+executes but is refused as a kernel module (`ipe_op=KMODULE`) and as a kexec image (`EPERM`
+from `kexec_load_disabled` before IPE, see [Layer certificates](#layer-certificates); IPE's
+`KEXEC_IMAGE` on an image without it) while the base root's modules load, and that firmware a second signed sysext brings
+(`build/e2e/ipe-e2e.raw`, merged next to it) is refused when cfg80211 requests it
+(`ipe_op=FIRMWARE`); `e2e/persistent_etc_test.go` a reboot from inside the guest coming
 back as a new QEMU process.
 
 What the policy means for workloads and what it does not cover:
 
-- **Containers do not run.** A container's executables are image layers containerd unpacks
-  on the var partition, which the policy does not trust: no pod starts, kubeadm's static
-  pods and flannel included, and neither does a CAPI bootstrap's `/etc/kubeadm.sh`.
-  containerd and kubelet themselves run (they come from the sysext). Kubernetes nodes need
-  container images delivered as signed dm-verity layers before they can run pods again;
-  `e2e/kubernetes_cluster_test.go` skips an image with IPE until then.
+- **Containers run from signed layers only.** containerd mounts every image layer from a
+  dm-verity device opened with the publisher's signature ([containerd](#containerd)), and
+  refuses at pull an image without one: kubeadm's static pods, the sandbox image and the
+  CNI's images need signed copies. containerd and kubelet themselves run (they come from
+  the sysext), and so does a CAPI bootstrap, which runs `ExecStart=/bin/bash
+  /etc/kubeadm.sh` since CAPI 1.14 (see Interpreters). `e2e/kubernetes_cluster_test.go`
+  runs a cluster with Cilium on IPE nodes from signed copies of gsoci's images: a pod of an
+  image signed with the Giant Swarm test key and one signed with an installation test key
+  run, an image with an unsigned layer fails at pull naming the layer, and a file of a
+  running pod's layer is refused as a kernel module, as firmware and as a kexec image.
 - **Interpreters.** IPE checks what the kernel executes and maps. `bash /var/tmp/x.sh` runs
   the image's bash, which then reads the script as data; only an interpreter that asks with
   `execveat(AT_EXECVE_CHECK)` lets IPE judge the script, and bash does not. Executing the
   script itself (`/var/tmp/x.sh`) is denied.
 - **JIT and other anonymous executable memory** is denied: a runtime that generates code
-  (a JIT, older libffi closures) fails under the policy.
+  fails under the policy, and so do older libffi closures. On every node:
+  - JVMs do not run, `-Xint` included: HotSpot generates its interpreter at start too.
+  - Node.js runs only with `--jitless`, which also leaves out WebAssembly.
+  - .NET runs only as NativeAOT.
+  - LuaJIT runs only with `-joff`.
+  - Go, Rust, C and C++ binaries and CPython run.
+
+  Routes to executable memory that skip IPE are
+  [giantswarm/vm-manager#267](https://github.com/giantswarm/vm-manager/issues/267).
 - **The kernel command line of a later boot.** With Secure Boot off, systemd-stub takes a
   command line a boot loader entry on the ESP passes over the UKI's own; root can write the
   ESP. Such a boot runs the same UKI (PCR 4 and 11 do not change) without `lsm=…ipe`; the
@@ -646,6 +847,73 @@ hands systemd-vmspawn (`vm-manager image enroll <vars> --cert <crt>`, what vm-ma
 and asserts the policy active and enforcing; the e2e harness enrolls it the same way. Without
 the certificate the image does not boot (see Fail closed above).
 
+## Layer certificates
+
+dm-verity verifies a device's root hash signature against the kernel's builtin and secondary
+keyrings, then the platform keyring (the UEFI db, where vm-manager enrolls the image's
+`build/<id>_<v>.crt`), and last against the `.dm-verity` keyring, which it consults only
+once that keyring is non-empty and sealed. The base root, the sysexts and any layer signed
+with the image's own verity key therefore verify through the platform keyring; the
+`.dm-verity` keyring is where the keys that sign container layers go.
+
+The UKI's command line (`mkosi.conf`) carries:
+
+| Flag | Effect |
+|---|---|
+| `dm_verity.require_signatures=1` | Every dm-verity device needs a root hash signature the kernel verifies; an unsigned one does not open |
+| `dm_verity.keyring_unsealed=1` | The `.dm-verity` keyring starts writable, for the initrd to fill and seal |
+| `module.sig_enforce=1` | Only modules signed by the kernel's build key load (Arch signs its modules) |
+| `sysctl.kernel.kexec_load_disabled=1` | Set by the kernel before init starts and never undone: `kexec_load` and `kexec_file_load` fail with `EPERM`, before IPE sees the file |
+
+`vm-layer-keyring.service` in the initrd (required by `initrd.target`, before
+`ignition-fetch.service`, so before user-data reaches the initrd and before the switch root)
+runs `/usr/lib/vm-manager/layer-keyring` with `keyctl` (keyutils), `openssl`,
+`systemd-imds` and `systemd-pcrextend`:
+
+1. It enrolls the Giant Swarm layer certificate the initrd carries
+   (`/usr/lib/vm-manager/layer-certificates/giantswarm.crt`). It is part of the UKI, so PCR 11
+   covers it, and it is not measured into PCR 15.
+2. On a vm-manager boot (the conditions of `vm-agent-attest.service`: SMBIOS vendor
+   GiantSwarm, no `systemd.imds=no`, not the installer boot) it reads the installation's
+   certificates from the IMDS (`/layer-certificates`, the `layer_certificates` of `create_vm`
+   in their order; none when unset) and, for each in order, converts it to DER, adds it to
+   `.dm-verity` and extends PCR 15 with `layer-certificate:<lowercase hex sha256 of the DER>`.
+   The ready attestation replays those records, and the verifier rejects a node whose
+   measured certificates differ from the ones served, naming what is missing or not served
+   ([Attestation](#attestation)).
+3. It seals the keyring (`keyctl restrict_keyring %:.dm-verity`: every further key is
+   refused), also when it holds nothing. From the running root, `keyctl padd asymmetric ""
+   %:.dm-verity` fails with `Operation not permitted`.
+
+A malformed certificate, an IMDS error other than an unset key, a key the kernel refuses, a
+failed measurement or a failed seal stop the boot (`OnFailure=emergency.target`, as
+`vm-ipe-policy.service`): no node runs with an unsealed keyring or without its installation's
+certificates.
+
+Where the certificates come from:
+
+- **Giant Swarm:** the build input `LAYER_CERT` of the Makefile (PEM), `keys/layer.crt` by
+  default, which `scripts/gen-keys` creates per build as a test certificate
+  (`vm-manager dev layer signing key`, its key `keys/layer.key` signs test layers). The
+  release build (`hack/guest-image-build.sh`) passes `LAYER_CERT=` and enrolls none until the
+  release pipeline hands it the real certificate
+  ([giantswarm/architect-orb#1084](https://github.com/giantswarm/architect-orb/issues/1084)).
+- **Installation:** `create_vm`'s `layer_certificates`, served by the IMDS and measured as
+  above.
+
+Rotation overlaps the lists: a new signing certificate joins the installation's
+`layer_certificates` (or the next image's `LAYER_CERT`) while the old one stays, layers are
+re-signed with the new key, and the old certificate leaves the list once no node pulls a
+layer signed with it. The keyring is filled once per boot, so a node picks up a changed list
+when it is recreated or rebooted.
+
+`make verify` checks the flags in the UKI, the unit, its tools and the certificate in the
+initrd. `e2e/ipe_test.go` boots without an IMDS and finds the Giant Swarm certificate alone in
+the sealed keyring; `e2e/attestation_test.go` creates a VM with two `layer_certificates` and
+finds all three in the keyring, the root's `keyctl padd` refused, both digests in the ready
+verdict, and the verifier rejecting the node, naming the digest, after the root extends PCR 15
+with one more.
+
 ## Keys
 
 `make keys` (`scripts/gen-keys`) writes into the git-ignored `images/keys/`:
@@ -654,6 +922,7 @@ the certificate the image does not boot (see Fail closed above).
 |---|---|
 | `verity.key`, `verity.crt` | `VerityKey=`/`VerityCertificate=`: signature partition of the verity root hash, of the sysexts' too; signs the IPE policy (`scripts/sign-ipe-policy`). The certificate is published as `build/<id>_<v>.crt` for vm-manager's db enrollment |
 | `pcr.key`, `pcr.crt` | `SignExpectedPcrKey=`/`SignExpectedPcrCertificate=`: `.pcrsig`/`.pcrpkey` in the UKI |
+| `layer.key`, `layer.crt` | Test Giant Swarm layer certificate: `LAYER_CERT`'s default, enrolled into the `.dm-verity` keyring by the initrd ([Layer certificates](#layer-certificates)); the key signs test container layers |
 | `gnupg/`, `import-pubring.pgp` | PGP key that signs `SHA256SUMS`; the public keyring is installed as `/etc/systemd/import-pubring.pgp` (systemd-pull executes `gpg` against it, which is why `gnupg` is in the image) |
 
 Keys are never committed. CI generates them per build; vm-manager only ever serves
@@ -685,15 +954,17 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    the ready-stage unit enabled in the root and the same binary size in the root erofs
    (`dump.erofs`).
 7. IPE: `lsm=` on the UKI cmdline starts `ipe`, `root-hash-signature=auto` is there,
-   `/etc/ipe/giantswarm-vm.p7b` in the root verifies against `keys/verity.crt` (which
-   `build/<id>_<v>.crt` is) and names policy `giantswarm-vm` at the image version with
-   `DEFAULT action=DENY`, the manager drop-in drops `CAP_MAC_ADMIN`, the exitrd's
+   the root has no `/etc/ipe`, the initrd's `/usr/lib/vm-manager/ipe/giantswarm-vm.p7b`
+   verifies against `keys/verity.crt` (which `build/<id>_<v>.crt` is), names policy
+   `giantswarm-vm` at the image version and holds exactly `DEFAULT action=DENY`, EXECUTE for
+   signed devices and every other operation pinned to the image's root hash,
+   `vm-ipe-policy.service` is required by `initrd.target` and fails closed, the manager drop-in drops `CAP_MAC_ADMIN`, the exitrd's
    `/shutdown` is a symlink, the initrd carries the dissect rule and the pinning in
    `persistent-etc`.
 8. `gpg --verify SHA256SUMS.gpg` with the dev public keyring and `sha256sum -c`.
 9. Writes `build/policy.json`.
 
-`make verify-kubernetes` (`scripts/verify-kubernetes`, offline, unprivileged):
+`make verify-kubernetes` and `make verify-cni` (`scripts/verify-sysext <component>`, offline, unprivileged; steps 6-8 per component, for cni: x86-64 plugins in `/usr/lib/cni` and besides them only sysctl drop-ins in `/usr/lib/sysctl.d`, the entry's plugins and its `cni.extra/<name>/` files present, the merge):
 
 1. GPT via `sfdisk --json`: root, root-verity, root-verity-sig and nothing else;
    root/verity partition UUIDs equal the halves of `kubernetes_<kv>.roothash`.
@@ -708,7 +979,8 @@ signed artifacts and never holds private keys. `make keys` is idempotent.
    `ARCHITECTURE`), `SYSEXT_SCOPE` includes `system`, `EXTENSION_RELOAD_MANAGER=1`.
 6. Binaries present; `kubeadm version`/`kubelet --version` (run from the extracted
    tree) report `<kv>`.
-7. Units, drop-ins, `containerd.toml` (parsed: `SystemdCgroup`, `bin_dirs`), preset,
+7. Units, drop-ins, `containerd.toml` (parsed: `SystemdCgroup`, `bin_dirs`, the EROFS
+   snapshotter and differ with signed dm-verity layers), preset,
    sysctl/tmpfiles files, and the base's modules-load/sysctl ordering drop-ins.
 8. Real merge: in an unprivileged user namespace (`unshare -Urm`, private mount
    namespace, `/run` on tmpfs for systemd's lock directory) the base tree is bind-mounted
@@ -889,8 +1161,8 @@ Kubernetes sysext:
   `modules-load.d`/`sysctl.d` files of the extension would race the merge.
 - `/opt` is excluded from the extension (`mkosi.postinst` removes the `cni-plugins`
   copy under `/opt/cni/bin`; `/usr/lib/cni` remains) so that `/opt/cni/bin` stays
-  writable for CNI DaemonSets. containerd searches `/opt/cni/bin` first, `/usr/lib/cni`
-  second.
+  writable for the copy CNI DaemonSets make. containerd searches `/usr/lib/cni` only:
+  a CNI's own plugin comes from its [CNI sysext](#cni-sysext).
 - The `iptables` package is already part of the base tree (`/usr/bin/iptables ->
   xtables-nft-multi`), so it leaves no files in the overlay delta; it stays in the
   package list to keep the extension self-describing.

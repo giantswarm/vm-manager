@@ -14,6 +14,7 @@
 //	<dir>/policy.json                            optional policy; applies to the image its image_id/image_version name
 //	<dir>/sysupdate/base/                        served at /sysupdate/base/ by the IMDS
 //	<dir>/sysupdate/kubernetes/SHA256SUMS        lists kubernetes_<kver>.raw, one per available version
+//	<dir>/sysupdate/cni/SHA256SUMS               lists cni_<cni>-<release>.raw, one per available CNI release
 //
 // An image is the pair of a UKI and a DDI with the same stem <id>_<version>;
 // a lone .efi or .raw is skipped with a warning. Image references accept the
@@ -28,6 +29,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,8 +48,13 @@ const (
 	SysupdateDirName = "sysupdate"
 	// KubernetesComponent is the sysupdate component carrying the Kubernetes sysext.
 	KubernetesComponent = "kubernetes"
-	kubernetesPrefix    = "kubernetes_"
-	sumsFile            = "SHA256SUMS"
+	// CNIComponent is the sysupdate component carrying the CNI sysexts, one
+	// per CNI release, versioned "<cni>-<release>" ("cilium-1.20.5").
+	CNIComponent = "cni"
+	// DefaultCNI is the CNI whose newest release a VM gets when it names
+	// none; an image without it offers its first CNI version instead.
+	DefaultCNI = "cilium"
+	sumsFile   = "SHA256SUMS"
 )
 
 // Image is one bootable base image.
@@ -65,6 +72,9 @@ type Image struct {
 	// KubernetesVersions are the sysext versions available under
 	// SysupdateDir/kubernetes, highest first.
 	KubernetesVersions []string `json:"kubernetesVersions,omitempty"`
+	// CNIVersions are the CNI sysext versions available under
+	// SysupdateDir/cni, "<cni>-<release>", highest first.
+	CNIVersions []string `json:"cniVersions,omitempty"`
 	// Policy is the image's PCR policy as written by `make verify-base`,
 	// nil when no policy is present.
 	Policy json.RawMessage `json:"policy,omitempty"`
@@ -80,12 +90,27 @@ func (i Image) Ref() string { return i.ID + "_" + i.Version }
 
 // HasKubernetesVersion reports whether the sysext for version is available.
 func (i Image) HasKubernetesVersion(version string) bool {
-	for _, v := range i.KubernetesVersions {
-		if v == version {
-			return true
+	return slices.Contains(i.KubernetesVersions, version)
+}
+
+// HasCNIVersion reports whether the CNI sysext for version is available.
+func (i Image) HasCNIVersion(version string) bool {
+	return slices.Contains(i.CNIVersions, version)
+}
+
+// DefaultCNIVersion is the CNI sysext a VM with Kubernetes gets when it
+// names none: the newest release of DefaultCNI, else the first CNI version,
+// empty when the image offers none.
+func (i Image) DefaultCNIVersion() string {
+	for _, v := range i.CNIVersions {
+		if strings.HasPrefix(v, DefaultCNI+"-") {
+			return v
 		}
 	}
-	return false
+	if len(i.CNIVersions) > 0 {
+		return i.CNIVersions[0]
+	}
+	return ""
 }
 
 // Catalog lists the images below one directory. It is safe for concurrent use.
@@ -129,7 +154,8 @@ func (c *Catalog) Refresh() error {
 	if err != nil {
 		return fmt.Errorf("read image dir: %w", err)
 	}
-	kversions := c.kubernetesVersions()
+	kversions := c.sysextVersions(KubernetesComponent)
+	cniVersions := c.sysextVersions(CNIComponent)
 	sysupdate := ""
 	if st, err := os.Stat(c.SysupdateDir()); err == nil && st.IsDir() {
 		sysupdate = c.SysupdateDir()
@@ -163,6 +189,7 @@ func (c *Catalog) Refresh() error {
 			Disk:               disk,
 			SysupdateDir:       sysupdate,
 			KubernetesVersions: kversions,
+			CNIVersions:        cniVersions,
 			Policy:             c.policy(id, version),
 			Certificate:        cert,
 		})
@@ -219,14 +246,15 @@ func (c *Catalog) Default() (Image, error) {
 	return best, nil
 }
 
-// kubernetesVersions reads the versions listed in the Kubernetes component's
-// SHA256SUMS, highest first.
-func (c *Catalog) kubernetesVersions() []string {
-	path := filepath.Join(c.SysupdateDir(), KubernetesComponent, sumsFile)
+// sysextVersions reads the versions of <component>_<version>.raw listed in
+// a sysext component's SHA256SUMS, highest first.
+func (c *Catalog) sysextVersions(component string) []string {
+	prefix := component + "_"
+	path := filepath.Join(c.SysupdateDir(), component, sumsFile)
 	data, err := os.ReadFile(path) // #nosec G304 -- path is derived from the configured image dir.
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			c.log.Warn("cannot read kubernetes SHA256SUMS", "path", path, "err", err)
+			c.log.Warn("cannot read SHA256SUMS", "component", component, "path", path, "err", err)
 		}
 		return nil
 	}
@@ -237,10 +265,10 @@ func (c *Catalog) kubernetesVersions() []string {
 			continue
 		}
 		file := strings.TrimPrefix(fields[len(fields)-1], "*")
-		if !strings.HasPrefix(file, kubernetesPrefix) || !strings.HasSuffix(file, diskSuffix) {
+		if !strings.HasPrefix(file, prefix) || !strings.HasSuffix(file, diskSuffix) {
 			continue
 		}
-		versions = append(versions, strings.TrimSuffix(strings.TrimPrefix(file, kubernetesPrefix), diskSuffix))
+		versions = append(versions, strings.TrimSuffix(strings.TrimPrefix(file, prefix), diskSuffix))
 	}
 	sort.Slice(versions, func(i, j int) bool { return CompareVersions(versions[i], versions[j]) > 0 })
 	return versions

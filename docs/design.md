@@ -119,8 +119,9 @@ sysext; [images/README.md](../images/README.md) is the reference):
     directory on var, `/root` and `/opt` bind mounts, before `initrd-root-fs.target`; an
     exitrd so that `systemd-shutdown` can release the overlays and unmount var cleanly.
   - IPE: `lsm=…,ipe` and `systemd.verity_root_options=root-hash-signature=auto` on the UKI
-    command line, the signed policy `/etc/ipe/giantswarm-vm.p7b` (run only from
-    kernel-verified dm-verity), a manager drop-in that drops `CAP_MAC_ADMIN` once PID 1
+    command line, the signed policy in the initrd (run only from kernel-verified
+    dm-verity; kernel modules, firmware and kexec only from the base root, by its root
+    hash), handed to the real root through `/run/ipe`, a manager drop-in that drops `CAP_MAC_ADMIN` once PID 1
     loaded it, and `persistent-etc` keeping both out of the `/etc` overlay's reach.
   - The initrd (mkosi sub-image) contains systemd-networkd, systemd-imdsd, `vm-agent` and
     Ignition with its `ignition-*` units ported from upstream's `dracut/30ignition`
@@ -195,7 +196,8 @@ Phase B, installed boot (every boot from now on):
    stages, which write CAPI's files and systemd units (kubeadm config, the kubeadm unit)
    into `/sysroot`, then the initrd switches root. A VM without user-data gets 204 and
    the stages run with an empty config.
-7. Real system: PID 1 first loads and activates the signed IPE policy from `/etc/ipe`
+7. Real system: PID 1 first loads and activates the signed IPE policy the initrd left in
+   `/run/ipe`
    and then drops `CAP_MAC_ADMIN` from every process's bounding set (the usermode
    helpers lost it on the kernel command line); from here on only code from
    kernel-verified dm-verity volumes runs (images/README.md, IPE). A reboot of the guest
@@ -203,21 +205,24 @@ Phase B, installed boot (every boot from now on):
    systemd-firstboot (machine-id, hostname, locale/timezone), networkd,
    then `vm-kubernetes.service` (base image, `After=network-online.target
    systemd-imds-import.service systemd-sysext.service systemd-tpm2-setup.service`, wanted
-   by `multi-user.target`) reads `/kubernetes-version` from the IMDS and runs
-   `systemd-sysupdate --component=kubernetes update <version>` (explicit version selection;
+   by `multi-user.target`) reads `/kubernetes-version` and `/cni-version` from the IMDS and runs
+   `systemd-sysupdate --component=kubernetes update <version>`, then `--component=cni` for
+   the CNI sysext (one per CNI release, `<cni>-<release>`, the only place CNI plugins
+   come from: containerd's `bin_dirs` is `/usr/lib/cni` alone) (explicit version selection;
    the artifact directory is served unfiltered because its `SHA256SUMS` is signed at build
-   time), removes any other `kubernetes_*.raw`, merges the extension with
+   time), removes any other `kubernetes_*.raw` and `cni_*.raw`, merges the extensions with
    `systemd-sysext refresh` (daemon-reload via `EXTENSION_RELOAD_MANAGER=1`, `Upholds=`
-   starts containerd and kubelet) and extends PCR 13 with `systemd-pcrextend` using the
-   file's `SHA256SUMS` line (`<sha256>  kubernetes_<version>.raw`), so the host predicts
-   PCR 13 from the artifact (`policy.json` `pcr13.<version>`, images/README.md). A VM
+   starts containerd and kubelet) and extends PCR 13 with `systemd-pcrextend` using each
+   file's `SHA256SUMS` line (`<sha256>  kubernetes_<version>.raw`, then the cni one), so
+   the host computes PCR 13 from the artifacts (`policy.json` `sysexts.<component>.<version>`,
+   images/README.md). A VM
    without a Kubernetes version skips the unit. CAPI's unit, ordered
    `After=vm-kubernetes.service`, runs `kubeadm init|join` and writes
    `/run/cluster-api/bootstrap-success.complete`. `vm-agent-attest.service` of the root
    (implemented: `images/mkosi.images/base`, `After=vm-kubernetes.service
    systemd-pcrphase.service`, `Before=multi-user.target`) runs `vm-agent attest
-   --stage=ready` and posts a second quote covering PCR 13 and the full phase path for
-   `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
+   --stage=ready` and posts a second quote covering PCRs 13 and 15 and the full phase path
+   for `get_vm_attestation`. `READY=1` (step 8) waits for `vm-kubernetes.service` and that
    quote; the e2e measures 14 s from the installed boot to ready with a 2 s download.
 8. PID 1 sends `READY=1` over vsock; `systemd-report upload` pushes metrics on a timer.
    Measured: 11 to 15 s from the installed boot to `READY=1` for the bare image, 11 s for a
@@ -239,11 +244,12 @@ closed it; the two without it are open and scheduled in [plan.md](plan.md).
   is the stub's cpio archive, which a host cannot predict from the artifact alone, and the
   206 MB would have to fit the 512 MB ESP before the first installed boot. Decided:
   `vm-kubernetes.service` extends PCR 13 itself after the merge with `systemd-pcrextend`
-  and the file's `SHA256SUMS` line. PCR 13 of a boot is then exactly two events,
-  "os-separator" (initrd, `systemd-pcrosseparator.service`) and that line, each
-  `PCR := sha256(PCR || sha256(word))`; `images/scripts/verify-kubernetes` writes the
-  result as `pcr13.<version>` into `policy.json`, `attest.SysextPCR` is the same rule in
-  Go, and the ready-stage verifier compares the VM's Kubernetes version against it,
+  and the file's `SHA256SUMS` line. PCR 13 of a boot is then exactly three events,
+  "os-separator" (initrd, `systemd-pcrosseparator.service`), the Kubernetes line and the
+  CNI line, each `PCR := sha256(PCR || sha256(word))`; `images/scripts/verify-sysext`
+  writes the published sha256 of every sysext as `sysexts.<component>.<version>` into
+  `policy.json`, and the ready-stage verifier computes the VM's Kubernetes x CNI pair
+  from them with `attest.SysextPCR` (one entry per sysext, never per pair),
   falling back to `golden.sha256.13` (a VM without Kubernetes: the os-separator value
   alone). Verified end to end by `e2e/kubernetes_sysext_test.go` against the vTPM.
   `vm-manager image golden` still records golden 13 from whatever VM it is pointed at;
@@ -335,10 +341,11 @@ table is the single source of truth and generates the hwdb record at image build
 | `/region`, `/zone` | `IMDS_KEY_REGION/ZONE` | host name, network name |
 | `/public-keys/0` | `IMDS_KEY_SSH_KEY` | first authorized key |
 | `/user-data` | none (Ignition's `ignition.config.url`) | CAPI bootstrap data as Ignition JSON; 503 + `Retry-After` while gated by attestation, 204 when the VM has none |
-| `/instance-id`, `/kubernetes-version`, `/metadata/<k>` | extra | plain values |
+| `/instance-id`, `/kubernetes-version`, `/cni-version`, `/metadata/<k>` | extra | plain values |
+| `/layer-certificates` | extra | the installation's layer certificates of `create_vm` as concatenated PEM in the caller's order; 404 when none |
 | `/attest/nonce`, `/attest/quote` | agent only | attestation protocol below |
 | `/report` | agent only | `systemd-report upload` sink |
-| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` |
+| `/sysupdate/<component>/` | sysupdate | `SHA256SUMS`, `SHA256SUMS.gpg`, artifacts; served unfiltered, the guest picks the version from `/kubernetes-version` and `/cni-version` |
 
 Attestation protocol: `GET /attest/nonce` returns 32 hex bytes valid 5 minutes.
 `POST /attest/quote` with JSON `{stage, nonce, ak_pub, ek_pub, quote, signature,
@@ -349,8 +356,24 @@ for the image's UKI and the stage's phase path (`enter-initrd` for `initrd`,
 `enter-initrd:leave-initrd:sysinit:ready` for `ready`), PCRs 0, 2-4, 6 and 7 equal the
 image policy's golden values recorded by `vm-manager image golden` (PCR 1 and 5 are quoted
 and recorded, not compared: see the open point below), and at `ready` PCR 13 equals the
-policy's `pcr13` entry for the VM's Kubernetes version (written by
-`images/scripts/verify-kubernetes`; golden 13 when the VM has none). Only the
+value computed from the policy's `sysexts` entries of the VM's Kubernetes and CNI
+versions (written by `images/scripts/verify-sysext`; golden 13 when the VM has none). The image's
+`policy.json` declares `"pcr15": "layer-certificates"` when its initrd measures layer
+certificates (`images/scripts/verify` writes it): the `ready` quote of such an image must
+cover PCR 15 whether or not the VM is served certificates, since the guest picks the PCRs
+it quotes and "none served" is proven as "none measured". An image whose policy lacks it
+predates layer certificates: it may leave PCR 15 out (the verdict says so) and is rejected
+when the VM is served certificates, which it cannot enroll. A quoted PCR 15 is always
+verified: the verifier replays the PCR 15 records of `userspace_log` (systemd's
+`/run/log/systemd/tpm2-measure.log`) to the quoted PCR 15. Every PCR 15 record is bound to
+its content before it is replayed: a systemd string record whose sha256 digest is the
+sha256 of its word, the word a `machine-id:`, `file-system:` or `layer-certificate:`
+measurement; any other record (another content type, a digest that is not its word's, an
+unknown word such as systemd-cryptsetup's HMAC of a volume key) rejects the quote. The
+`layer-certificate:<sha256 of the DER>` words must name exactly the certificates
+`/layer-certificates` serves, in order (none served, none measured); the initrd extends
+PCR 15 with one such word per certificate before it seals the `.dm-verity` keyring, and
+`get_vm_attestation` shows the digests the node measured (`ready.layerCertificates`). Only the
 `initrd` stage unlocks `/user-data`; the `ready` stage is recorded for `get_vm_attestation`. AK is trusted on first use in the prototype
 (vm-manager created the VM and its network seconds earlier); EK-certified AKs come later.
 
@@ -404,20 +427,21 @@ the MCP API. The user-data is Ignition 3.4.0 with two files and one enabled unit
 shape of CAPI's `bootstrap/kubeadm/internal/ignition/clc/templates`: `/etc/kubeadm.yml`
 (0640, the kubeadm config), `/etc/kubeadm.sh` (0700: `kubeadm init|join --config
 /etc/kubeadm.yml`, then `/run/cluster-api/bootstrap-success.complete`, then the config is
-moved to `/tmp`) and `kubeadm.service` (`Type=oneshot`,
-`ConditionPathExists=/etc/kubeadm.yml`, `After=network-online.target vm-kubernetes.service`,
+moved to `/tmp`) and `kubeadm.service` (`Type=oneshot`, `ExecStart=/bin/bash
+/etc/kubeadm.sh` as CAPI 1.14 writes it, `ConditionPathExists=/etc/kubeadm.yml`, `After=network-online.target vm-kubernetes.service`,
 `WantedBy=multi-user.target`). The kubeadm config is `kubeadm.k8s.io/v1beta4`: for the
 control plane `InitConfiguration` (`nodeRegistration.criSocket:
 unix:///run/containerd/containerd.sock`, `kubeletExtraArgs: [{name: provider-id, value:
-giantswarm-vm://cp-1}]`), `ClusterConfiguration` (`kubernetesVersion`, `networking.podSubnet:
-10.244.0.0/16`, the SANs above) and `KubeletConfiguration` (`cgroupDriver: systemd`); for
+giantswarm-vm://cp-1}]`), `ClusterConfiguration` (`kubernetesVersion`, `imageRepository:
+gsoci.azurecr.io/giantswarm`, `networking.podSubnet: 10.244.0.0/16`, the SANs above) and `KubeletConfiguration` (`cgroupDriver: systemd`); for
 the worker `JoinConfiguration` with `discovery.bootstrapToken` (`apiServerEndpoint:
 <cp ip>:6443`, the token and `caCertHashes` from `kubeadm token create
 --print-join-command` on the control plane) and the same `nodeRegistration`. Measured on
-the development host (several runs): the control plane is Ready with flannel and every pod
-running 85 to 115 s after its `create_vm` (kubeadm init about 55 s of that, image pulls
-included; installed boot to `READY=1` 69 s); the worker is Ready 46 to 52 s after its
-`create_vm` (kubeadm join 1.2 s); the whole test takes 2.5 to 3 min.
+the hosted e2e runner, on the IPE image with Cilium and every image signed: the control plane
+is Ready with every pod running 93 to 125 s after its `create_vm` (kubeadm init 17 to 24 s,
+installed boot to `READY=1` 34 to 48 s); the worker is Ready 71 to 121 s after its
+`create_vm` (kubeadm join about 2 s), most of it pulling Cilium; mirroring and signing the
+nine images on the host takes 22 to 60 s.
 
 What sysinstall/firstboot do not cover: writing CAPI's files and units (Ignition) and
 proving integrity before secrets are released (`vm-agent attest`).
@@ -426,7 +450,7 @@ proving integrity before secrets are released (`vm-agent attest`).
 
 Read-only: `get_info`, `get_host`, `list_images`, `get_image`, `list_networks`, `get_network`,
 `list_vms`, `get_vm`, `get_vm_console`, `get_vm_metrics`, `get_vm_attestation`.
-Writes: `create_network`, `delete_network`, `create_vm` (name, image, kubernetes_version,
+Writes: `create_network`, `delete_network`, `create_vm` (name, image, kubernetes_version, cni_version,
 cpus, memory_mib, disk_gib, network, user_data, ssh_authorized_keys, hostname, metadata,
 require_attestation, wait_for none|installed|attested|ready), `start_vm`, `stop_vm`,
 `reboot_vm`, `delete_vm`, `exec_vm`, `forward_port`. REST mirrors each under `/api/v1`.

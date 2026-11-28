@@ -22,6 +22,7 @@ import (
 
 	"github.com/giantswarm/vm-manager/internal/api"
 	"github.com/giantswarm/vm-manager/internal/images"
+	"github.com/giantswarm/vm-manager/internal/layercert/layercerttest"
 	"github.com/giantswarm/vm-manager/internal/vm"
 )
 
@@ -35,8 +36,10 @@ const (
 	podCIDR          = "10.244.0.0/16"
 	apiServerPort    = 6443
 	// controlPlaneMiB fits etcd, the API server and the controllers next
-	// to the CNI; the worker keeps the create_vm default.
-	controlPlaneMiB = 3072
+	// to the Cilium agent and operator; workerMiB the agent next to the
+	// workloads.
+	controlPlaneMiB = 4096
+	workerMiB       = 3072
 )
 
 // What CAPI's kubeadm bootstrap provider writes with format ignition
@@ -54,12 +57,11 @@ const (
 	adminKubeconfig   = "/etc/kubernetes/admin.conf"
 	kubectlInGuest    = "kubectl --kubeconfig " + adminKubeconfig
 	providerIDPrefix  = "giantswarm-vm://"
-	// flannelManifest is the CNI: its default pod network is podCIDR, and
-	// its DaemonSet installs the plugin binary into /opt/cni/bin, the bind
-	// mount from var of images/README.md "Persistent state".
-	// Pinned: releases/latest is a moving target and an unrelated flannel
-	// change must not fail this test.
-	flannelManifest = "https://github.com/flannel-io/flannel/releases/download/v0.28.9/kube-flannel.yml"
+	// ciliumManifestPath is where the rendered Cilium manifest is put on the
+	// control plane for kubectl apply.
+	ciliumManifestPath = "/run/vm-manager-e2e/cilium.yaml"
+	// ciliumConfList is the CNI configuration the Cilium agent writes.
+	ciliumConfList = "/etc/cni/net.d/05-cilium.conflist"
 	// corednsReadyPort is CoreDNS's ready plugin, reachable on the pod IP:
 	// the cross-node proof of the pod network needs no extra image.
 	corednsReadyPort = 8181
@@ -68,16 +70,18 @@ const (
 // Ceilings. The kubeadm unit is part of the boot transaction, so PID 1 sends
 // READY=1 only once kubeadm init or join finished; the server's boot timeout
 // (VM_MANAGER_BOOT_TIMEOUT, read by serve) must cover kubeadm init with its
-// image pulls from registry.k8s.io, or the VM is reported running instead of
-// ready. create_vm therefore waits for installed and the test follows the
-// bootstrap itself, with kubeadm's journal on a timeout.
+// signed image pulls, or the VM is reported running instead of ready.
+// create_vm therefore waits for installed and the test follows the bootstrap
+// itself, with kubeadm's journal on a timeout. clusterTestTimeout includes
+// mirroring and signing the images on the host.
 const (
-	clusterTestTimeout  = 15 * time.Minute
-	clusterBootTimeout  = 6 * time.Minute
+	clusterTestTimeout  = 35 * time.Minute
+	clusterBootTimeout  = 8 * time.Minute
 	installedBootWithin = 2 * time.Minute
-	bootstrapWithin     = 5 * time.Minute
-	cniReadyWithin      = 4 * time.Minute
-	joinWithin          = 4 * time.Minute
+	bootstrapWithin     = 7 * time.Minute
+	cniReadyWithin      = 6 * time.Minute
+	joinWithin          = 6 * time.Minute
+	workloadsWithin     = 4 * time.Minute
 	readyAfterBootstrap = time.Minute
 	clusterPollEvery    = 3 * time.Second
 	teardownWithin      = 2 * time.Minute
@@ -88,10 +92,11 @@ const (
 // KubeadmControlPlane renders, on kubeadm.k8s.io/v1beta4 (the API of kubeadm
 // 1.36, where kubeletExtraArgs is a list of name/value pairs): no
 // controlPlaneEndpoint (single control plane, the API server advertises the
-// VM's IP), the pod subnet flannel expects, SANs so the host can use the
-// admin kubeconfig through forward_port, the CRI socket of the sysext's
-// containerd, the providerID as a kubelet flag and the systemd cgroup driver
-// containerd.toml is configured for.
+// VM's IP), the images from gsoci as production pulls them, the pod subnet
+// of Cilium's cluster pool, SANs so the host can use the admin kubeconfig
+// through forward_port, the CRI socket of the sysext's containerd, the
+// providerID as a kubelet flag and the systemd cgroup driver containerd.toml
+// is configured for.
 const kubeadmInitConfig = `apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 nodeRegistration:
@@ -103,6 +108,7 @@ nodeRegistration:
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 kubernetesVersion: v%[3]s
+imageRepository: ` + gsociRepository + `
 networking:
   podSubnet: %[4]s
 apiServer:
@@ -138,29 +144,44 @@ var serverLine = regexp.MustCompile(`(?m)^(\s*server:\s*)https://\S+`)
 
 // TestKubernetesCluster bootstraps a Kubernetes cluster through the MCP API
 // from CAPI-shaped Ignition user-data: a control plane VM runs kubeadm init
-// at boot and reaches Ready with flannel, a worker VM joins with a token the
+// at boot and reaches Ready with Cilium, a worker VM joins with a token the
 // control plane issued, the host reaches the API server through forward_port
 // with the admin kubeconfig and sees both nodes Ready with their providerIDs,
 // and the pod network carries traffic between the nodes. It prints
 // cp_ready_seconds and worker_join_seconds, each from its create_vm.
 //
-// An image with an IPE policy (it ships <id>_<version>.crt) runs code only
-// from its signed dm-verity root and sysexts: no container starts from an
-// image layer on the var partition, so kubeadm's static pods and flannel
-// never run, and neither does CAPI's /etc/kubeadm.sh. The test skips such an
-// image until container images arrive as signed dm-verity layers
-// (images/README.md, IPE).
+// The image enforces IPE: containers run only from signed dm-verity layers
+// (images/README.md, containerd). The nodes pull from gsoci.azurecr.io as
+// production does, through a mirror on the e2e host (layerRegistry) holding
+// copies signed with the Giant Swarm layer key. On the worker, pods of
+// images built on the sandbox image's layer run: one signed with that key,
+// one with the installation's key (layer_certificates), one with the
+// installation's key again in a run of its own (signing like a KMS key,
+// with new signature bytes) and one of the sandbox's tar compressed again
+// (another index and root hash); each shared layer is one snapshot on the
+// node. An image signed by a key the node does not trust, pulled first, fails
+// at pull naming its layer, which the kernel refused, and an image signed with
+// the Giant Swarm key that shares the layer then pulls and runs; no dm-verity
+// device of either pull stays. A pod of an image with a layer its signatures
+// do not cover fails at pull, naming the layer; a file of the running signed
+// pod's layer is refused as a kernel module, firmware and kexec image.
 func TestKubernetesCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTestTimeout)
 	defer cancel()
 	requireHost(t)
 	kubectl := requireKubectl(t)
+	helm := requireTool(t, "helm")
+	requireTool(t, "mkfs.erofs")
 	image := locateImage(t)
-	if image.Certificate != "" {
-		t.Skip("e2e: the image enforces IPE, which runs no container from an unsigned image layer; a cluster needs container images as signed dm-verity layers (images/README.md, IPE)")
-	}
 	dir := stateDir(t)
 	_, testKey := generateSSHKey(t, dir)
+	giantSwarmKey := giantSwarmLayerKey(t, image)
+	installationCert := layercerttest.New(t, "vm-manager e2e installation layers")
+	installationKey := newLayerKey(t, []byte(installationCert.KeyPEM), []byte(installationCert.PEM)).kms()
+	// A key whose certificate no node trusts: neither the Giant Swarm key nor
+	// in layer_certificates.
+	untrustedCert := layercerttest.New(t, "vm-manager e2e untrusted layers")
+	untrustedKey := newLayerKey(t, []byte(untrustedCert.KeyPEM), []byte(untrustedCert.PEM))
 
 	t.Setenv("VM_MANAGER_BOOT_TIMEOUT", clusterBootTimeout.String())
 	// Attestation verifies by default; the shared image dir carries no golden
@@ -172,7 +193,14 @@ func TestKubernetesCluster(t *testing.T) {
 	require.NotEmpty(t, img.KubernetesVersions, "get_image lists no Kubernetes versions; run `make -C images kubernetes verify-kubernetes`")
 	version := img.KubernetesVersions[0]
 
-	c := &cluster{t: t, m: m, key: testKey, version: version}
+	// gsoci on the e2e host: every image the cluster runs, signed with the
+	// Giant Swarm key, and the workload images.
+	cilium := renderCilium(ctx, t, helm, version)
+	reg := startLayerRegistry(t, dir)
+	mirrored := reg.mirrorSigned(ctx, t, clusterImages(t, version, cilium), giantSwarmKey)
+	loads := reg.buildWorkloads(ctx, t, mirrored[sandboxImage], giantSwarmKey, installationKey, untrustedKey)
+
+	c := &cluster{t: t, m: m, key: testKey, version: version, layerCertificates: []string{installationCert.PEM}, files: []map[string]any{reg.hostsTOML()}}
 	t.Cleanup(c.teardown)
 	m.call(ctx, api.ToolCreateNetwork, map[string]any{"name": clusterNetwork, "cidr": clusterCIDR}, nil)
 	c.network = clusterNetwork
@@ -180,10 +208,10 @@ func TestKubernetesCluster(t *testing.T) {
 	// Control plane: kubeadm init at boot, then the CNI from inside.
 	cpStarted := time.Now()
 	initConfig := fmt.Sprintf(kubeadmInitConfig, containerdSocket, providerIDPrefix+controlPlaneName, version, podCIDR)
-	cp := c.createNode(ctx, controlPlaneName, controlPlaneMiB, capiIgnition(t, "init", initConfig))
+	cp := c.createNode(ctx, controlPlaneName, controlPlaneMiB, c.capiIgnition("init", initConfig))
 	cpg := c.bootstrapped(ctx, cp)
 	initSeconds := kubeadmSeconds(ctx, cpg)
-	applyCNI(ctx, t, cpg)
+	applyCilium(ctx, t, cpg, cilium)
 	waitClusterSettled(ctx, t, cpg, []string{controlPlaneName}, cniReadyWithin)
 	cpReady := time.Since(cpStarted)
 	cp = waitFor(ctx, t, m, cp.ID, readyAfterBootstrap, "ready after kubeadm init", func(v vm.VM) bool { return v.State == vm.StateReady })
@@ -194,7 +222,7 @@ func TestKubernetesCluster(t *testing.T) {
 	assert.Equal(t, net.JoinHostPort(cp.IP, strconv.Itoa(apiServerPort)), join.endpoint, "the API server advertises the control plane VM's IP")
 	workerStarted := time.Now()
 	joinConfig := fmt.Sprintf(kubeadmJoinConfig, join.endpoint, join.token, join.caCertHash, containerdSocket, providerIDPrefix+workerName)
-	w := c.createNode(ctx, workerName, 0, capiIgnition(t, "join", joinConfig))
+	w := c.createNode(ctx, workerName, workerMiB, c.capiIgnition("join", joinConfig))
 	wg := c.bootstrapped(ctx, w)
 	joinSeconds := kubeadmSeconds(ctx, wg)
 	waitClusterSettled(ctx, t, cpg, []string{controlPlaneName, workerName}, joinWithin)
@@ -211,6 +239,8 @@ func TestKubernetesCluster(t *testing.T) {
 	assertNodeHealthy(ctx, t, cpg, controlPlaneName)
 	assertNodeHealthy(ctx, t, wg, workerName)
 	assertPodNetwork(ctx, t, map[string]*guest{controlPlaneName: cpg, workerName: wg})
+	assertWorkloads(ctx, t, cpg, wg, loads)
+	assertLayerOnlyExecutes(ctx, t, wg)
 	assertReport(ctx, t, m, cp.ID)
 
 	c.teardown()
@@ -220,13 +250,17 @@ func TestKubernetesCluster(t *testing.T) {
 
 // cluster tracks what the test created so that teardown removes it on every
 // exit path; the VMs first (delete_network refuses while one is attached).
+// Every node gets layerCertificates (create_vm's layer_certificates) and
+// files in its user-data next to CAPI's.
 type cluster struct {
-	t       *testing.T
-	m       *mcpClient
-	key     string
-	version string
-	network string
-	vms     []string
+	t                 *testing.T
+	m                 *mcpClient
+	key               string
+	version           string
+	layerCertificates []string
+	files             []map[string]any
+	network           string
+	vms               []string
 }
 
 // createNode creates a VM on the cluster network with the image's Kubernetes
@@ -241,6 +275,7 @@ func (c *cluster) createNode(ctx context.Context, name string, memoryMiB int, us
 		"ssh_authorized_keys": []string{c.key},
 		"kubernetes_version":  c.version,
 		"user_data":           userData,
+		"layer_certificates":  c.layerCertificates,
 		// TODO: require_attestation true once the initrd attestation agent
 		// (vm-agent attest --stage=initrd) ships in the image; until then
 		// the IMDS would never release the user-data (TestIgnition, gated).
@@ -286,17 +321,23 @@ func (c *cluster) bootstrapped(ctx context.Context, v vm.VM) *guest {
 }
 
 // kubeadmDiagnostics is what a stuck or failed bootstrap should show: the
-// unit's state, the pending jobs and the end of the kubeadm journal, which
-// holds the preflight output.
+// unit's state, the pending jobs, the end of the kubeadm journal, which holds
+// the preflight output, the static pods' sandboxes and containers, and what
+// containerd, the kubelet, dm-verity and IPE said about them.
 var kubeadmDiagnostics = []string{
 	"systemctl show -p ActiveState -p SubState -p Result -p ExecMainStatus " + kubeadmUnit,
 	"systemctl list-jobs --no-pager --no-legend",
 	"systemctl is-active vm-kubernetes.service containerd.service kubelet.service",
 	"journalctl -b -o cat -u " + kubeadmUnit + " --no-pager",
+	"crictl pods; crictl ps -a",
+	"journalctl -b -o cat -u containerd.service --no-pager | grep -iE 'error|fail|verity|denied' | tail -n 25",
+	"journalctl -b -o cat -u kubelet.service --no-pager | grep -iE 'error|fail' | tail -n 25",
+	"journalctl -b -k -o cat --no-pager | grep -iE 'verity|erofs|ipe|denied|keyring' | tail -n 25",
+	"journalctl -b -o cat --no-pager | grep -F 'ipe_op=' | grep -F 'action=DENY' | tail -n 10",
 }
 
 // clusterDiagnostics is what a cluster that does not settle should show, from
-// the control plane: where the pods are, what CoreDNS, kube-proxy and flannel
+// the control plane: where the pods are, what CoreDNS, kube-proxy and Cilium
 // log and were told, whether the host reaches the CoreDNS pods and the
 // node's routes, rules, sysctls and modules behind that.
 var clusterDiagnostics = []string{
@@ -305,7 +346,9 @@ var clusterDiagnostics = []string{
 	kubectlInGuest + " -n kube-system logs -l k8s-app=kube-dns --tail=15 --prefix",
 	kubectlInGuest + " -n kube-system logs -l k8s-app=kube-dns --tail=15 --prefix --previous",
 	kubectlInGuest + " -n kube-system logs -l k8s-app=kube-proxy --tail=15 --prefix",
-	kubectlInGuest + " -n kube-flannel logs -l app=flannel --tail=15 --prefix",
+	kubectlInGuest + " -n kube-system describe pods -l k8s-app=cilium | grep -A 15 '^Events:'",
+	kubectlInGuest + " -n kube-system logs -l k8s-app=cilium --tail=15 --prefix",
+	kubectlInGuest + " -n kube-system logs -l name=cilium-operator --tail=15 --prefix",
 	"for ip in $(" + kubectlInGuest + " -n kube-system get pods -l k8s-app=kube-dns -o 'jsonpath={.items[*].status.podIP}'); do echo \"$ip: $(curl -sS --max-time 3 http://$ip:8080/health 2>&1)\"; done",
 	"ip -br addr; ip route; networkctl list --no-pager --no-legend",
 	"iptables -t nat -S KUBE-SERVICES 2>&1 | head -8; iptables -S FORWARD 2>&1 | head -8; nft list tables 2>&1",
@@ -345,13 +388,16 @@ func (c *cluster) teardown() {
 	}
 }
 
-// capiIgnition renders the Ignition v3.4.0 config CAPI's kubeadm bootstrap
-// provider emits for command (init or join) with kubeadmConfig: the two
-// files and the enabled kubeadm.service. The unit is ordered after
+// capiIgnition renders the Ignition v3.4.0 config CAPI 1.14's kubeadm
+// bootstrap provider emits for command (init or join) with kubeadmConfig:
+// the two files, c.files (a KubeadmConfig's files) and the enabled
+// kubeadm.service, which runs the script with bash: IPE executes nothing
+// from /etc, bash reads the script. The unit is ordered after
 // vm-kubernetes.service, which pulls and merges the sysext that brings
 // kubeadm, containerd and kubelet (docs/design.md, boot flow step 7); CAPI
 // users add that line through additionalConfig.
-func capiIgnition(t *testing.T, command, kubeadmConfig string) string {
+func (c *cluster) capiIgnition(command, kubeadmConfig string) string {
+	t := c.t
 	t.Helper()
 	script := "#!/bin/bash\nset -e\n" +
 		"kubeadm " + command + " --config " + kubeadmConfigPath + "\n" +
@@ -363,14 +409,14 @@ func capiIgnition(t *testing.T, command, kubeadmConfig string) string {
 		"Wants=network-online.target\n" +
 		"After=network-online.target vm-kubernetes.service\n\n" +
 		"[Service]\n# To not restart the unit when it exits, as it is expected.\n" +
-		"Type=oneshot\nExecStart=" + kubeadmScriptPath + "\n\n" +
+		"Type=oneshot\nExecStart=/bin/bash " + kubeadmScriptPath + "\n\n" +
 		"[Install]\nWantedBy=multi-user.target\n"
 	cfg := map[string]any{
 		"ignition": map[string]any{"version": "3.4.0"},
-		"storage": map[string]any{"files": []map[string]any{
+		"storage": map[string]any{"files": append([]map[string]any{
 			ignitionFile(kubeadmConfigPath, 0o640, kubeadmConfig),
 			ignitionFile(kubeadmScriptPath, 0o700, script),
-		}},
+		}, c.files...)},
 		"systemd": map[string]any{
 			"units": []map[string]any{{"name": kubeadmUnit, "enabled": true, "contents": unit}},
 		},
@@ -397,29 +443,13 @@ func kubeadmSeconds(ctx context.Context, g *guest) float64 {
 	return secs
 }
 
-// applyCNI installs flannel from inside the control plane with the admin
-// kubeconfig kubeadm wrote, and logs the image it runs.
-func applyCNI(ctx context.Context, t *testing.T, g *guest) {
+// applyCilium applies the rendered Cilium manifest from inside the control
+// plane with the admin kubeconfig kubeadm wrote, and logs the images it runs.
+func applyCilium(ctx context.Context, t *testing.T, g *guest, manifest string) {
 	t.Helper()
-	// The manifest comes from GitHub through the VM's NAT: retry a few times
-	// so a slow or flaky download does not fail the cluster test.
-	var out string
-	for attempt := 1; ; attempt++ {
-		res, err := g.run(ctx, kubectlInGuest+" apply -f "+flannelManifest)
-		if err == nil && res.ExitCode == 0 {
-			out = res.Stdout
-			break
-		}
-		if attempt == 3 {
-			require.NoError(t, err)
-			require.Zero(t, res.ExitCode, "kubectl apply flannel: %s%s", res.Stdout, res.Stderr)
-		}
-		t.Logf("kubectl apply flannel attempt %d failed (err=%v, exit %d): %s%s", attempt, err, res.ExitCode, res.Stdout, res.Stderr)
-		time.Sleep(10 * time.Second)
-	}
-	t.Logf("kubectl apply -f %s:\n%s", flannelManifest, out)
-	image := g.sh(ctx, kubectlInGuest+" -n kube-flannel get daemonset kube-flannel-ds -o 'jsonpath={.spec.template.spec.containers[0].image}'")
-	t.Logf("cni image: %s", image)
+	g.put(ctx, ciliumManifestPath, []byte(manifest))
+	t.Logf("kubectl apply -f %s:\n%s", ciliumManifestPath, g.sh(ctx, kubectlInGuest+" apply -f "+ciliumManifestPath))
+	t.Logf("cni images: %s", g.sh(ctx, kubectlInGuest+" -n kube-system get daemonset/cilium deployment/cilium-operator -o 'jsonpath={.items[*].spec.template.spec.containers[0].image}'"))
 }
 
 // waitClusterSettled polls the control plane until kubectl lists exactly the
@@ -579,8 +609,8 @@ func assertNodesFromHost(ctx context.Context, t *testing.T, kubectl, kubeconfig,
 
 // assertNodeHealthy checks a node after the bootstrap: the kubeadm unit
 // succeeded, the node stack runs, nothing failed, the sysctls kube-proxy and
-// the CNI rely on are set, and flannel could install into /opt/cni/bin and
-// /etc/cni/net.d.
+// the CNI rely on are set, the CNI sysext's plugin is merged and Cilium's
+// agent wrote its configuration into /etc/cni/net.d.
 func assertNodeHealthy(ctx context.Context, t *testing.T, g *guest, name string) {
 	t.Helper()
 	show := g.sh(ctx, "systemctl show -p ActiveState -p Result -p ExecMainStatus "+kubeadmUnit)
@@ -590,13 +620,14 @@ func assertNodeHealthy(ctx context.Context, t *testing.T, g *guest, name string)
 	assert.Empty(t, g.sh(ctx, "systemctl --failed --no-legend --plain"), "failed units on %s", name)
 	assert.Equal(t, "running", g.sh(ctx, "systemctl is-system-running || true"), "system state of %s", name)
 	assert.Equal(t, "1\n1", g.sh(ctx, "sysctl -n net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables"), "forwarding sysctls on %s", name)
-	assert.Equal(t, "installed", g.sh(ctx, "test -x /opt/cni/bin/flannel && test -s /etc/cni/net.d/10-flannel.conflist && echo installed"), "flannel's plugin and config on %s", name)
+	assert.Equal(t, "installed", g.sh(ctx, "test -x /usr/lib/cni/cilium-cni && test -s "+ciliumConfList+" && echo installed"), "the cni sysext's plugin and Cilium's config on %s", name)
 
 	// The CNI's links belong to the CNI (images/README.md,
 	// 70-kubernetes-cni.network): networkctl's columns are IDX LINK TYPE
-	// OPERATIONAL SETUP, and SETUP must be unmanaged for cni0, flannel.1
-	// and every pod veth, or networkd detaches the veths from the bridge.
-	links := g.sh(ctx, "networkctl list --no-legend --no-pager | grep -E '^ *[0-9]+ (cni|veth|flannel)' || true")
+	// OPERATIONAL SETUP, and SETUP must be unmanaged for cilium_host,
+	// cilium_net, cilium_vxlan and every pod's lxc veth, or networkd takes
+	// over links Cilium routes through.
+	links := g.sh(ctx, "networkctl list --no-legend --no-pager | grep -E '^ *[0-9]+ (cilium_|lxc)' || true")
 	require.NotEmpty(t, links, "CNI links on %s", name)
 	for _, row := range strings.Split(links, "\n") {
 		fields := strings.Fields(row)
@@ -608,7 +639,7 @@ func assertNodeHealthy(ctx context.Context, t *testing.T, g *guest, name string)
 
 // assertPodNetwork proves the pod network across nodes without another
 // image: CoreDNS runs on one node, and its ready endpoint answers on the pod
-// IP from the other node's host network, through flannel's vxlan.
+// IP from the other node's host network, through Cilium's vxlan.
 func assertPodNetwork(ctx context.Context, t *testing.T, guests map[string]*guest) {
 	t.Helper()
 	cp := guests[controlPlaneName]

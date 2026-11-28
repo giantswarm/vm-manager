@@ -47,19 +47,25 @@ below are the last full run on the development host.
 | `TestNetworkIMDS` | `vm-manager serve` as a child process through `/mcp`, the image directory without its sysupdate tree | `create_network`, `create_vm` with `wait_for: ready` and no Kubernetes version; hostname, ssh key and instance id from the IMDS; `is-system-running` clean, `vm-kubernetes.service` succeeded on the missing `/kubernetes-version`; `systemd-report` upload arrived; `forward_port` serves sshd; `delete_vm`, `delete_network`, SIGTERM leave no qemu or swtpm | `api_install_seconds`, `api_boot_to_ready_seconds` in the same range |
 | `TestIgnition` | MCP | user-data as Ignition JSON: the first installed boot applies its files and unit from the initrd stages, a reboot leaves Ignition idle | first installed boot |
 | `TestPersistentEtc` | MCP | a file and an enabled unit in `/etc` survive `reboot_vm`; host key and machine ID unchanged; var unmounted cleanly (no `recovering journal`); a reboot from inside the guest comes back ready as a new QEMU process | `reboot_to_ready_seconds=11` |
-| `TestKubernetesSysext` | MCP | `vm-kubernetes.service` pulls the sysext, merges it, containerd and kubelet up, PCR 13 equals `policy.json`, the root's and the sysext's verity devices verified by the kernel | `kubernetes_pull_seconds=2`, `kubernetes_unit_seconds=2.7` |
-| `TestIPE` | QEMU directly, as `TestInstallBoot`, with the image certificate in the VM's db | the IPE policy active and enforcing, the certificate on `.platform`, the root opened with its signature; a copy of an image binary does not run from `/var/tmp`, `/etc`, `/run`, `/tmp` or `/root`, nor does a script on var (bash reading it does); no `CAP_MAC_ADMIN` anywhere, usermode helpers included, so root can neither switch enforcement off (a core_pattern helper tries) nor load a policy; after a reboot that root prepared (the policy deleted from `/etc/ipe`, a manager drop-in restoring the capability) both are back to the image's, and var was unmounted cleanly through the exitrd | 42 s for install and two boots |
-| `TestAttestation` | three servers in turn: learn mode, verify with the recorded golden values, verify on `OVMF_CODE.secboot.4m.fd` | verified initrd and ready quotes, user-data applied, `golden_firmware` recorded; `golden mismatch` on PCR 0 and 7 with the other firmware, naming the recorded build, user-data gated, Ignition in its fetch loop | 111 s for the three |
-| `TestKubernetesCluster` | MCP plus the host's `kubectl` through `forward_port` 6443 | control plane from CAPI-shaped Ignition (`kubeadm init` ordered `After=vm-kubernetes.service`), flannel, a worker joined with a bootstrap token, two Ready nodes with `giantswarm-vm://` providerIDs, cross-node DNS, clean units and unmanaged CNI links | `cp_ready_seconds=85`, `worker_join_seconds=46`, 2.5 to 3 min in total |
+| `TestKubernetesSysext` | MCP | `vm-kubernetes.service` pulls the sysext, merges it, containerd and kubelet up, PCR 13 equals `policy.json`, the root's and the sysext's verity devices verified by the kernel, the Cilium CNI sysext's `cilium-cni` executes from `/usr/lib/cni`, cgroup2 is at `/sys/fs/cgroup` and its sysctl drop-in sets `rp_filter` 0 on `all` and on a new `lxc*` link; with IPE, a copy of `cilium-cni` in `/opt/cni/bin` is refused, a sysext file executes but is refused as a kernel module and firmware by IPE and as a kexec image (by `kexec_load_disabled`, before IPE) while the base root's modules load | `kubernetes_pull_seconds=2`, `kubernetes_unit_seconds=2.7` |
+| `TestIPE` | QEMU directly, as `TestInstallBoot`, with the image certificate in the VM's db | the IPE policy active and enforcing, the certificate on `.platform`, the root opened with its signature; a copy of an image binary does not run from `/var/tmp`, `/etc`, `/run`, `/tmp` or `/root`, nor does a script on var (bash reading it does); no `CAP_MAC_ADMIN` anywhere, usermode helpers included, so root can neither switch enforcement off (a core_pattern helper tries) nor load a policy; the policy, from the initrd's `/run/ipe`, pins every operation but EXECUTE to the image's root hash; the layer keyring flags on the command line, kexec off, the `.dm-verity` keyring sealed with the image's Giant Swarm layer certificate alone, a key from the root refused; after a reboot that root prepared (a mask for the policy in `/etc/ipe`, a manager drop-in restoring the capability) both are dropped, and var was unmounted cleanly through the exitrd | 42 s for install and two boots |
+| `TestAttestation` | three servers in turn: learn mode, verify with the recorded golden values (also a VM with two `layer_certificates`), verify on `OVMF_CODE.secboot.4m.fd` | verified initrd and ready quotes, user-data applied, `golden_firmware` recorded; both layer certificates and the Giant Swarm one in the sealed `.dm-verity` keyring, both digests in the ready verdict (PCR 15), a further `layer-certificate:` measurement from the root rejected by the verifier, naming the digest; `golden mismatch` on PCR 0 and 7 with the other firmware, naming the recorded build, user-data gated, Ignition in its fetch loop | 111 s for the three |
+| `TestKubernetesCluster` | MCP plus the host's `kubectl` through `forward_port` 6443 | on the IPE image: control plane from CAPI 1.14-shaped Ignition (`ExecStart=/bin/bash /etc/kubeadm.sh`, ordered `After=vm-kubernetes.service`), every image from gsoci through a mirror on the host holding copies signed with the build's key, Cilium from cilium-app, a worker joined with a bootstrap token, two Ready nodes with `giantswarm-vm://` providerIDs, cross-node DNS, clean units and unmanaged CNI links; on the worker a pod of an image signed with the Giant Swarm key (running as a user named in the image's `/etc/passwd`) and one signed with the installation's key (`layer_certificates`) run, every `containerd-erofs-*` dm-verity device backs a running container, an image with a layer outside its signatures fails at pull naming that layer, and a file of the running pod's layer is refused as a kernel module, firmware and kexec image | `cp_ready_seconds`, `worker_join_seconds`, `layer_registry_seconds` |
 
-`TestKubernetesCluster` skips an image with an IPE policy (one that ships `<id>_<version>.crt`):
-the policy runs no container, so neither the control plane's static pods nor flannel start
-([images/README.md](../images/README.md#ipe)). It returns with container images as signed
-dm-verity layers.
-
-`TestKubernetesCluster` needs `kubectl` on the host and internet access from the VMs
-(registry.k8s.io, ghcr.io, github.com for the flannel manifest) and raises
-`VM_MANAGER_BOOT_TIMEOUT` for its server because `READY=1` waits for the kubeadm unit.
+`TestKubernetesCluster` runs containers only from signed dm-verity layers
+([images/README.md](../images/README.md#containerd)). Before the first VM it renders
+cilium-app with `helm template`, copies the linux/amd64 manifest of every image kubeadm
+(`imageRepository: gsoci.azurecr.io/giantswarm`), the pinned sandbox and Cilium run from
+gsoci into a plain-HTTP registry it serves on the host's address, under the same paths,
+and signs each with `pkg/layersign` and the build's test Giant Swarm layer key
+(`keys/layer.{key,crt}`, enrolled into the `.dm-verity` keyring); the installation's
+workload is signed with a test key whose certificate goes to `create_vm` as
+`layer_certificates`. Ignition writes
+`/etc/containerd/certs.d/gsoci.azurecr.io/hosts.toml` with that registry as a mirror,
+the only host with the `referrers` capability: nodes find the signatures through its
+referrers API, as production nodes do on gsoci. It needs `kubectl`, `helm` and `mkfs.erofs` on the
+host, reaches gsoci from the host only, and raises `VM_MANAGER_BOOT_TIMEOUT` for its
+server because `READY=1` waits for the kubeadm unit.
 On failure the per-test state directory (consoles, TPM state, disks, the server log) is
 kept and its path printed; `VM_MANAGER_E2E_KEEP=1` keeps it after a pass too.
 
@@ -289,7 +295,7 @@ With `mcp-debug` or any MCP client, point it at `http://127.0.0.1:18080/mcp`.
   session (`ssh -i <state-dir>/vms/<id>/ssh_key -p <port> root@127.0.0.1`).
 - **Attestation.** `get_vm_attestation` shows both stages with the PCRs the agent quoted
   and the verifier's reason; compare against `policy.json` (`pcr11` per phase path,
-  `pcr13` per Kubernetes version, `golden.sha256`). A server in learn mode logs a warning
+  `sysexts` with the sha256 per Kubernetes and CNI sysext, `golden.sha256`). A server in learn mode logs a warning
   at startup and reports learned PCRs on the VM.
 - **e2e leftovers.** `VM_MANAGER_E2E_KEEP=1 make e2e` keeps every test's state directory
   (consoles, TPM state, disks, the server's log) and prints the path; without it only

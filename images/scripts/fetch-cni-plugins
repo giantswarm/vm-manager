@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Pull the plugins of one CNI release from the CNI's image and stage them as
+# the tree the cni sysext is built from (ExtraTrees= of
+# mkosi.images/cni/mkosi.conf):
+#
+#   fetch-cni-plugins <cni-version> <cache> <tree>
+#     <cache>/<digest>/<path>         the entry's files of the image, kept per digest
+#     <tree>/usr/lib/cni/<plugin>     every plugin of the entry, mode 0755
+#     <tree>/<file>                   every file of cni.extra/<name>, if any
+#
+# <cni-version> is "<name>-<release without v>" ("cilium-1.20.5"); cni/<name>
+# is the entry that pins the release, the image and its digest (see
+# cni/cilium). A version the entry does not pin is refused: the entry is the
+# one place a release is chosen. crane pulls the image by its digest and
+# checks the digest of every manifest and layer it reads, so the pinned digest
+# fixes the plugins' content; the tag must still name that digest, so a
+# release bumped without its digest fails here. The tree is recreated on every
+# run, so it holds exactly the files of this version.
+set -euo pipefail
+
+version="${1:?cni version (<name>-<release>)}" cache="${2:?cache dir}" tree="${3:?tree dir}"
+here="$(cd "$(dirname "$0")/.." && pwd)"
+name="${version%%-*}"
+entry="$here/cni/$name"
+extra="$here/cni.extra/$name"
+platform=linux/amd64
+fail() { echo "fetch-cni-plugins: $*" >&2; exit 1; }
+
+[[ "$name" != "$version" && -f "$entry" ]] || fail "no entry cni/$name for $version (entries: $(ls "$here/cni" | tr '\n' ' '))"
+release="" image="" digest="" plugins=""
+# shellcheck source=/dev/null
+. "$entry"
+[[ -n "$release" && -n "$image" && -n "$digest" && -n "$plugins" ]] || fail "cni/$name must set release, image, digest and plugins"
+[[ "$name-${release#v}" == "$version" ]] || fail "cni/$name pins $name-${release#v}, not $version"
+[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "cni/$name: digest must be sha256:<64 hex digits>, got '$digest'"
+command -v crane >/dev/null || fail "crane (go-containerregistry) is missing; scripts/install-build-deps installs it"
+
+members=()
+for p in $plugins; do members+=("${p%%:*}"); done
+cached="$cache/${digest#sha256:}"
+present=1
+for m in "${members[@]}"; do [[ -s "$cached/$m" ]] || present=0; done
+if ((present)); then
+        echo "fetch-cni-plugins: ${members[*]} of $image@$digest present"
+else
+        tagged="$(crane digest "$image:$release")" || fail "cannot resolve $image:$release"
+        [[ "$tagged" == "$digest" ]] || fail "$image:$release is $tagged, cni/$name pins $digest; a release bump changes both"
+        rm -rf "$cached" "$cached.part"
+        mkdir -p "$cached.part"
+        crane export --platform "$platform" "$image@$digest" - | tar -xf - -C "$cached.part" "${members[@]}" ||
+                fail "cannot export ${members[*]} from the $platform image of $image@$digest"
+        mv "$cached.part" "$cached"
+        echo "fetch-cni-plugins: exported ${members[*]} from the $platform image of $image@$digest"
+fi
+
+rm -rf "$tree"
+install -d "$tree/usr/lib/cni"
+for p in $plugins; do
+        member="${p%%:*}" plugin="${p##*:}"
+        install -m0755 "$cached/$member" "$tree/usr/lib/cni/${plugin##*/}"
+done
+for f in "$tree"/usr/lib/cni/*; do
+        file -b "$f" | /usr/bin/grep -q '^ELF 64-bit LSB .*x86-64' || fail "${f#"$tree"} is not an x86-64 ELF executable: $(file -b "$f")"
+done
+if [[ -d "$extra" ]]; then
+        cp -r "$extra/." "$tree/"
+fi
+echo "fetch-cni-plugins: $version: $(cd "$tree" && find . -type f | sed 's|^\.||' | sort | tr '\n' ' ')"

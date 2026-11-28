@@ -2,7 +2,11 @@ name: image
 
 # T2 of docs/design.md "Testing strategy": build the guest image and the
 # kubernetes sysext with mkosi and run the offline verification, then publish
-# images/build/ as the `guest-image` artifact that e2e.yml boots.
+# images/build/ as the `guest-image` artifact that e2e.yml boots, and the
+# build's development keys that sign test container images as the short-lived
+# `guest-image-test-keys`. This workflow builds for CI only: the release image
+# comes from the CircleCI guest-image job, which builds no layer key (LAYER_CERT=)
+# and uploads no key.
 #
 # The build runs inside an archlinux container: the image is Arch (mkosi 27,
 # systemd 261, erofs-utils, ukify, systemd-measure), the hosted Ubuntu runner
@@ -41,6 +45,10 @@ concurrency:
 env:
   # What e2e.yml downloads. Keep in sync with e2e.yml.
   ARTIFACT: guest-image
+  # This build's test Giant Swarm layer key for the e2e job: layer.key signs
+  # the container images of TestKubernetesCluster, layer.crt is the
+  # certificate the initrd enrolls. Keep in sync with e2e.yml.
+  KEYS_ARTIFACT: guest-image-test-keys
 
 jobs:
   build:
@@ -67,9 +75,11 @@ jobs:
         run: images/scripts/install-build-deps
 
       - name: Build keys, base image and every kubernetes sysext version; verify
-        # `make -C images` (all): keys, one mkosi run for base tree, disk
-        # image and the default sysext, the other KUBERNETES_VERSIONS, then
-        # verify-base and verify-kubernetes (which covers every published
+        # `make -C images` (all): keys, two mkosi runs (the IPE policy names
+        # the first one's root) for base tree, disk image and the default
+        # kubernetes and cni sysexts, the e2e tests' sysext, the other
+        # KUBERNETES_VERSIONS and CNI_VERSIONS, then verify-base,
+        # verify-kubernetes and verify-cni (which cover every published
         # version). The bind-mounted checkout belongs to the runner user, the
         # container runs as root: without safe.directory, git (Make's
         # rev-parse, Go's VCS stamping of vm-agent) refuses it with "dubious
@@ -102,8 +112,9 @@ jobs:
         # The build tree (base/), Ignition sources and the .initrd (inside the
         # UKI) stay out; the rest is what vm-manager serve and the e2e tests
         # read, the .crt included: without it in the VM's UEFI db the image's
-        # IPE policy does not load and the guest stops. Already compressed
-        # (erofs zstd), so no zip compression.
+        # IPE policy does not load and the guest stops; e2e/ is the tests'
+        # own sysext (scripts/build-e2e-sysext). Already compressed (erofs
+        # zstd), so no zip compression.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ARTIFACT }}
@@ -115,7 +126,18 @@ jobs:
             images/build/*.repart.d/
             images/build/policy.json
             images/build/sysupdate/
+            images/build/e2e/
           if-no-files-found: error
           compression-level: 0
           # Long enough for e2e.yml to reuse main's image between merges.
           retention-days: ${{ github.event_name == 'push' && 30 || 7 }}
+
+      - name: Upload the test keys
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.KEYS_ARTIFACT }}
+          path: |
+            images/keys/layer.key
+            images/keys/layer.crt
+          if-no-files-found: error
+          retention-days: 1

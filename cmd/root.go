@@ -43,7 +43,7 @@ tools from one process.`,
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
 	root.Version = build.Version
 	root.SetVersionTemplate("vm-manager version {{.Version}}\n")
-	root.AddCommand(newServeCmd(), newImageCmd(), newVersionCmd())
+	root.AddCommand(newServeCmd(), newImageCmd(), newLayersCmd(), newVersionCmd())
 	return root
 }
 

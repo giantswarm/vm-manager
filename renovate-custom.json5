@@ -20,8 +20,52 @@
       versioningTemplate: 'deb',
       registryUrlTemplate: 'https://archive.ubuntu.com/ubuntu?suite={{suite}}&components=main&binaryArch=amd64',
     },
+    {
+      // The CNI release a cni sysext is built from, one entry per CNI in
+      // images/cni/: the CNI's image tag and its digest, announced by the
+      // comment above them:
+      //   # renovate: datasource=docker
+      //   release=v1.20.5
+      //   image=gsoci.azurecr.io/giantswarm/cilium
+      //   digest=sha256:<64 hex digits>
+      // A bump replaces both, so the build exports the new release's plugins
+      // without a hand edit.
+      customType: 'regex',
+      description: 'CNI releases of the cni sysexts (images/cni/<name>)',
+      managerFilePatterns: ['/^images/cni/[^/]+$/'],
+      matchStrings: [
+        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+release=(?<currentValue>\\S+)\\s+image=(?<depName>\\S+)\\s+digest=(?<currentDigest>sha256:[0-9a-f]{64})',
+      ],
+    },
+    {
+      // The containerd release of the kubernetes sysext, an OCI artifact of
+      // the Giant Swarm line pinned by tag and digest in images/Makefile,
+      // announced by the comment above it:
+      //   # renovate: datasource=docker depName=gsoci.azurecr.io/giantswarm/containerd
+      //   CONTAINERD_IMAGE   := gsoci.azurecr.io/giantswarm/containerd:v2.4.2-gs.2@sha256:…
+      // Tag and digest are bumped together. The line's tags are the upstream
+      // release with a -gs.<n> suffix, compared as the build number rather
+      // than a pre-release.
+      customType: 'regex',
+      description: 'containerd release of the kubernetes sysext (images/Makefile)',
+      managerFilePatterns: ['/^images/Makefile$/'],
+      matchStrings: [
+        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s+\\w+\\s*:=\\s*[^:\\s]+:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})',
+      ],
+      versioningTemplate: 'regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-gs\\.(?<build>\\d+)$',
+    },
   ],
   packageRules: [
+    {
+      // A Cilium release can change what the host-binary init containers of
+      // its agent DaemonSet set up, which images/cni.extra/cilium ships
+      // instead (images/README.md, Cilium).
+      description: 'A Cilium bump checks the sysctl drop-in and the chart values of the cni sysext',
+      matchFileNames: ['images/cni/cilium'],
+      prBodyNotes: [
+        '**Check what IPE nodes provide instead of the chart.** Compare `tools/sysctlfix/main.go` of the new Cilium release with `images/cni.extra/cilium/usr/lib/sysctl.d/99-zzz-override_cilium.conf`, and the agent DaemonSet\'s init containers with the chart values in `images/README.md` (section Cilium).',
+      ],
+    },
     {
       // gvisor-tap-vsock is taken from main (a v0.8.9-0.<date>-<sha>
       // pseudo-version) for a gvisor that carries CVE-2026-96812's fix. v0.8.9

@@ -38,6 +38,8 @@ func imageDir(t *testing.T) string {
 	writeFile(t, filepath.Join(dir, "noversion.raw"), "ddi")
 	writeFile(t, filepath.Join(dir, SysupdateDirName, KubernetesComponent, sumsFile),
 		"aaaa  kubernetes_1.31.2.raw\nbbbb  kubernetes_1.32.0.raw\ncccc  SHA256SUMS.gpg\nmalformed\n")
+	writeFile(t, filepath.Join(dir, SysupdateDirName, CNIComponent, sumsFile),
+		"dddd  cni_cilium-1.19.4.raw\neeee  cni_calico-3.31.0.raw\nffff  cni_cilium-1.20.5.raw\n")
 	writeFile(t, filepath.Join(dir, "giantswarm-vm-base_0.9.0"+policySuffix), `{"image_version":"0.9.0","pcr11":{}}`)
 	writeFile(t, filepath.Join(dir, "giantswarm-vm-base_0.10.0"+certSuffix), "certificate")
 	writeFile(t, filepath.Join(dir, policyFile), `{"image_id":"giantswarm-vm-base","image_version":"0.10.0","pcr11":{"enter-initrd":"ab"}}`)
@@ -67,6 +69,12 @@ func TestCatalogScan(t *testing.T) {
 	assert.Equal(t, []string{"1.32.0", "1.31.2"}, img.KubernetesVersions)
 	assert.True(t, img.HasKubernetesVersion("1.31.2"))
 	assert.False(t, img.HasKubernetesVersion("1.30.0"))
+	assert.Equal(t, []string{"cilium-1.20.5", "cilium-1.19.4", "calico-3.31.0"}, img.CNIVersions)
+	assert.True(t, img.HasCNIVersion("calico-3.31.0"))
+	assert.False(t, img.HasCNIVersion("cilium-1.19"))
+	assert.Equal(t, "cilium-1.20.5", img.DefaultCNIVersion())
+	assert.Equal(t, "calico-3.31.0", Image{CNIVersions: []string{"calico-3.31.0"}}.DefaultCNIVersion(), "without cilium: the first cni")
+	assert.Empty(t, Image{}.DefaultCNIVersion())
 	assert.JSONEq(t, `{"image_id":"giantswarm-vm-base","image_version":"0.10.0","pcr11":{"enter-initrd":"ab"}}`, string(img.Policy))
 	assert.JSONEq(t, `{"image_version":"0.9.0","pcr11":{}}`, string(list[1].Policy), "per-image policy file wins")
 	assert.Nil(t, list[2].Policy, "policy.json names another version")

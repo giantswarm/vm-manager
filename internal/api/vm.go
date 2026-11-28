@@ -49,6 +49,7 @@ type CreateVMRequest struct {
 	Name               string            `json:"name"`
 	Image              string            `json:"image,omitempty"`
 	KubernetesVersion  string            `json:"kubernetes_version,omitempty"`
+	CNIVersion         string            `json:"cni_version,omitempty"`
 	CPUs               int               `json:"cpus,omitempty"`
 	MemoryMiB          int               `json:"memory_mib,omitempty"`
 	DiskGiB            int               `json:"disk_gib,omitempty"`
@@ -58,6 +59,7 @@ type CreateVMRequest struct {
 	Hostname           string            `json:"hostname,omitempty"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	RequireAttestation *bool             `json:"require_attestation,omitempty"`
+	LayerCertificates  []string          `json:"layer_certificates,omitempty"`
 	WaitFor            string            `json:"wait_for,omitempty"`
 }
 
@@ -68,6 +70,7 @@ func (r CreateVMRequest) spec(defaultNetwork string) vm.Spec {
 		Name:               r.Name,
 		Image:              r.Image,
 		KubernetesVersion:  r.KubernetesVersion,
+		CNIVersion:         r.CNIVersion,
 		CPUs:               r.CPUs,
 		MemoryMiB:          r.MemoryMiB,
 		DiskGiB:            r.DiskGiB,
@@ -75,6 +78,7 @@ func (r CreateVMRequest) spec(defaultNetwork string) vm.Spec {
 		SSHAuthorizedKeys:  r.SSHAuthorizedKeys,
 		Hostname:           r.Hostname,
 		Metadata:           r.Metadata,
+		LayerCertificates:  r.LayerCertificates,
 		RequireAttestation: true,
 		WaitFor:            vm.WaitFor(r.WaitFor),
 	}
