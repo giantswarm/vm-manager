@@ -81,7 +81,7 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 	// through the image's /etc/passwd, read from the layers' dm-verity
 	// devices.
 	uid := worker.sh(ctx, "cid=$(crictl ps -q --label io.kubernetes.pod.name="+podGiantSwarm+") && "+
-		"pid=$(crictl inspect -o go-template --template '{{.info.pid}}' \"$cid\") && awk '/^Uid:/{print $2}' /proc/$pid/status")
+		"pid=$(crictl inspect -o go-template --template '{{.info.pid}}' \"$cid\") && grep '^Uid:' /proc/$pid/status | cut -f2")
 	assert.Equal(t, workloadUID, uid, "the %s container runs as %s from the image's /etc/passwd", podGiantSwarm, workloadUser)
 	t.Logf("workload %s runs as %s: uid %s", podGiantSwarm, workloadUser, uid)
 	assertLayerDevices(ctx, t, worker)
@@ -93,16 +93,25 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 // read the image's /etc/passwd and /etc/group, and must close it again.
 func assertLayerDevices(ctx context.Context, t *testing.T, g *guest) {
 	t.Helper()
-	out := g.sh(ctx, `n=0; for d in $(dmsetup ls --target verity | awk '/^containerd-erofs-/{gsub(/[()]/,"",$2); print $1"="$2}'); do `+
-		`n=$((n+1)); name=${d%%=*}; majmin=${d#*=}; `+
-		`m=$(findmnt -rn -t erofs -o MAJ:MIN,TARGET | awk -v d="$majmin" '$1==d{print $2; exit}'); `+
+	// The image has no awk: shell, grep and coreutils only.
+	out := g.sh(ctx, `dmsetup ls --target verity | while read -r name dev; do case "$name" in containerd-erofs-*) `+
+		`majmin=${dev#(}; majmin=${majmin%)}; `+
+		`m=$(findmnt -rn -t erofs -o MAJ:MIN,TARGET | grep "^$majmin " | head -n 1 | cut -d' ' -f2); `+
 		`if [ -z "$m" ]; then echo "leftover $name: not mounted"; `+
-		`elif ! findmnt -rn -t overlay -o OPTIONS | grep -qF "$m"; then echo "leftover $name: $m is in no container's overlay"; fi; done; echo "devices=$n"`)
-	lines := strings.Split(out, "\n")
-	devices := lines[len(lines)-1]
-	assert.Empty(t, lines[:len(lines)-1], "containerd-erofs dm-verity devices that back no running container (%s)", devices)
-	assert.NotEqual(t, "devices=0", devices, "the running containers' layers are containerd-erofs dm-verity devices")
-	t.Logf("layer devices on the node: %s, each the lower layer of a running container", devices)
+		`elif findmnt -rn -t overlay -o OPTIONS | grep -qF "$m"; then echo "device $name: $m"; `+
+		`else echo "leftover $name: $m is in no container's overlay"; fi;; esac; done`)
+	var devices, leftover []string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "device "):
+			devices = append(devices, line)
+		case line != "":
+			leftover = append(leftover, line)
+		}
+	}
+	assert.Empty(t, leftover, "containerd-erofs dm-verity devices that back no running container")
+	assert.NotEmpty(t, devices, "the running containers' layers are containerd-erofs dm-verity devices")
+	t.Logf("layer devices on the node: %d, each the lower layer of a running container", len(devices))
 }
 
 // assertLayerOnlyExecutes takes a file of the running giant-swarm pod's own
