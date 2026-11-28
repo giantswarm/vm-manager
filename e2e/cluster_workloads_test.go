@@ -94,9 +94,8 @@ func assertWorkloads(ctx context.Context, t *testing.T, cp, worker *guest, w wor
 func assertLayerDevices(ctx context.Context, t *testing.T, g *guest) {
 	t.Helper()
 	// The image has no awk: shell, grep and coreutils only.
-	out := g.sh(ctx, `dmsetup ls --target verity | while read -r name dev; do case "$name" in containerd-erofs-*) `+
-		`majmin=${dev#(}; majmin=${majmin%)}; `+
-		`m=$(findmnt -rn -t erofs -o MAJ:MIN,TARGET | grep "^$majmin " | head -n 1 | cut -d' ' -f2); `+
+	out := g.sh(ctx, `dmsetup ls --target verity | while read -r name _; do case "$name" in containerd-erofs-*) `+
+		`m=$(findmnt -rn -t erofs -o SOURCE,TARGET | grep "^/dev/mapper/$name " | head -n 1 | cut -d' ' -f2); `+
 		`if [ -z "$m" ]; then echo "leftover $name: not mounted"; `+
 		`elif findmnt -rn -t overlay -o OPTIONS | grep -qF "$m"; then echo "device $name: $m"; `+
 		`else echo "leftover $name: $m is in no container's overlay"; fi;; esac; done`)
