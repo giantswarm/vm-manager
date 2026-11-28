@@ -63,7 +63,7 @@ KUBERNETES_MKOSI_ARGS := --volatile-package-directory=$(KUBERNETES_PKGS)
 # mkosi.conf; the sysext's mkosi.postinst refuses a build whose containerd
 # does not report CONTAINERD_VERSION (passed through Environment=).
 # renovate: datasource=docker depName=gsoci.azurecr.io/giantswarm/containerd
-CONTAINERD_IMAGE   := gsoci.azurecr.io/giantswarm/containerd:v2.4.2-gs.5@sha256:1ce43b60a88be342cf5a593726d408160b9c629b83548c2ac326b214b59768ca
+CONTAINERD_IMAGE   := gsoci.azurecr.io/giantswarm/containerd:v2.4.2-gs.7@sha256:55ad4e2fffe73ad041ac6965312480c92167ac277443062a877d064ec85f26e9
 CONTAINERD_VERSION := $(lastword $(subst :, ,$(firstword $(subst @, ,$(CONTAINERD_IMAGE)))))
 export CONTAINERD_VERSION
 CONTAINERD_CACHE   := $(BUILD)/containerd/$(CONTAINERD_VERSION)

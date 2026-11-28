@@ -13,8 +13,10 @@ version = 4
 # pull's own resolver on both CRI pull paths. A pull fails
 # for a layer without a signed referrer, naming it, and for data that does
 # not match the signed root hash; native EROFS layers are refused. The node
-# runs no mkfs.erofs. The kernel checks the signature when it opens a layer's
-# dm-verity device, and the IPE policy executes from signed devices only.
+# runs no mkfs.erofs. The kernel checks the signature before a layer becomes
+# a snapshot (the pull fails for one it refuses, naming the layer) and when it
+# opens a layer's dm-verity device for a mount, and the IPE policy executes
+# from signed devices only.
 [plugins.'io.containerd.cri.v1.images']
   snapshotter = 'erofs'
 

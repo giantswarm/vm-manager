@@ -517,14 +517,22 @@ Image layers run only from signed dm-verity devices (`containerd.toml`):
   with `incomplete dm-verity artifacts for layer <digest>: missing signature` (or the
   index or tree), and data that does not match with `layer <digest>: dm-verity root hash
   mismatch: data has <hex>, signed <hex>`. Native EROFS layers are refused.
+- Before a layer becomes a snapshot, containerd has the kernel check its signature: it
+  opens the layer's dm-verity device with the signature and removes it again. A
+  signature the kernel refuses, such as one by a key that is neither Giant Swarm's nor
+  in `layer_certificates`, fails the pull with `layer <digest>: dm-verity signature
+  <digest> not accepted by the kernel: …` and the kernel's reason, and nothing is kept.
+  The check costs one short-lived loop and dm-verity device per layer new to the node.
 - When a layer is mounted, containerd hands the signature to dm-verity, so the kernel
   checks it against its keys, and the [IPE](#ipe) policy executes from such devices.
 - Images that share a layer share its snapshot, however their referrers sign it: Giant
   Swarm's key and an installation's, a KMS key that signs differently on every run, or
   another root hash (an index of another erofs-utils, the same tar compressed again).
   The node keeps the layer as the first image unpacked it, with that image's signature,
-  which the kernel checks against exactly those bytes at every mount. Every image's
-  referrer must still cover each of its layers, unpacked already or not.
+  which the kernel accepted then and checks against exactly those bytes at every mount,
+  so an image signed by an untrusted key, pulled first, cannot break the images that
+  share its layers. Every image's referrer must still cover each of its layers,
+  unpacked already or not.
 
 The sandbox image is pinned to gsoci's (`gsoci.azurecr.io/giantswarm/pause:3.10.2`, the
 CRI's `pinned_images.sandbox`), where Giant Swarm publishes it with signed layers; the
